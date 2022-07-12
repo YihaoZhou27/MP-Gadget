@@ -31,7 +31,8 @@ INCL = densitykernel.h \
 	cosmology.h \
 	drift.h     \
 	fof.h  \
-	gravshort.h  \
+	gravshort.h \
+	sidm.h \
 	petaio.h  \
 	powerspectrum.h  \
 	timestep.h  \
@@ -101,7 +102,7 @@ GADGET_OBJS =  \
 	 treewalk.o cosmology.o \
 	 gravshort-tree.o gravshort-pair.o hydra.o  timefac.o \
 	 gravpm.o powerspectrum.o \
-	 forcetree.o \
+	 forcetree.o sidm.o \
 	 petapm.o gravity.o \
 	 densitykernel.o lightcone.o walltime.o\
 	 runtests.o \
