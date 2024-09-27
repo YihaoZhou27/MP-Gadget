@@ -517,6 +517,7 @@ blackhole_accretion_ngbiter(TreeWalkQueryBHAccretion * I,
     }
 
     int other = iter->base.other;
+    const int NonPeriodic = lv->tw->tree->NonPeriodic;    
     double r = iter->base.r;
     double r2 = iter->base.r2;
 
@@ -569,7 +570,14 @@ blackhole_accretion_ngbiter(TreeWalkQueryBHAccretion * I,
             MyFloat VelPred[3];
             DM_VelPred(other, VelPred, BH_GET_PRIV(lv->tw)->kf);
             for(d = 0; d < 3; d++){
-                dx[d] = NEAREST(I->base.Pos[d] - P[other].Pos[d], PartManager->BoxSize);
+                if(NonPeriodic){
+                    dx[d] = I->base.Pos[d] - P[other].Pos[d];
+                }
+                else{
+                    dx[d] = NEAREST(I->base.Pos[d] - P[other].Pos[d], PartManager->BoxSize);
+                }
+
+                
                 dv[d] = I->Vel[d] - VelPred[d];
                 /* we include long range PM force, short range force from the last long timestep and DF */
                 da[d] = (I->Accel[d] - P[other].FullTreeGravAccel[d] - P[other].GravPM[d] - BHP(other).DFAccel[d]);
