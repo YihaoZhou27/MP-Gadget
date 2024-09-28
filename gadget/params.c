@@ -24,6 +24,7 @@
 #include <libgadget/metal_return.h>
 #include <libgadget/uvbg.h>
 #include <libgadget/stats.h>
+#include <libgadget/ketju.h>
 
 static int
 BlackHoleFeedbackMethodAction (ParameterSet * ps, const char * name, void * data)
@@ -217,6 +218,7 @@ create_gadget_parameter_set()
     param_declare_int(ps, "BlackHoleOn", REQUIRED, 1, "Master switch to enable black hole formation and feedback. If this is on, type 5 particles are treated as black holes.");
     param_declare_int(ps, "MetalReturnOn", REQUIRED, 1, "Enable the return of metals from star particles to the gas.");
 
+    param_declare_int(ps, "CircumBinaryAccretion", OPTIONAL, 0, "wthether turns on the circumbinary accretion for the blackholes, only used in non-cosmological senarios by now.");
     param_declare_double(ps, "BlackHoleAccretionFactor", OPTIONAL, 100, "BH accretion boosting factor relative to the rate from the Bondi accretion model.");
     param_declare_double(ps, "BlackHoleEddingtonFactor", OPTIONAL, 2.1, "Maximum Black hole accretion as a function of Eddington.");
     param_declare_double(ps, "SeedBlackHoleMass", OPTIONAL, 2e-5, "Mass of initial black hole seed in internal mass units. If this is too much smaller than the gas particle mass, BH will not accrete.");
@@ -242,7 +244,7 @@ create_gadget_parameter_set()
     param_declare_double(ps, "BlackHoleFeedbackRadiusMaxPhys", OPTIONAL, 0, "Unused.");
     param_declare_int(ps,"WriteBlackHoleDetails",OPTIONAL, 0, "If set, output BH details at every time step.");
 
-    param_declare_int(ps,"BH_DynFrictionMethod",OPTIONAL, 1, "If set to non-zero, dynamical friction is applied through this method. Setting BH_DynFrictionMethod = 1, = 2, = 3 uses stars only (=1), dark matter + stars (=2), all mass (=3) to compute the DF force.");
+    param_declare_int(ps,"BH_DynFrictionMethod",OPTIONAL, 1, "If set to non-zero, dynamical friction is applied through this method. Setting BH_DynFrictionMethod = 1, = 2, = 3 uses stars only (=1), dark matter + stars (=2), all mass (=3) to compute the DF force. when ketju is on, this should be set to =4 (only gas and dark matter)");
     param_declare_int(ps,"BH_DFBoostFactor",OPTIONAL, 1, "If set, dynamical friction is boosted by this factor.");
     param_declare_double(ps,"BH_DFbmax",OPTIONAL, 20, "Maximum impact range for dynamical friction. We use 20 pkpc as default value.");
     param_declare_int(ps,"BH_DRAG",OPTIONAL, 1, "Add drag force to the BH dynamic");
@@ -381,6 +383,27 @@ create_gadget_parameter_set()
     param_set_action(ps, "StarformationCriterion", StarformationCriterionAction, NULL);
     param_set_action(ps, "OutputList", OutputListAction, NULL);
 
+
+    // ketju param
+    param_declare_int(ps, "KetjuOn", REQUIRED, 1, "Master switch to enable Ketju integrator.");
+    param_declare_double(ps, "KetjuMinimumBHMass", OPTIONAL, 0, "Minimum mass of BHs (`PartType5`) treated with Ketju dynamics (in code units).");
+    param_declare_double(ps, "KetjuRegionPhysicalRadius", OPTIONAL, 0.3, "The physical (i.e. *not* comoving) radius around each BH which is handled by the Ketju module.");
+    param_declare_double(ps, "KetjuOutputTimeInterval", OPTIONAL, 1e-6, "Upper limit of the physical time interval with which to write BH data to `ketju_BHs.hdf5`.");
+    param_declare_string(ps, "KetjuPNTerms", OPTIONAL, "all", "A string specifying which post-Newtonian corrections to include for BH systems.");
+    param_declare_int(ps, "KetjuBHMergerKicks", OPTIONAL, 0, "Whether to enable kicks from GW emission when BHs are merged");
+    param_declare_int(ps, "KetjuUseStarStarSoftening", OPTIONAL, 1, "Set to 1 to use softened interactions in star-star interactions in the Ketju regions, 0 for non-softened interactions.");
+    param_declare_double(ps, "KetjuExpandTightBinaries", OPTIONAL, 0, "Set to a non-zero value to artificially add energy to tight binary systems.");
+    param_declare_double(ps, "KetjuIntegrationRelativeTolerance", OPTIONAL, 1e-08, "Relative error tolerance of the GBS integrator used by Ketju.");
+    param_declare_double(ps, "KetjuOutputTimeRelativeTolerance", OPTIONAL, 1e-06, "Relative tolerance of the time iteration done by the integrator.");
+    param_declare_int(ps, "KetjuMinimumParticlesPerTask", OPTIONAL, 10, "A tuning parameter limiting the maximum number of tasks used even if more are available.");
+    param_declare_int(ps, "KetjuUseDnC", OPTIONAL, 0, "Set to 1 to enable a potentially faster coordinate tree construction algorithm");
+    param_declare_int(ps, "KetjuMaxTreeDistance", OPTIONAL, 2, "How many steps in the coordinate tree are allowed before switching to CoM coordinate calculations.");
+    param_declare_int(ps, "KetjuStepsBetweenMSTReconstruction", OPTIONAL, 20, "How many integrator steps are taken between reconstructions of the tree coordinate system.");
+    param_declare_int(ps, "KetjuIntegrateBinaryRegion", OPTIONAL, 0, "Set to 1 to swith on ketju only for regions hosting more than 1 blackholes.");
+    
+    param_declare_int(ps, "KetjuUseDMNonsoftening", OPTIONAL, 0, "Set to 0 to use softened interactions in dm-bh interactions in the Ketju regions, 1 for non-softened interactions.");
+
+
     return ps;
 }
 
@@ -434,6 +457,7 @@ void read_parameter_file(char *fname, int * ShowBacktrace, double * MaxMemSizePe
     set_winds_params(ps);
     set_fof_params(ps);
     set_blackhole_params(ps);
+    Ketju_set_ketju_params(ps);
     set_metal_return_params(ps);
     set_stats_params(ps);
     parameter_set_free(ps);

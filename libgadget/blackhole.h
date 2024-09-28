@@ -32,6 +32,9 @@ struct BHPriv {
     MyFloat * MgasEnc;
     /* mark the state of AGN kinetic feedback, 1 accumulate, 2 release */
     int * KEflag;
+    
+    /* Use to mark the of circumbinary pair*/
+    int * Binary_Accpair;
 
     /* Time factors*/
     double atime;

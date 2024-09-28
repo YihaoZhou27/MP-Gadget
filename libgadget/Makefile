@@ -39,6 +39,7 @@ INCL = densitykernel.h \
 	neutrinos_lra.h \
 	omega_nu_single.h \
 	uvbg.h \
+	ketju.h \
 utils/unitsystem.h \
 utils/peano.h \
 utils/interp.h \
@@ -110,7 +111,8 @@ GADGET_OBJS =  \
 	 neutrinos_lra.o \
      omega_nu_single.o \
 	 config.o \
-	 uvbg.o
+	 uvbg.o \
+	 ketju_interface.o
 
 GADGET_UTILS_OBJS= \
 utils/endrun.o \
@@ -128,12 +130,17 @@ utils/string.o \
 utils/spinlocks.o
 
 
-GADGET_OBJS := $(GADGET_OBJS:%=.objs/%)
+GADGET_OBJS := $(GADGET_OBJS:%=.objs/%) 
 GADGET_UTILS_OBJS := $(GADGET_UTILS_OBJS:%=.objs/%)
+
+
+
 
 all: libgadget.a libgadget-utils.a
 
 .PHONY: all test run-tests
+
+ketju_interface.o: $(KETJU_INTEGRATOR_DIR)/include/ketju_integrator/ketju_integrator.h
 
 .objs/utils/test_%: tests/test_%.c .objs/utils/%.o ../tests/stub.c ../tests/cmocka.c libgadget-utils.a
 	$(MPICC) $(TCFLAGS) -I../tests/ $^ $(LIBS) -o $@
@@ -185,8 +192,8 @@ test : build-tests
 libgadget-utils.a: $(GADGET_UTILS_OBJS)
 	$(AR) r $@ $(GADGET_UTILS_OBJS)
 
-libgadget.a: $(GADGET_OBJS)
-	$(AR) r $@ $(GADGET_OBJS)
+libgadget.a: $(GADGET_OBJS) $(KETJU_INTEGRATOR_DIR)/lib/libketju-integrator.a
+	$(AR) r $@ $(GADGET_OBJS) $(KETJU_INTEGRATOR_DIR)/lib/libketju-integrator.a
 
 clean:
 	rm -rf .objs libgadget.a libgadget-utils.a config.c
@@ -222,3 +229,4 @@ compile_commands.json: $(COMPDB_ENTRIES)
 	@echo "    }" >> $@
 	@echo "]" >> $@
 	@rm $@.tmp
+

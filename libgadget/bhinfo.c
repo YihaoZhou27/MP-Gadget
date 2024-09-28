@@ -29,6 +29,7 @@ struct __attribute__((__packed__)) BHinfo{
 
     MyIDType SPH_SwallowID;
     MyIDType SwallowID;
+    MyIDType Binary_Accpair;
 
     int CountProgs;
     int Swallowed;
@@ -70,7 +71,7 @@ collect_BH_info(int * ActiveBlackHoles, int NumActiveBlackHoles, struct BHPriv *
     report_memory_usage("BLACKHOLE");
 
     const int size = sizeof(struct BHinfo) - sizeof(infos[0].size1) - sizeof(infos[0].size2);
-
+    
     #pragma omp parallel for
     for(i = 0; i < NumActiveBlackHoles; i++)
     {
@@ -80,7 +81,7 @@ collect_BH_info(int * ActiveBlackHoles, int NumActiveBlackHoles, struct BHPriv *
         if(P[p_i].Type != 5)
             endrun(1, "Supposed BH %d of %d has type %d\n", p_i, NumActiveBlackHoles, P[p_i].Type);
         int PI = P[p_i].PI;
-
+        int k;
         struct BHinfo *info = &infos[i];
         info->size1 = size;
         info->size2 = size;
@@ -94,11 +95,24 @@ collect_BH_info(int * ActiveBlackHoles, int NumActiveBlackHoles, struct BHPriv *
         if(priv->MinPot) {
             info->MinPot = priv->MinPot[PI];
         }
-        info->BH_Entropy = priv->BH_Entropy[PI];
-        int k;
+        // devided by Density here since we didn't do this in the blackhole.c
+        if(BHP(p_i).Density>0){
+            info->BH_Entropy = priv->BH_Entropy[PI] / BHP(p_i).Density;
+            for(k=0; k < 3; k++) {
+                info->BH_SurroundingGasVel[k] = priv->BH_SurroundingGasVel[PI][k] / BHP(p_i).Density;
+                }
+            }
+        else{
+            info->BH_Entropy = priv->BH_Entropy[PI];
+            for(k=0; k < 3; k++) {
+                info->BH_SurroundingGasVel[k] = priv->BH_SurroundingGasVel[PI][k];
+                }
+            }
+
+        
         for(k=0; k < 3; k++) {
             info->MinPotPos[k] = BHP(p_i).MinPotPos[k] - PartManager->CurrentParticleOffset[k];
-            info->BH_SurroundingGasVel[k] = priv->BH_SurroundingGasVel[PI][k];
+            //info->BH_SurroundingGasVel[k] = priv->BH_SurroundingGasVel[PI][k];
             info->BH_accreted_momentum[k] = priv->BH_accreted_momentum[PI][k];
             info->BH_DragAccel[k] = BHP(p_i).DragAccel[k];
             info->BH_FullTreeGravAccel[k] = P[p_i].FullTreeGravAccel[k];
@@ -123,6 +137,7 @@ collect_BH_info(int * ActiveBlackHoles, int NumActiveBlackHoles, struct BHPriv *
 
         info->SPH_SwallowID = priv->SPH_SwallowID[PI];
         info->SwallowID =  BHP(p_i).SwallowID;
+        info->Binary_Accpair = BHP(p_i).Binary_Accpair;
         info->CountProgs = BHP(p_i).CountProgs;
         info->Swallowed =  P[p_i].Swallowed;
         /************************************************************************************************/

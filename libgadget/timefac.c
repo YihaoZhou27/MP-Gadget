@@ -65,6 +65,7 @@ static double get_exact_factor(Cosmology * CP, inttime_t t0, inttime_t t1, doubl
     */
         a0 = loga_from_ti(t0);
         a1 = loga_from_ti(t1);
+        //return (a1 - a0);
     }
     gsl_function F;
     gsl_integration_workspace *workspace;

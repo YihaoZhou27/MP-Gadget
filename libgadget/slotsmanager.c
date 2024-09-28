@@ -224,7 +224,6 @@ static int
 slots_gc_base(struct part_manager_type * pman)
 {
     int64_t total0, total;
-
     MPI_Allreduce(&pman->NumPart, &total0, 1, MPI_INT64, MPI_SUM, MPI_COMM_WORLD);
 
     /*Compactify the P array: this invalidates the ReverseLink, so
@@ -232,11 +231,10 @@ slots_gc_base(struct part_manager_type * pman)
     int64_t ngc = slots_gc_compact(pman->NumPart, -1, pman, NULL);
 
     pman->NumPart -= ngc;
-
     MPI_Allreduce(&pman->NumPart, &total, 1, MPI_INT64, MPI_SUM, MPI_COMM_WORLD);
 
     if(total != total0) {
-        message(0, "GC : Reducing Particle slots from %ld to %ld\n", total0, total);
+        message(0, "GC : Reducing Particle slots from %ld to %ld \n", total0, total);
         return 1;
     }
     return 0;

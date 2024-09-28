@@ -63,6 +63,10 @@ blackhole_dynfric_treemask(void)
         treemask += DMMASK;
     if(blackhole_dynfric_params.BH_DynFrictionMethod > 2)
         treemask += GASMASK;
+    if(blackhole_dynfric_params.BH_DynFrictionMethod > 3){
+        // this is for ketju
+        treemask = DMMASK;
+    }
     return treemask;
 }
 
@@ -189,7 +193,7 @@ blackhole_dynfric_ngbiter(TreeWalkQueryBHDynfric * I,
     double r2 = iter->base.r2;
 
     /* Collect Star/+DM/+Gas density/velocity for DF computation */
-    if(P[other].Type == 4 || (P[other].Type == 1 && blackhole_dynfric_params.BH_DynFrictionMethod > 1) ||
+    if((P[other].Type == 4 && blackhole_dynfric_params.BH_DynFrictionMethod < 4) || (P[other].Type == 1 && blackhole_dynfric_params.BH_DynFrictionMethod > 1) ||
         (P[other].Type == 0 && blackhole_dynfric_params.BH_DynFrictionMethod == 3) ){
         if(r2 < iter->dynfric_kernel.HH) {
             double u = r * iter->dynfric_kernel.Hinv;
@@ -252,7 +256,7 @@ blackhole_dynfric(int * ActiveBlackHoles, int64_t NumActiveBlackHoles, ForceTree
     }
 
     if(!(tree->mask & GASMASK) || !(tree->mask & STARMASK))
-        endrun(5, "Error: BH tree types GAS: %d STAR %d\n", tree->mask & GASMASK, tree->mask & STARMASK);
+        endrun(5, "Error: BH tree types GAS: %d STAR %d treemask %d \n", tree->mask & GASMASK, tree->mask & STARMASK, tree->mask);
 
     /*************************************************************************/
     /* Environment variables for DF */

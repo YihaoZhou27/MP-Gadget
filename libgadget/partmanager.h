@@ -13,6 +13,7 @@ struct particle_data
     float Mass;     /*!< particle mass */
     int PI; /* particle property index; used by BH, SPH and STAR.
                         points to the corresponding structure in (SPH|BH|STAR)P array.*/
+    int KetjuIntegrated;                        
     struct {
         unsigned int IsGarbage            :1; /* True for a garbage particle. readonly: Use slots_mark_garbage to mark this.*/
         unsigned int Swallowed            :1; /* True if the particle is being swallowed; used in BH to determine swallower and swallowee;*/
@@ -61,6 +62,11 @@ struct particle_data
      * to limit timesteps by density change. */
     MyFloat DtHsml;
     MyFloat Hsml;
+
+    MyFloat Spin[3];
+    MyFloat KetjuFinalVel[3];
+    MyFloat KetjuPotentialEnergyCorrection;
+
 
     /* These two are transient but hard to move
      * to private arrays because they need to travel

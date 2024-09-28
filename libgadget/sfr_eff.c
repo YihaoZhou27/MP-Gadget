@@ -177,7 +177,7 @@ void set_sfr_params(ParameterSet * ps)
 
 /* cooling and star formation routine.*/
 void
-cooling_and_starformation(ActiveParticles * act, double Time, double dloga, ForceTree * tree, struct grav_accel_store GravAccel, DomainDecomp * ddecomp, Cosmology *CP, MyFloat * GradRho, FILE * FdSfr)
+cooling_and_starformation(ActiveParticles * act, double Time, double dloga, ForceTree * tree, struct grav_accel_store GravAccel, DomainDecomp * ddecomp, Cosmology *CP, MyFloat * GradRho, FILE * FdSfr, double atime)
 {
     const int nthreads = omp_get_max_threads();
     /*This is a queue for the new stars and their parents, so we can reallocate the slots after the main cooling loop.*/
@@ -267,6 +267,7 @@ cooling_and_starformation(ActiveParticles * act, double Time, double dloga, Forc
                 } else {
                     newstar = starformation(p_i, &localsfr, &sm, GradRho, redshift, a3inv, hubble, CP->GravInternal, &GlobalUVBG);
                     sum_sm += P[p_i].Mass * (1 - exp(-sm/P[p_i].Mass));
+                    //message(1, "DEBUG...str_eff.c 270: inside the sfr: add part ID %ld (Type: %d), mass: %g, sm %g, add sum_sm %g \n", P[p_i].ID, P[i].Type, P[p_i].Mass, sm, sum_sm);
                 }
                 /*Add this particle to the stellar conversion queue if necessary.*/
                 if(newstar >= 0) {
@@ -333,6 +334,14 @@ cooling_and_starformation(ActiveParticles * act, double Time, double dloga, Forc
 
     int stars_converted = 0, stars_spawned = 0, stars_spawned_gravity = 0;
     int i;
+    
+    double new_sf_time;
+    if (CP->ComovingIntegrationOn) {
+        new_sf_time = Time;
+    }
+    else{
+        new_sf_time = atime;
+    }
 
     /*Now we turn the particles into stars*/
     #pragma omp parallel for schedule(static) reduction(+:stars_converted) reduction(+:stars_spawned) reduction(+:sum_mass_stars) reduction(+:stars_spawned_gravity)
@@ -340,7 +349,7 @@ cooling_and_starformation(ActiveParticles * act, double Time, double dloga, Forc
     {
         int child = NewStars[i];
         int parent = NewParents[i];
-        make_particle_star(child, parent, firststarslot+i, Time);
+        make_particle_star(child, parent, firststarslot+i, new_sf_time);
         sum_mass_stars += P[child].Mass;
         if(child == parent)
             stars_converted++;
@@ -382,7 +391,7 @@ cooling_and_starformation(ActiveParticles * act, double Time, double dloga, Forc
          * totsfrrate = current star formation rate in active particles in Msun/year,
          * rate_in_msunperyear = expected stellar mass formation rate in Msun/year from total_sm,
          * total_sum_mass_stars = actual mass of stars formed this timestep (discretized total_sm) */
-        fprintf(FdSfr, "%g %g %g %g %g\n", Time, total_sm, totsfrrate, rate_in_msunperyear,
+        fprintf(FdSfr, "%g %g %g %g %g\n", new_sf_time, total_sm, totsfrrate, rate_in_msunperyear,
                 total_sum_mass_stars);
         fflush(FdSfr);
     }
@@ -642,7 +651,11 @@ static int make_particle_star(int child, int parent, int placement, double Time)
     int retflag = 2;
     if(P[parent].Type != 0)
         endrun(7772, "Only gas forms stars, what's wrong?\n");
-
+    double old_vel[3];
+    int ii;
+    for(ii=0; ii<3; ii++){
+        old_vel[ii] = P[parent].Vel[ii];
+    }
     /*Store the SPH particle slot properties, as the PI may be over-written
      *in slots_convert*/
     struct sph_particle_data oldslot = SPHP(parent);
@@ -656,6 +669,18 @@ static int make_particle_star(int child, int parent, int placement, double Time)
     STARP(child).TotalMassReturned = 0;
     STARP(child).BirthDensity = oldslot.Density;
     STARP(child).VDisp = oldslot.VDisp;
+
+    // set ketju parameter
+    P[child].KetjuIntegrated = 0;
+    P[child].KetjuPotentialEnergyCorrection = 0;
+
+    for(ii=0; ii<3; ii++){
+        P[child].Spin[ii] = 0;
+        P[child].KetjuFinalVel[ii] = old_vel[ii];
+    }
+    //message(0, "DEBUG...sfr_eff.c 672 make_part_star: %d \n", P[child].ID);
+
+
     /*Copy metallicity*/
     STARP(child).Metallicity = oldslot.Metallicity;
     int j;

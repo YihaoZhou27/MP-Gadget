@@ -46,6 +46,8 @@ struct BlackholeParams
     /**********************************************************************/
     int MergeGravBound; /*if 1, apply gravitational bound criteria for BH mergers */
     int BH_DRAG; /*Hydro drag force*/
+    int CircumBinaryAccretion; /*circumbinary accreation*/
+    int KetjuOn;
 
     double SeedBHDynMass; /* The initial dynamic mass of BH particle */
 
@@ -63,6 +65,7 @@ BHGetRepositionEnabled(void)
 
 typedef struct {
     TreeWalkQueryBase base;
+    int Binary_pair;
     MyFloat Density;
     MyFloat Hsml;
     MyFloat Mass;
@@ -80,6 +83,7 @@ typedef struct {
     MyFloat BH_MinPot;
     int BH_minTimeBin;
     int encounter;
+    int Binary_Accpair;
     MyFloat FeedbackWeightSum;
 
     MyFloat SmoothedEntropy;
@@ -131,6 +135,8 @@ void set_blackhole_params(ParameterSet * ps)
         blackhole_params.SeedBlackHoleMass = param_get_double(ps, "SeedBlackHoleMass");
         blackhole_params.MaxSeedBlackHoleMass = param_get_double(ps,"MaxSeedBlackHoleMass");
         blackhole_params.SeedBlackHoleMassIndex = param_get_double(ps,"SeedBlackHoleMassIndex");
+        blackhole_params.CircumBinaryAccretion = param_get_int(ps,"CircumBinaryAccretion");
+        blackhole_params.KetjuOn = param_get_int(ps,"KetjuOn");
         /***********************************************************************************/
     }
     MPI_Bcast(&blackhole_params, sizeof(struct BlackholeParams), MPI_BYTE, 0, MPI_COMM_WORLD);
@@ -236,9 +242,9 @@ blackhole(const ActiveParticles * act, double atime, double time, Cosmology * CP
     /* Do nothing if no black holes*/
     int64_t totbh;
     MPI_Allreduce(&SlotsManager->info[5].size, &totbh, 1, MPI_INT64, MPI_SUM, MPI_COMM_WORLD);
+
     if(totbh == 0)
         return;
-
     walltime_measure("/Misc");
     /* Build the queue once, since it is really 'all black holes' and similar for all treewalks.*/
     int * ActiveBlackHoles = NULL;
@@ -259,12 +265,13 @@ blackhole(const ActiveParticles * act, double atime, double time, Cosmology * CP
     if(!tree->tree_allocated_flag)
     {
         message(0, "Building tree in blackhole\n");
-        int treemask = blackhole_dynfric_treemask();
-        treemask += GASMASK | BHMASK;
+        //int treemask = blackhole_dynfric_treemask();
+        //treemask |= GASMASK | BHMASK;
+        int treemask = GASMASK + DMMASK + STARMASK + BHMASK;
         force_tree_rebuild_mask(tree, ddecomp, treemask, NULL);
         walltime_measure("/BH/Build");
+        message(0,"DEBUG...bh.c 271 treemask %d \n", treemask);
     }
-
     struct kick_factor_data kf;
     init_kick_factor_data(&kf, times, CP);
 
@@ -272,6 +279,7 @@ blackhole(const ActiveParticles * act, double atime, double time, Cosmology * CP
     /*  Dynamical Friction Treewalk */
     /*************************************************************************/
     // Non-ComovingIntegration Note: atime=afac=1 when passed into this function
+    message(0, "DEBUG...bh.c 278 tree_allocated_flag %d tree_mask %d\n", tree->tree_allocated_flag, tree->mask);
     struct BHDynFricPriv dynpriv[1];
     dynpriv->atime = atime;
     dynpriv->CP = CP;
@@ -289,10 +297,16 @@ blackhole(const ActiveParticles * act, double atime, double time, Cosmology * CP
     priv->hubble = hubble_function(CP, atime);
     priv->CP = CP;
     priv->kf = &kf;
-
+    
     /* Let's determine which particles may be swallowed and calculate total feedback weights */
     priv->SPH_SwallowID = (MyIDType *) mymalloc("SPH_SwallowID", SlotsManager->info[0].size * sizeof(MyIDType));
     memset(priv->SPH_SwallowID, 0, SlotsManager->info[0].size * sizeof(MyIDType));
+
+    //SlotsManager->info[5].size>0)
+    priv->Binary_Accpair = (int *) mymalloc("Binary_Accpair", SlotsManager->info[5].size * sizeof(int));
+
+
+
 
     /* Computed in accretion, used in feedback*/
     priv->BH_FeedbackWeightSum = (MyFloat *) mymalloc("BH_FeedbackWeightSum", SlotsManager->info[5].size * sizeof(MyFloat));
@@ -362,14 +376,12 @@ blackhole(const ActiveParticles * act, double atime, double time, Cosmology * CP
     myfree(priv->BH_SurroundingGasVel);
     myfree(priv->BH_Entropy);
     myfree(priv->MinPot);
-
     myfree(priv->BH_FeedbackWeightSum);
+    myfree(priv->Binary_Accpair);
     myfree(priv->SPH_SwallowID);
-
     blackhole_dynpriv_free(dynpriv);
 
     myfree(ActiveBlackHoles);
-
     write_blackhole_txt(FdBlackHoles, units, time);
     walltime_measure("/BH/Info");
 }
@@ -379,39 +391,167 @@ blackhole_accretion_postprocess(int i, TreeWalk * tw)
 {
     int k;
     int PI = P[i].PI;
-    if(BHP(i).Density > 0)
-    {
-        BH_GET_PRIV(tw)->BH_Entropy[PI] /= BHP(i).Density;
-        for(k = 0; k < 3; k++)
-            BH_GET_PRIV(tw)->BH_SurroundingGasVel[PI][k] /= BHP(i).Density;
-    }
+    int pair_idx = -1;
+    
+    // if(BHP(i).Density > 0)
+    // {
+    //     BH_GET_PRIV(tw)->BH_Entropy[PI] /= BHP(i).Density;
+    //     for(k = 0; k < 3; k++)
+    //         BH_GET_PRIV(tw)->BH_SurroundingGasVel[PI][k] /= BHP(i).Density;
+    // }
 
     double mdot = 0;		/* if no accretion model is enabled, we have mdot=0 */
-
+    float Mass_ratio = 1;
     double rho = BHP(i).Density;
-    double bhvel = 0;
-    for(k = 0; k < 3; k++)
-        bhvel += pow(P[i].Vel[k] - BH_GET_PRIV(tw)->BH_SurroundingGasVel[PI][k], 2);
-
-    bhvel = sqrt(bhvel);
-    bhvel /= BH_GET_PRIV(tw)->atime;
-    double rho_proper = rho * BH_GET_PRIV(tw)->a3inv;
-
-    double soundspeed = blackhole_soundspeed(BH_GET_PRIV(tw)->BH_Entropy[PI], rho, BH_GET_PRIV(tw)->atime);
-
-    /* Note: we take here a radiative efficiency of 0.1 for Eddington accretion */
+    int num_part = SlotsManager->info[5].size;
+    double meddington_com = 0, mdot_com=0;
     double meddington = (4 * M_PI * GRAVITY * LIGHTCGS * PROTONMASS / (0.1 * LIGHTCGS * LIGHTCGS * THOMPSON)) * BHP(i).Mass
+    * BH_GET_PRIV(tw)->units.UnitTime_in_s / BH_GET_PRIV(tw)->CP->HubbleParam;
+
+
+    if(blackhole_params.CircumBinaryAccretion && BH_GET_PRIV(tw)->Binary_Accpair[PI] >= 0 ){
+
+        pair_idx = BH_GET_PRIV(tw)->Binary_Accpair[PI];
+        int pair_PI = P[pair_idx].PI;
+        
+        float com_gasvel[3];
+        float com_bhvel[3];
+        float rel_com_vel[3];
+        float M_bin = BHP(i).Mass + BHP(pair_idx).Mass;
+        float cs_com_2, rho_com_proper, entropy_com;
+        float v_rel_2 = 0;
+        
+        BHP(i).Binary_Accpair = P[pair_idx].ID;
+        message(1, "****Circumbinary Accretion start betweem BH %d and BH %d (%d) num_part:%d  \n", P[i].ID, P[pair_idx].ID, pair_idx, num_part);
+        
+
+
+        MyFloat VelPred[3];
+        SPH_VelPred(pair_idx, VelPred, BH_GET_PRIV(tw)->kf);
+        Mass_ratio = DMIN(BHP(i).Mass, BHP(pair_idx).Mass) / DMAX(BHP(i).Mass, BHP(pair_idx).Mass);
+
+        // We need to use the BH_Entropy and BH_SurroundingGasVel of the pair blackhole here. So we remove the code 
+        // of dividing by the density at the begining of the blackhole_accretion_postprocess, otherwise is not sure 
+        // whether we need to divide the density for the pair blackhole. 
+        // We move the divided by density part to "collect_BH_info" function i.e. output part
+        // As a results, we need a if-clause for every time the BH_Entropy/BH_SurroundingGasVel is used. 
+        if(rho > 0 && BHP(pair_idx).Density > 0){
+            entropy_com = (BHP(i).Mass * BH_GET_PRIV(tw)->BH_Entropy[PI] / rho +
+                 BHP(pair_idx).Mass * BH_GET_PRIV(tw)->BH_Entropy[pair_PI] / BHP(pair_idx).Density) / (BHP(i).Mass + BHP(pair_idx).Mass);
+
+            for(k = 0; k < 3; k++){
+                com_gasvel[k] = (BHP(i).Mass * BH_GET_PRIV(tw)->BH_SurroundingGasVel[PI][k] / rho + 
+                                BHP(pair_idx).Mass * BH_GET_PRIV(tw)->BH_SurroundingGasVel[pair_PI][k] / BHP(pair_idx).Density) / (BHP(i).Mass + BHP(pair_idx).Mass);
+                com_bhvel[k] = (BHP(i).Mass * P[i].Vel[k] + BHP(pair_idx).Mass * VelPred[k]) / (BHP(i).Mass + BHP(pair_idx).Mass);
+                rel_com_vel[k] = com_bhvel[k] - com_gasvel[k];
+                v_rel_2 += pow(rel_com_vel[k], 2);
+            }          
+
+        }
+        else if(rho > 0 && BHP(pair_idx).Density <= 0){
+            entropy_com = (BHP(i).Mass * BH_GET_PRIV(tw)->BH_Entropy[PI] / rho +
+             BHP(pair_idx).Mass * BH_GET_PRIV(tw)->BH_Entropy[pair_PI]) / (BHP(i).Mass + BHP(pair_idx).Mass);
+
+            for(k = 0; k < 3; k++){
+                com_gasvel[k] = (BHP(i).Mass * BH_GET_PRIV(tw)->BH_SurroundingGasVel[PI][k] / rho +
+                BHP(pair_idx).Mass * BH_GET_PRIV(tw)->BH_SurroundingGasVel[pair_PI][k]) / (BHP(i).Mass + BHP(pair_idx).Mass);
+                com_bhvel[k] = (BHP(i).Mass * P[i].Vel[k] + BHP(pair_idx).Mass * VelPred[k]) / (BHP(i).Mass + BHP(pair_idx).Mass);
+                rel_com_vel[k] = com_bhvel[k] - com_gasvel[k];
+                v_rel_2 += pow(rel_com_vel[k], 2);
+            }            
+
+        }
+        else if(rho <= 0 && BHP(pair_idx).Density <= 0){
+            entropy_com = (BHP(i).Mass * BH_GET_PRIV(tw)->BH_Entropy[PI] +
+             BHP(pair_idx).Mass * BH_GET_PRIV(tw)->BH_Entropy[pair_PI]) / (BHP(i).Mass + BHP(pair_idx).Mass);
+
+            for(k = 0; k < 3; k++){
+                com_gasvel[k] = (BHP(i).Mass * BH_GET_PRIV(tw)->BH_SurroundingGasVel[PI][k] / rho +
+                BHP(pair_idx).Mass * BH_GET_PRIV(tw)->BH_SurroundingGasVel[pair_PI][k]) / (BHP(i).Mass + BHP(pair_idx).Mass);
+                com_bhvel[k] = (BHP(i).Mass * P[i].Vel[k] + BHP(pair_idx).Mass * VelPred[k]) / (BHP(i).Mass + BHP(pair_idx).Mass);
+                rel_com_vel[k] = com_bhvel[k] - com_gasvel[k];
+                v_rel_2 += pow(rel_com_vel[k], 2);
+            }                 
+        }
+        else if(rho <= 0 && BHP(pair_idx).Density > 0){
+            entropy_com = (BHP(i).Mass * BH_GET_PRIV(tw)->BH_Entropy[PI] +
+             BHP(pair_idx).Mass * BH_GET_PRIV(tw)->BH_Entropy[pair_PI] / BHP(pair_idx).Density ) / (BHP(i).Mass + BHP(pair_idx).Mass);
+
+            for(k = 0; k < 3; k++){
+                com_gasvel[k] = (BHP(i).Mass * BH_GET_PRIV(tw)->BH_SurroundingGasVel[PI][k] +
+                BHP(pair_idx).Mass * BH_GET_PRIV(tw)->BH_SurroundingGasVel[pair_PI][k]/ BHP(pair_idx).Density) / (BHP(i).Mass + BHP(pair_idx).Mass);
+                com_bhvel[k] = (BHP(i).Mass * P[i].Vel[k] + BHP(pair_idx).Mass * VelPred[k]) / (BHP(i).Mass + BHP(pair_idx).Mass);
+                rel_com_vel[k] = com_bhvel[k] - com_gasvel[k];
+                v_rel_2 += pow(rel_com_vel[k], 2);
+            }          
+        }        
+        
+        
+        v_rel_2 /= pow(BH_GET_PRIV(tw)->atime, 2);
+
+        rho_com_proper = (BHP(i).Mass * BHP(i).Density + BHP(pair_idx).Mass * BHP(pair_idx).Density) / (BHP(i).Mass + BHP(pair_idx).Mass) * BH_GET_PRIV(tw)->a3inv;
+        cs_com_2 = pow(blackhole_soundspeed(entropy_com, rho_com_proper, BH_GET_PRIV(tw)->atime), 2);
+
+        meddington_com = (4 * M_PI * GRAVITY * LIGHTCGS * PROTONMASS / (0.1 * LIGHTCGS * LIGHTCGS * THOMPSON)) * M_bin
         * BH_GET_PRIV(tw)->units.UnitTime_in_s / BH_GET_PRIV(tw)->CP->HubbleParam;
+        
+        double com_norm = pow((cs_com_2 + v_rel_2), 1.5);
+        if(com_norm > 0){
+            mdot_com = 4. * M_PI * blackhole_params.BlackHoleAccretionFactor * BH_GET_PRIV(tw)->CP->GravInternal * BH_GET_PRIV(tw)->CP->GravInternal *
+            M_bin * M_bin * rho_com_proper / com_norm;}
 
-    double norm = pow((pow(soundspeed, 2) + pow(bhvel, 2)), 1.5);
 
-    if(norm > 0)
-        mdot = 4. * M_PI * blackhole_params.BlackHoleAccretionFactor * BH_GET_PRIV(tw)->CP->GravInternal * BH_GET_PRIV(tw)->CP->GravInternal *
-            BHP(i).Mass * BHP(i).Mass * rho_proper / norm;
+        if(blackhole_params.BlackHoleEddingtonFactor > 0.0 &&
+        mdot_com > blackhole_params.BlackHoleEddingtonFactor * meddington_com){
+            mdot_com = blackhole_params.BlackHoleEddingtonFactor * meddington_com;
+        }
+        
+        if(BHP(i).Mass < BHP(pair_idx).Mass){
+            mdot = mdot_com / (1.1 + 0.9 * Mass_ratio);
+        }
+        else{
+            mdot = mdot_com * (0.1 + 0.9 * Mass_ratio) / (1.1 + 0.9 * Mass_ratio);
+        }
 
-    if(blackhole_params.BlackHoleEddingtonFactor > 0.0 &&
-        mdot > blackhole_params.BlackHoleEddingtonFactor * meddington) {
-        mdot = blackhole_params.BlackHoleEddingtonFactor * meddington;
+
+
+    }
+    else{
+        BHP(i).Binary_Accpair = 0;
+
+        double bhvel = 0;
+        double rho_proper = rho * BH_GET_PRIV(tw)->a3inv;
+        double soundspeed;
+
+        if(rho > 0){
+            for(k = 0; k < 3; k++)
+                bhvel += pow(P[i].Vel[k] - BH_GET_PRIV(tw)->BH_SurroundingGasVel[PI][k] / rho, 2);
+
+            soundspeed = blackhole_soundspeed(BH_GET_PRIV(tw)->BH_Entropy[PI] / rho, rho, BH_GET_PRIV(tw)->atime);
+            }
+        else{
+            for(k = 0; k < 3; k++)
+                bhvel += pow(P[i].Vel[k] - BH_GET_PRIV(tw)->BH_SurroundingGasVel[PI][k], 2);
+
+            soundspeed = blackhole_soundspeed(BH_GET_PRIV(tw)->BH_Entropy[PI], rho, BH_GET_PRIV(tw)->atime);
+            }
+
+        bhvel = sqrt(bhvel);
+        bhvel /= BH_GET_PRIV(tw)->atime;
+
+
+        /* Note: we take here a radiative efficiency of 0.1 for Eddington accretion */
+
+        double norm = pow((pow(soundspeed, 2) + pow(bhvel, 2)), 1.5);
+
+        if(norm > 0)
+            mdot = 4. * M_PI * blackhole_params.BlackHoleAccretionFactor * BH_GET_PRIV(tw)->CP->GravInternal * BH_GET_PRIV(tw)->CP->GravInternal *
+                BHP(i).Mass * BHP(i).Mass * rho_proper / norm;
+
+        if(blackhole_params.BlackHoleEddingtonFactor > 0.0 &&
+            mdot > blackhole_params.BlackHoleEddingtonFactor * meddington) {
+            mdot = blackhole_params.BlackHoleEddingtonFactor * meddington;
+        }
     }
     BHP(i).Mdot = mdot;
 
@@ -419,6 +559,9 @@ blackhole_accretion_postprocess(int i, TreeWalk * tw)
     message(1, "******** BHacc check hubble=%g, dtime=%g *******\n", BH_GET_PRIV(tw)->hubble, dtime);
     message(1, "******** BHacc check mdot=%g, dtime=%g *******\n", mdot, dtime);
     BHP(i).Mass += BHP(i).Mdot * dtime;
+
+    
+
 
     /*************************************************************************/
 
@@ -428,12 +571,31 @@ blackhole_accretion_postprocess(int i, TreeWalk * tw)
         /*c.f.section 3.2,in http://www.tapir.caltech.edu/~phopkins/public/notes_blackholes.pdf */
         double fac = 0;
         if (blackhole_params.BH_DRAG == 1) fac = BHP(i).Mdot/P[i].Mass;
-        if (blackhole_params.BH_DRAG == 2) fac = blackhole_params.BlackHoleEddingtonFactor * meddington/BHP(i).Mass;
+        if ((blackhole_params.BH_DRAG == 2 && blackhole_params.CircumBinaryAccretion == 0)||
+            (blackhole_params.BH_DRAG == 2 && blackhole_params.CircumBinaryAccretion == 1 && BH_GET_PRIV(tw)->Binary_Accpair[PI] < 0) ){
+                 fac = blackhole_params.BlackHoleEddingtonFactor * meddington/BHP(i).Mass;
+            }
+        if (blackhole_params.BH_DRAG == 2 && blackhole_params.CircumBinaryAccretion == 1 && BH_GET_PRIV(tw)->Binary_Accpair[PI] >= 0){
+            if(BHP(i).Mass < BHP(pair_idx).Mass){
+                fac = blackhole_params.BlackHoleEddingtonFactor * meddington_com/BHP(i).Mass/ (1.1 + 0.9 * Mass_ratio);}
+            else{
+                fac = blackhole_params.BlackHoleEddingtonFactor * meddington_com/BHP(i).Mass/ (1.1 + 0.9 * Mass_ratio)* (0.1 + 0.9 * Mass_ratio);}
+            }
+            
         fac *= BH_GET_PRIV(tw)->atime; /* dv = acc * kick_fac = acc * a^{-1}dt, therefore acc = a*dv/dt  */
-        for(k = 0; k < 3; k++) {
-            BHP(i).DragAccel[k] = -(P[i].Vel[k] - BH_GET_PRIV(tw)->BH_SurroundingGasVel[PI][k])*fac;
-        }
-    }
+
+        if(rho > 0){
+            for(k = 0; k < 3; k++) {
+                BHP(i).DragAccel[k] = -(P[i].Vel[k] - BH_GET_PRIV(tw)->BH_SurroundingGasVel[PI][k] / rho)*fac;
+                }
+            }
+        else{
+            for(k = 0; k < 3; k++) {
+                BHP(i).DragAccel[k] = -(P[i].Vel[k] - BH_GET_PRIV(tw)->BH_SurroundingGasVel[PI][k])*fac;
+                }
+            }
+
+        }   
     else{
         for(k = 0; k < 3; k++){
             BHP(i).DragAccel[k] = 0;
@@ -446,9 +608,16 @@ blackhole_accretion_postprocess(int i, TreeWalk * tw)
         /* epsilon = Min(rho_BH/(BHKE_EffRhoFactor*rho_sfr),BHKE_EffCap)   */
         /* KE is released when exceeding injection energy threshold        */
         BH_GET_PRIV(tw)->KEflag[PI] = 0;
-        double Edd_ratio = BHP(i).Mdot/meddington;
+        double Edd_ratio;
         double lam_thresh = blackhole_params.BHKE_EddingtonThrFactor;
         double x = blackhole_params.BHKE_EddingtonMFactor * pow(BHP(i).Mass/blackhole_params.BHKE_EddingtonMPivot, blackhole_params.BHKE_EddingtonMIndex);
+
+        if(blackhole_params.CircumBinaryAccretion == 1 && BH_GET_PRIV(tw)->Binary_Accpair[PI] >= 0)
+            Edd_ratio = mdot_com/meddington_com;
+        else
+            Edd_ratio = BHP(i).Mdot/meddington;
+
+
         if (lam_thresh > x)
             lam_thresh = x;
         if (Edd_ratio < lam_thresh){
@@ -483,6 +652,7 @@ blackhole_accretion_preprocess(int n, TreeWalk * tw)
      * when the number of active particles is less than the total number of particles
      * (because then the tree does not contain all forces). */
     BH_GET_PRIV(tw)->MinPot[P[n].PI] = P[n].Potential;
+    BH_GET_PRIV(tw)->Binary_Accpair[P[n].PI] = -1;
 
     for(j = 0; j < 3; j++) {
         BHP(n).MinPotPos[j] = P[n].Pos[j];
@@ -500,6 +670,7 @@ blackhole_accretion_ngbiter(TreeWalkQueryBHAccretion * I,
     if(iter->base.other == -1) {
         O->BH_minTimeBin = TIMEBINS;
         O->encounter = 0;
+        O->Binary_Accpair = -1;
 
         O->BH_MinPot = BHPOTVALUEINIT;
 
@@ -517,7 +688,6 @@ blackhole_accretion_ngbiter(TreeWalkQueryBHAccretion * I,
     }
 
     int other = iter->base.other;
-    const int NonPeriodic = lv->tw->tree->NonPeriodic;    
     double r = iter->base.r;
     double r2 = iter->base.r2;
 
@@ -559,7 +729,7 @@ blackhole_accretion_ngbiter(TreeWalkQueryBHAccretion * I,
         if(blackhole_params.BlackHoleRepositionEnabled == 1) // directly merge if reposition is enabled
             flag = 1;
         if(blackhole_params.MergeGravBound == 0)
-            flag = 1;
+            flag = 0;
         /* apply Grav Bound check only when Reposition is disabled, otherwise BHs would be repositioned to the same location but not merge */
         if(blackhole_params.MergeGravBound == 1 && blackhole_params.BlackHoleRepositionEnabled == 0){
 
@@ -570,14 +740,7 @@ blackhole_accretion_ngbiter(TreeWalkQueryBHAccretion * I,
             MyFloat VelPred[3];
             DM_VelPred(other, VelPred, BH_GET_PRIV(lv->tw)->kf);
             for(d = 0; d < 3; d++){
-                if(NonPeriodic){
-                    dx[d] = I->base.Pos[d] - P[other].Pos[d];
-                }
-                else{
-                    dx[d] = NEAREST(I->base.Pos[d] - P[other].Pos[d], PartManager->BoxSize);
-                }
-
-                
+                dx[d] = NEAREST(I->base.Pos[d] - P[other].Pos[d], PartManager->BoxSize);
                 dv[d] = I->Vel[d] - VelPred[d];
                 /* we include long range PM force, short range force from the last long timestep and DF */
                 da[d] = (I->Accel[d] - P[other].FullTreeGravAccel[d] - P[other].GravPM[d] - BHP(other).DFAccel[d]);
@@ -586,6 +749,10 @@ blackhole_accretion_ngbiter(TreeWalkQueryBHAccretion * I,
             /*if(flag == 0)
                 message(0, "dx %g %g %g dv %g %g %g da %g %g %g\n",dx[0], dx[1], dx[2], dv[0], dv[1], dv[2], da[0], da[1], da[2]);*/
         }
+
+        // lift the merge for the Ketju
+        if(blackhole_params.KetjuOn)
+            flag = 0;
 
         /* do the merge */
         if(flag == 1)
@@ -615,6 +782,69 @@ blackhole_accretion_ngbiter(TreeWalkQueryBHAccretion * I,
             } while(!__atomic_compare_exchange_n(&(BHP(other).SwallowID), &readid, newswallowid, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
         }
     }
+
+
+    /* Set up the circumbinary accretion.  Now we turn on circumbinary accretion for all the BH pairs that within soomthing length.
+    * calculate the total M_dot here, and save the mass for anothere pair blackhole for the postprocess.
+    * By now, this feature only availble for idealized galaxy runs. And we only consider binary merge (not multiple bh).
+    * TODO: the density of CoM (now it's the average of the two blackholes)
+    * here we only label the circumbinary flag for the "other" particle (?)
+    */
+    if(P[other].Type == 5 && blackhole_params.CircumBinaryAccretion == 1)
+    {   
+        //message(1, "****DEBUG bh.c 688 %d, %d \n", SlotsManager->info[5].size, other);
+        // using the grav bond criteria as the binary-accretion switch on criteria 
+
+        double dx[3];
+        double dv[3];
+        double da[3];
+        int d;
+        int circum_flag = 0;
+        MyFloat VelPred[3];
+        DM_VelPred(other, VelPred, BH_GET_PRIV(lv->tw)->kf);
+        for(d = 0; d < 3; d++){
+            dx[d] = NEAREST(I->base.Pos[d] - P[other].Pos[d], PartManager->BoxSize);
+            dv[d] = I->Vel[d] - VelPred[d];
+            /* we include long range PM force, short range force from the last long timestep and DF */
+            da[d] = (I->Accel[d] - P[other].FullTreeGravAccel[d] - P[other].GravPM[d] - BHP(other).DFAccel[d]);
+        }
+        circum_flag = check_grav_bound(dx,dv,da, BH_GET_PRIV(lv->tw)->atime);
+
+
+        // double bin_r2 = 0;
+        // double bin_KE = 0, bin_PE=0;
+        // int d;
+        // float M_bin = I->Mass + P[other].Mass;
+        // MyFloat VelPred[3];
+        // DM_VelPred(other, VelPred, BH_GET_PRIV(lv->tw)->kf);
+        // for(d = 0; d < 3; d++){
+        //     bin_r2 += pow(NEAREST(I->base.Pos[d] - P[other].Pos[d], PartManager->BoxSize), 2);
+        //     bin_KE += 0.5 * pow(I->Vel[d] - VelPred[d], 2);
+        // }
+        // bin_r2 = pow(bin_r2, 0.5);
+        // bin_KE /= (M_bin * BH_GET_PRIV(lv->tw)->atime * BH_GET_PRIV(lv->tw)->atime);
+        // bin_PE = -GRAVITY / bin_r2 / BH_GET_PRIV(lv->tw)->atime;
+
+        if(circum_flag){
+
+            if(I->Binary_pair == 0){
+                I->Binary_pair = 1;
+                
+                // double com_pos[3];
+                // int ii;
+                // for(ii = 0; ii < 3; ii++) {
+                //     /* Movement occurs in drift.c */
+                //     com_pos[ii] = (I->base.Pos[ii] * I->Mass + P[other].Pos[ii] * P[other].Mass) / (I->Mass + P[other].Mass);
+                // }
+                O->Binary_Accpair = other;
+            }
+
+        }
+
+    }
+
+    
+
 
 
     if(P[other].Type == 0) {
@@ -739,6 +969,9 @@ blackhole_accretion_reduce(int place, TreeWalkResultBHAccretion * remote, enum T
     }
     TREEWALK_REDUCE(BH_GET_PRIV(tw)->NumDM[PI], remote->NumDM);
     TREEWALK_REDUCE(BH_GET_PRIV(tw)->MgasEnc[PI], remote->MgasEnc);
+    if(remote->Binary_Accpair >= 0){
+    TREEWALK_REDUCE(BH_GET_PRIV(tw)->Binary_Accpair[PI], remote->Binary_Accpair);
+    }
 }
 
 static void
@@ -756,6 +989,7 @@ blackhole_accretion_copy(int place, TreeWalkQueryBHAccretion * I, TreeWalk * tw)
     I->Density = BHP(place).Density;
     I->ID = P[place].ID;
     I->Mtrack = BHP(place).Mtrack;
+    I->Binary_pair = 0;
 }
 
 typedef struct {

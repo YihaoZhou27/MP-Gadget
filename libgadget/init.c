@@ -154,10 +154,26 @@ inttime_t init(int RestartSnapNum, const char * OutputDir, struct header_data * 
         P[i].Ti_kick_grav = Ti_Current;
         P[i].Ti_kick_hydro = Ti_Current;
 #endif
+
+        // initialized the ketju 
+        if(RestartSnapNum == -1)
+        {
+            P[i].KetjuIntegrated = 0;
+            P[i].KetjuPotentialEnergyCorrection = 0;
+            for(j = 0; j < 3; j++) {
+                P[i].KetjuFinalVel[j] = 0;
+                P[i].Spin[j] = 0;
+            }
+        }
+
         if(RestartSnapNum == -1 && P[i].Type == 5 )
         {
             /* Note: Gadget-3 sets this to the seed black hole mass.*/
             BHP(i).Mass = P[i].Mass;
+            BHP(i).Binary_Accpair = 0;
+            //BHP(i).KetjuIntegrated = 0;
+            //BHP(i).KetjuPotentialEnergyCorrection = 0;
+            
         }
 
         if(P[i].Type == 4 )
@@ -173,6 +189,8 @@ inttime_t init(int RestartSnapNum, const char * OutputDir, struct header_data * 
             for(j = 0; j < 3; j++) {
                 BHP(i).DFAccel[j] = 0;
                 BHP(i).DragAccel[j] = 0;
+                // BHP(i).KetjuFinalVel[j] = 0;
+                // BHP(i).Spin[j] = 0;
             }
         }
 

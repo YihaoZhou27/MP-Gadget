@@ -17,6 +17,9 @@
 
 /* global state of system
 */
+
+struct OutputFD Fds[1] = {{0}};
+
 struct state_of_system
 {
     double Mass;
@@ -70,7 +73,7 @@ set_stats_params(ParameterSet * ps)
  *   (start-option 1), the code will append to these files.
  */
 void
-open_outputfiles(int RestartSnapNum, struct OutputFD * fds, const char * OutputDir, int BlackHoleOn, int StarformationOn, int ComovingIntegrationOn)
+open_outputfiles(int RestartSnapNum, struct OutputFD * fds, const char * OutputDir, int BlackHoleOn, int StarformationOn, int ComovingIntegrationOn, int KetjuOn, MyIDType trace_id)
 {
     const char mode[3]="a+";
     char * buf;
@@ -85,6 +88,8 @@ open_outputfiles(int RestartSnapNum, struct OutputFD * fds, const char * OutputD
     fds->FdBlackholeDetails = NULL;
     fds->FdHelium = NULL;
     fds->FdBlackHoleDynamics = NULL;
+    fds->FdSingleBH = NULL;
+    fds->FdKetjuRegion = NULL;
 
     if(RestartSnapNum != -1) {
         postfix = fastpm_strdup_printf("-R%03d", RestartSnapNum);
@@ -102,9 +107,25 @@ open_outputfiles(int RestartSnapNum, struct OutputFD * fds, const char * OutputD
     }
     /* Only output dynamics details as txt file in Non-cosmological sims*/
     if(!ComovingIntegrationOn) {
-        buf = fastpm_strdup_printf("%s/%s%s", OutputDir, "blackhole-dynamics.txt", postfix,ThisTask);
+        buf = fastpm_strdup_printf("%s/%s%s_%d", OutputDir, "blackhole-dynamics.txt", postfix,ThisTask);
         fastpm_path_ensure_dirname(buf);
         if(!(fds->FdBlackHoleDynamics = fopen(buf, "w+")))
+            endrun(1, "error in opening file '%s'\n", buf);
+        myfree(buf);
+    }
+
+    if(KetjuOn) {
+        buf = fastpm_strdup_printf("%s/%s%s_%d", OutputDir, "ketju_region.txt", postfix,ThisTask);
+        fastpm_path_ensure_dirname(buf);
+        if(!(fds->FdKetjuRegion = fopen(buf, "w+")))
+            endrun(1, "error in opening file '%s'\n", buf);
+        myfree(buf);
+    }
+
+    if(trace_id > 0) {
+        buf = fastpm_strdup_printf("%s/%s%s_%d", OutputDir, "singlebhtrace.txt", postfix,ThisTask);
+        fastpm_path_ensure_dirname(buf);
+        if(!(fds->FdSingleBH = fopen(buf, "w+")))
             endrun(1, "error in opening file '%s'\n", buf);
         myfree(buf);
     }
@@ -379,8 +400,9 @@ void output_blackhole_dynamics(FILE * FdBlackHoleDynamics, const double Time, st
         return;
     for(int i = 0; i < PartManager->NumPart; i++) {
         if (P[i].Type == 5) {
-            fprintf(FdBlackHoleDynamics, "%g %ld %g %g %g %g %g %g %g\n",
-            Time, P[i].ID, P[i].Pos[0] - PartManager->CurrentParticleOffset[0], 
+            fprintf(FdBlackHoleDynamics, "%g %ld %d %g %g %g %g %g %g %g\n",
+            Time, P[i].ID, P[i].IsGarbage,
+                  P[i].Pos[0] - PartManager->CurrentParticleOffset[0], 
                   P[i].Pos[1] - PartManager->CurrentParticleOffset[1], 
                   P[i].Pos[2] - PartManager->CurrentParticleOffset[2], 
                   P[i].Vel[0], P[i].Vel[1], P[i].Vel[2], 
@@ -390,3 +412,36 @@ void output_blackhole_dynamics(FILE * FdBlackHoleDynamics, const double Time, st
 
     fflush(FdBlackHoleDynamics);
 }
+
+
+void trace_singleblackhole(FILE * FdSingleBH, const double Time, const char *msg_template, MyIDType target_ID, struct part_manager_type * PartManager)
+{
+    if(!FdSingleBH)
+        return;
+    for(int i = 0; i < PartManager->NumPart; i++) {
+        if(P[i].ID == target_ID){
+            int bin_gravity = P[i].TimeBinGravity;
+            
+            inttime_t dti = dti_from_timebin(bin_gravity)/2;
+
+
+
+            fprintf(FdSingleBH, "%g ID %ld %s garbage %d type %d Fullgravaccel=<%10.8g|%10.8g|%10.8g>,  pos=<%10.8g|%10.8g|%10.8g>,  vel=<%10.8g|%10.8g|%10.8g>,  hydro_bin %d, gravbin %d\n",
+            Time, P[i].ID, msg_template, P[i].IsGarbage, P[i].Type, 
+                P[i].FullTreeGravAccel[0], P[i].FullTreeGravAccel[1], P[i].FullTreeGravAccel[2],
+                P[i].Pos[0] - PartManager->CurrentParticleOffset[0], 
+                P[i].Pos[1] - PartManager->CurrentParticleOffset[1], 
+                P[i].Pos[2] - PartManager->CurrentParticleOffset[2], 
+                P[i].Vel[0], P[i].Vel[1], P[i].Vel[2],
+                P[i].TimeBinHydro, P[i].TimeBinGravity);
+                
+
+
+
+    }
+    }
+
+    fflush(FdSingleBH);
+}
+
+

@@ -207,9 +207,9 @@ force_tree_build(int mask, DomainDecomp * ddecomp, const ActiveParticles *act, c
     int64_t maxnodes = ForceTreeParams.TreeAllocFactor * PartManager->NumPart + ddecomp->NTopNodes;
     int64_t maxmaxnodes;
     MPI_Reduce(&maxnodes, &maxmaxnodes, 1, MPI_INT64, MPI_MAX,0, MPI_COMM_WORLD);
-//     message(0, "Treebuild: Largest is %g MByte for %ld tree nodes. firstnode %ld. (presently allocated %g MB)\n",
-//          maxmaxnodes * sizeof(struct NODE) / (1024.0 * 1024.0), maxmaxnodes, PartManager->MaxPart,
-//          mymalloc_usedbytes() / (1024.0 * 1024.0));
+    // message(0, "DEBUG forcetree.c 210 **** Treebuild: Largest is %g MByte for %ld tree nodes. firstnode %ld. (presently allocated %g MB)\n",
+    //      maxmaxnodes * sizeof(struct NODE) / (1024.0 * 1024.0), maxmaxnodes, PartManager->MaxPart,
+    //      mymalloc_usedbytes() / (1024.0 * 1024.0));
 
     do
     {
@@ -855,7 +855,6 @@ void force_create_node_for_topnode(int no, int topnode, struct NODE * Nodes, con
                 }
 
                 (*nextfree)++;
-
                 if(*nextfree >= lastnode)
                     endrun(11, "Not enough force nodes to topnode grid: need %d\n",lastnode);
             }
@@ -863,6 +862,9 @@ void force_create_node_for_topnode(int no, int topnode, struct NODE * Nodes, con
     for(j=0; j<7; j++) {
         int chld = Nodes[no].s.suns[j];
         Nodes[chld].sibling = Nodes[no].s.suns[j+1];
+        // if(Nodes[no].s.suns[j+1] == 0){
+        //     message(0, "DEBUG...focetree.c 865 %d child %d no %d\n", Nodes[no].s.suns[j+1], chld, no);
+        // }
     }
     Nodes[Nodes[no].s.suns[7]].sibling = Nodes[no].sibling;
     for(i = 0; i < 2; i++)
@@ -1101,9 +1103,13 @@ void force_update_node_parallel(const ForceTree * tree, const DomainDecomp * dde
             if(tree->Nodes[no].f.ChildType == NODE_NODE_TYPE) {
                 #pragma omp task default(none) shared(tree) firstprivate(no)
                 force_update_node_recursive(no, tree->Nodes[no].sibling, 1, tree);
+
+
             }
-            else if(tree->Nodes[no].f.ChildType == PARTICLE_NODE_TYPE)
+            else if(tree->Nodes[no].f.ChildType == PARTICLE_NODE_TYPE){
                 force_update_particle_node(no, tree);
+
+            }
             else if(tree->Nodes[no].f.ChildType == PSEUDO_NODE_TYPE)
                 endrun(5, "Error, found pseudo node %d but domain entry %d says on task %d\n", no, i, ThisTask);
         }
@@ -1213,6 +1219,8 @@ force_treeupdate_pseudos(int no, const ForceTree * tree)
 
     p = tree->Nodes[no].s.suns[0];
 
+
+
     /* since we are dealing with top-level nodes, we know that there are 8 consecutive daughter nodes */
     for(j = 0; j < 8; j++)
     {
@@ -1236,7 +1244,11 @@ force_treeupdate_pseudos(int no, const ForceTree * tree)
         if(tree->Nodes[p].mom.hmax > hmax)
             hmax = tree->Nodes[p].mom.hmax;
 
+        tree->Nodes[no].mom.hmax = hmax;
+
         p = tree->Nodes[p].sibling;
+
+
     }
 
     if(mass)

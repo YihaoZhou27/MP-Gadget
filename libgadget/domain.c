@@ -234,13 +234,11 @@ void domain_decompose_full(DomainDecomp * ddecomp)
 void domain_maintain(DomainDecomp * ddecomp, struct DriftData * drift)
 {
     message(0, "Attempting a domain exchange\n");
-
     walltime_measure("/Misc");
-
     /* Try a domain exchange.
      * If we have no memory for the particles,
      * bail and do a full domain*/
-    if(0 != domain_exchange(domain_layoutfunc, ddecomp, 0, drift, PartManager, SlotsManager, 10000, ddecomp->DomainComm)) {
+    if(0 != domain_exchange(domain_layoutfunc, ddecomp, 0, drift, PartManager, SlotsManager, 10000, ddecomp->DomainComm)) {  
         domain_decompose_full(ddecomp);
         return;
     }

@@ -371,6 +371,7 @@ int force_treeev_shortrange(TreeWalkQueryGravShort * input,
             }
             const double r2 = dx[0] * dx[0] + dx[1] * dx[1] + dx[2] * dx[2];
 
+
             /* Discard this node, move to sibling*/
             if(shall_we_discard_node(nop->len, r2, nop->center, inpos, BoxSize, rcut, rcut2, NonPeriodic))
             {
@@ -395,6 +396,8 @@ int force_treeev_shortrange(TreeWalkQueryGravShort * input,
                         open_node = 1;
             }
 
+
+
             if(!open_node)
             {
                 double h = input->Soft;
@@ -406,6 +409,8 @@ int force_treeev_shortrange(TreeWalkQueryGravShort * input,
                 no = nop->sibling;
                 /* Compute the acceleration and apply it to the output structure*/
                 apply_accn_to_output(output, dx, r2, h, nop->mom.mass, cellsize);
+
+
                 continue;
             }
 
@@ -464,7 +469,11 @@ int force_treeev_shortrange(TreeWalkQueryGravShort * input,
                 h = DMAX(input->Soft, FORCE_SOFTENING(pp, P[pp].Type));
             }
             /* Compute the acceleration and apply it to the output structure*/
+
+
             apply_accn_to_output(output, dx, r2, h, P[pp].Mass, cellsize);
+
+
         }
         ninteractions = numcand;
     }

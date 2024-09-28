@@ -1105,8 +1105,13 @@ ngb_treefind_threads(TreeWalkQueryBase * I,
 
     no = startnode;
 
+
+
     while(no >= 0)
     {
+        // message(0, "DEBUG...treewalk.c 1110.c no = %d, father = %d (ptype = %d) start=%d mode = %d tree-info: firstnode %d, numnode %d, lastnode %d, numpart %d, ntopleave %d \n",
+        //     no, force_get_father(no, tree), tree->Nodes[force_get_father(no, tree)].f.ChildType, startnode, lv->mode, 
+        //     tree->firstnode, tree->numnodes, tree->lastnode, tree->NumParticles, tree->NTopLeaves);
         if(node_is_particle(no, tree)) {
             int fat = force_get_father(no, tree);
             endrun(12312, "Particles should be added before getting here! no = %d, father = %d (ptype = %d) start=%d mode = %d\n", no, fat, tree->Nodes[fat].f.ChildType, startnode, lv->mode);
@@ -1117,6 +1122,12 @@ ngb_treefind_threads(TreeWalkQueryBase * I,
         }
 
         struct NODE *current = &tree->Nodes[no];
+
+        //debug....
+        // if(I->ID == 323664651208 && lv->tw->ev_label == "BH_ACCRETION"){
+            
+        //     message(0, "DEBUG... treewalk.c 1111 no %d current ChildType %d sibling %d father %d \n", no, current->f.ChildType, current->sibling, current->father);
+        // }
 
         /* When walking exported particles we start from the encompassing top-level node,
          * so if we get back to a top-level node again we are done.*/
@@ -1132,6 +1143,9 @@ ngb_treefind_threads(TreeWalkQueryBase * I,
         if(0 == cull_node(I, iter, current, BoxSize, NonPeriodic)) {
             /* in case the node can be discarded */
             no = current->sibling;
+            // if(I->ID == 323664651208 && lv->tw->ev_label == "BH_ACCRETION"){
+            //     message(0, "DEBUG...treewalk.c 1149 no %d\n", no);
+            // }
             continue;
         }
 

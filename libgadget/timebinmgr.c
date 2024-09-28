@@ -350,7 +350,7 @@ find_current_sync_point(inttime_t ti)
 
 /*Gets Dloga / ti for the current integer timeline.
  * Valid up to the next snapshot, after which it will change*/
-static double
+double
 Dloga_interval_ti(inttime_t ti)
 {
     /* FIXME: This uses the bit tricks because it has to be fast

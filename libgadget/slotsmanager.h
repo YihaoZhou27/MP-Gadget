@@ -32,6 +32,8 @@ struct bh_particle_data {
 
     int CountProgs;
 
+    //int KetjuIntegrated;
+
     MyFloat Mass;
     MyFloat Mdot;
     MyFloat Density;
@@ -44,6 +46,7 @@ struct bh_particle_data {
     MyFloat MinPotVel[3];
     /* After a merger, this gives the ID of the particle which swallowed the BH. Used to keep track of merger trees.*/
     MyIDType SwallowID;
+    MyIDType Binary_Accpair; /* mark the BH pair of circumbinary accreation. If circumbinary accretion do not occurs, this = -1 */
 
     /*******************************************************/
     double DragAccel[3];
@@ -58,6 +61,11 @@ struct bh_particle_data {
     double Mtrack; /*Swallow gas particle when BHP.Mass accretes from SeedBHMass to SeedDynMass for mass conservation */
     double Mseed; /*Log the seed mass of BH, would be useful in case of the powerlaw seeding*/
     MyFloat VDisp; /* 1D DM Velocity dispersion, for the kinetic winds*/
+
+    // double Spin[3];
+    // double KetjuFinalVel[3];
+    // double KetjuPotentialEnergyCorrection;
+    
 };
 
 #define NMETALS 9
@@ -66,6 +74,12 @@ struct bh_particle_data {
 struct star_particle_data
 {
     struct particle_data_ext base;
+
+
+    // int KetjuIntegrated;
+    // double Spin[3];
+    // double KetjuFinalVel[3];
+    // double KetjuPotentialEnergyCorrection;
     float FormationTime;      /*!< formation time of star particle */
     float LastEnrichmentMyr;  /* Last time the star particle had an enrichment event, in Myr since FormationTime.*/
     MyFloat TotalMassReturned; /* The total mass returned from this star since formation.

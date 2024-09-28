@@ -101,7 +101,7 @@ gravpm_force(PetaPM * pm, ForceTree * tree, Cosmology * CP, double Time, double 
         for (int k=0; k < 3; k++) {
             Xmin[k] = (Xmin[k] < P[i].Pos[k]) ? Xmin[k] : P[i].Pos[k];
             Xmax[k] = (Xmax[k] > P[i].Pos[k]) ? Xmax[k] : P[i].Pos[k];
-        } 
+        }
     }
 
     MPI_Barrier(MPI_COMM_WORLD);

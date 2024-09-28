@@ -2,6 +2,7 @@
 #define TIMESTEP_H
 
 #include "utils/paramset.h"
+#include "utils.h"
 #include "timebinmgr.h"
 #include "timefac.h"
 #include "petapm.h"
@@ -37,12 +38,24 @@ typedef struct ActiveParticles
     int *ActiveParticle;
 } ActiveParticles;
 
+/* Enum for keeping track of which
+ * timestep criterion is limiting each particles'
+ * timestep evolution*/
+enum TimeStepType
+{
+    TI_ACCEL = 0,
+    TI_COURANT = 1,
+    TI_ACCRETE = 2,
+    TI_NEIGH = 3,
+    TI_HSML = 4,
+};
+
 /* Initialise an empty active particle list,
  * which will forward requests to the particle manager.
  * No heap memory is allocated.*/
 ActiveParticles init_empty_active_particles(int64_t NumActiveParticle);
 /* Build a list of active particles from the particle manager, allocating memory for the active particle list.*/
-void build_active_particles(ActiveParticles * act, const DriftKickTimes * const times, int NumCurrentTiStep, const double Time);
+void build_active_particles(ActiveParticles * act, const DriftKickTimes * const times, int NumCurrentTiStep, const double Time, const inttime_t Ti_Last);
 /* Free the active particle list if necessary*/
 void free_active_particles(ActiveParticles * act);
 /* Get the current scale factor*/
@@ -59,12 +72,12 @@ double get_atime(const inttime_t Ti_Current);
  * asmth: size of PM smoothing cell in internal units. asmth = All.Asmth * PartManager->BoxSize / Nmesh
  * isFirstTimeStep: Flags to do special things for BHs on first time step.
  * Returns 0 if success, 1 if timestep is bad.*/
-int find_timesteps(const ActiveParticles * act, DriftKickTimes * times, const double atime, int FastParticleType, const Cosmology * CP, const double asmth, const int isFirstTimeStep);
+int find_timesteps(const ActiveParticles * act, DriftKickTimes * times, const double atime, int FastParticleType, const Cosmology * CP, const double asmth, const int isFirstTimeStep, int KetjuOn, const struct UnitSystem units);
 int find_hydro_timesteps(const ActiveParticles * act, DriftKickTimes * times, const double atime, const Cosmology * CP, const int isFirstTimeStep);
 
 /* Apply half a kick to the particles: short-range and long-range.
  * These functions sync drift and kick times.*/
-void apply_half_kick(const ActiveParticles * act, Cosmology * CP, DriftKickTimes * times, const double atime);
+void apply_half_kick(const ActiveParticles * act, Cosmology * CP, DriftKickTimes * times, const double atime, int hydro_kick, const struct UnitSystem unit);
 /* Do hydro kick only*/
 void apply_hydro_half_kick(const ActiveParticles * act, Cosmology * CP, DriftKickTimes * times, const double atime);
 void apply_PM_half_kick(Cosmology * CP, DriftKickTimes * times);
@@ -95,7 +108,7 @@ struct grav_accel_store
  * and does the gravitational half-step kicks.
  * Note this does not compute the initial accelerations: hierarchical_gravity_accelerations should be run FIRST.
  * Re-uses the gravity memory from StoredGravAccel.*/
-int hierarchical_gravity_and_timesteps(const ActiveParticles * act, PetaPM * pm, DomainDecomp * ddecomp, struct grav_accel_store StoredGravAccel, DriftKickTimes * times, const double atime, int HybridNuGrav, int FastParticleType, Cosmology * CP, const char * EmergencyOutputDir);
+int hierarchical_gravity_and_timesteps(const ActiveParticles * act, PetaPM * pm, DomainDecomp * ddecomp, struct grav_accel_store StoredGravAccel, DriftKickTimes * times, const double atime, int HybridNuGrav, int FastParticleType, Cosmology * CP, const char * EmergencyOutputDir, int KetjuOn, const struct UnitSystem units);
 
 /* Computes short-range gravitational forces and
  * do the gravitational half-step kicks. Places the gravitational force into StoredGravAccel.*/
@@ -104,5 +117,9 @@ int hierarchical_gravity_accelerations(const ActiveParticles * act, PetaPM * pm,
 /* Updates the Ti_kick times a half-step for this bin*/
 void update_kick_times(DriftKickTimes * times);
 
+double get_timestep_gravity_dloga(const int p, const MyFloat * GravAccel, const double atime, const double hubble);
+double get_timestep_hydro_dloga(const int p, const inttime_t Ti_Current, const double atime, const double hubble, enum TimeStepType * titype);
+inttime_t convert_timestep_to_ti(double dloga, const int p, const inttime_t dti_max, const inttime_t Ti_Current, enum TimeStepType titype);
+inttime_t get_PM_timestep_ti(const DriftKickTimes * const times, const double atime, const Cosmology * CP, const int FastParticleType, const double asmth);
 
 #endif

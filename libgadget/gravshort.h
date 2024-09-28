@@ -4,6 +4,7 @@
 #include "partmanager.h"
 #include "treewalk.h"
 #include "gravity.h"
+#include "stats.h"
 
 typedef struct {
     TreeWalkNgbIterBase base;
@@ -20,7 +21,7 @@ typedef struct
 typedef struct {
     TreeWalkResultBase base;
     MyFloat Acc[3];
-    MyFloat Potential;
+    MyFloat Potential; 
 } TreeWalkResultGravShort;
 
 struct GravShortPriv {
@@ -84,6 +85,16 @@ grav_short_postprocess(int i, TreeWalk * tw)
             P[i].Potential -= 2.8372975 * pow(P[i].Mass, 2.0 / 3) * GRAV_GET_PRIV(tw)->cbrtrho0;
         P[i].Potential *= G;
     }
+
+    // if(P[i].ID == 15515){
+    //     message(0, "DEBUG...gravshort.c 90 (postprocess): ID %ld Isgarbage%d  Fullgravaccel=<%10.8g|%10.8g|%10.8g>,  pos=<%10.8g|%10.8g|%10.8g>,  vel=<%10.8g|%10.8g|%10.8g>\n",
+    //                 P[i].ID, P[i].IsGarbage, 
+    //                 P[i].FullTreeGravAccel[0], P[i].FullTreeGravAccel[1], P[i].FullTreeGravAccel[2],
+    //                 P[i].Pos[0] - PartManager->CurrentParticleOffset[0], 
+    //                 P[i].Pos[1] - PartManager->CurrentParticleOffset[1], 
+    //                 P[i].Pos[2] - PartManager->CurrentParticleOffset[2], 
+    //                 P[i].Vel[0], P[i].Vel[1], P[i].Vel[2]);
+    // }
 }
 
 /*Compute the absolute magnitude of the acceleration for a particle.*/
@@ -104,11 +115,13 @@ grav_short_copy(int place, TreeWalkQueryGravShort * input, TreeWalk * tw)
 {
     input->Soft = FORCE_SOFTENING(place, P[place].Type);
     input->OldAcc = grav_get_abs_accel(&P[place], GRAV_GET_PRIV(tw)->G);
+
 }
 
 static void
 grav_short_reduce(int place, TreeWalkResultGravShort * result, enum TreeWalkReduceMode mode, TreeWalk * tw)
 {
+
     MyFloat * GravAccel = NULL;
     if(GRAV_GET_PRIV(tw)->Accel)
         GravAccel = GRAV_GET_PRIV(tw)->Accel[place];
@@ -117,8 +130,11 @@ grav_short_reduce(int place, TreeWalkResultGravShort * result, enum TreeWalkRedu
     int k;
     for(k = 0; k < 3; k++)
         TREEWALK_REDUCE(GravAccel[k], result->Acc[k]);
+
     if(GRAV_GET_PRIV(tw)->CalcPotential)
         TREEWALK_REDUCE(P[place].Potential, result->Potential);
+
+
 }
 
 #endif

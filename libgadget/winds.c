@@ -440,11 +440,12 @@ sfr_wind_weight_ngbiter(TreeWalkQueryWind * I,
     /* Sum up all particles visited on this processor*/
     WIND_GET_PRIV(lv->tw)->nvisited[omp_get_thread_num()]++;
 
-    /*
-    message(1, "ThisTask = %d %ld ngb=%d NGB=%d TotalWeight=%g V2sum=%g V1sum=%g %g %g\n",
-    ThisTask, I->ID, numngb, O->Ngb, O->TotalWeight, O->V2sum,
-    O->V1sum[0], O->V1sum[1], O->V1sum[2]);
-    */
+    
+    // message(1, "ThisTask %ld ngb=%d NGB=%d TotalWeight=%g V2sum=%g V1sum=%g %g %g\n",
+    // //ThisTask, 
+    // I->ID, numngb, O->Ngb, O->TotalWeight, O->V2sum,
+    // O->V1sum[0], O->V1sum[1], O->V1sum[2]);
+    
 }
 
 /* Do the actual kick of the gas particle*/

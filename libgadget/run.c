@@ -37,6 +37,8 @@
 #include "stats.h"
 #include "veldisp.h"
 
+#include "ketju.h"
+
 static struct ClockTable Clocks;
 
 /*! \file run.c
@@ -104,6 +106,8 @@ static struct run_params
 
     int ExcursionSetReionOn; /*Flag for enabling the excursion set reionisation model*/
     int UVBGdim; /*Dimension of excursion set grids*/
+
+    int KetjuOn;
 
 } All;
 
@@ -189,6 +193,7 @@ set_all_global_params(ParameterSet * ps)
         }
         All.ExcursionSetReionOn = param_get_int(ps,"ExcursionSetReionOn");
         All.UVBGdim = param_get_int(ps, "UVBGdim");
+        All.KetjuOn = param_get_int(ps, "KetjuOn");
     }
     MPI_Bcast(&All, sizeof(All), MPI_BYTE, 0, MPI_COMM_WORLD);
 }
@@ -231,7 +236,6 @@ begrun(const int RestartSnapNum, struct header_data * head)
     const struct UnitSystem units = get_unitsystem(head->UnitLength_in_cm, head->UnitMass_in_g, head->UnitVelocity_in_cm_per_s);
     /* convert some physical input parameters to internal units */
     init_cosmology(&All.CP, head->TimeIC, units); // ComovingIntegrationOn: good as long as no nutrino
-
     check_units(&All.CP, units);
 
 #ifndef EXCUR_REION
@@ -298,9 +302,9 @@ check_kick_drift_times(struct part_manager_type * PartManager, inttime_t ti_curr
         const struct particle_data * pp = &PartManager->Base[i];
         if(pp->IsGarbage || pp->Swallowed)
             continue;
-        if ( ((pp->Type == 0 || pp->Type == 5) && is_timebin_active(pp->TimeBinHydro, ti_current) && pp->Ti_drift != pp->Ti_kick_hydro) ||
+        if ( ((pp->Type == 0) && is_timebin_active(pp->TimeBinHydro, ti_current) && pp->Ti_drift != pp->Ti_kick_hydro) ||
            (is_timebin_active(pp->TimeBinGravity, ti_current) && pp->Ti_drift != pp->Ti_kick_grav) ) {
-            message(1, "Bad timestep sync: Particle id %ld type %d hydro timebin: %d grav timebin: %d drift %d kick_hydro %d kick_grav %d\n", pp->ID, pp->Type, pp->TimeBinHydro, pp->TimeBinGravity, pp->Ti_drift, pp->Ti_kick_hydro, pp->Ti_kick_grav);
+            message(0, "Bad timestep sync: Particle id %ld type %d hydro timebin: %d grav timebin: %d drift %d kick_hydro %d kick_grav %d\n", pp->ID, pp->Type, pp->TimeBinHydro, pp->TimeBinGravity, pp->Ti_drift, pp->Ti_kick_hydro, pp->Ti_kick_grav);
             bad++;
         }
     }
@@ -316,7 +320,7 @@ check_kick_drift_times(struct part_manager_type * PartManager, inttime_t ti_curr
  */
 void
 run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data * header)
-{
+{   
     /*Number of timesteps performed this run*/
     int NumCurrentTiStep = 0;
     /*Is gas physics enabled?*/
@@ -362,10 +366,13 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
     double TimeNextSeedingCheck = header->TimeSnapshot;
 
     walltime_measure("/Misc");
-    struct OutputFD fds;
-    open_outputfiles(RestartSnapNum, &fds, All.OutputDir, All.BlackHoleOn, All.StarformationOn, All.CP.ComovingIntegrationOn);
+    //struct OutputFD fds = Fds[0];
+    //struct OutputFD fds = Fds_list[0];
+    MyIDType trace_bhid = -1; //8604;//323271384707;//193181915942; //15402;// 15515;
+    //open_outputfiles(RestartSnapNum, &fds, All.OutputDir, All.BlackHoleOn, All.StarformationOn, All.CP.ComovingIntegrationOn, All.KetjuOn, trace_bhid);
+    open_outputfiles(RestartSnapNum, Fds, All.OutputDir, All.BlackHoleOn, All.StarformationOn, All.CP.ComovingIntegrationOn, All.KetjuOn, trace_bhid);
 
-    write_cpu_log(NumCurrentTiStep, header->TimeSnapshot, fds.FdCPU, Clocks.ElapsedTime); /* produce some CPU usage info */
+    write_cpu_log(NumCurrentTiStep, header->TimeSnapshot, Fds->FdCPU, Clocks.ElapsedTime); /* produce some CPU usage info */
 
     DriftKickTimes times = init_driftkicktime(ti_init);
 
@@ -378,6 +385,14 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
         hubble = hubble_function(&All.CP, 1.0);
         message(0, "********** TEST HUBBLE ************** %g \n", hubble);
     }
+    
+    int i;
+    int bh_idx;
+    int hydro_kick = 1;
+    if(All.KetjuOn)
+    {    
+        Ketju_init_ketjuRM(&All.CP, header->TimeIC, units);
+    }
 
     while(1) /* main loop */
     {
@@ -387,6 +402,11 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
          * all bins except the zeroth are inactive and so we return 0 from this function.
          * This ensures we run the force calculation for the first timestep.
          */
+        //trace_singleblackhole(Fds->FdSingleBH, atime, "Begin loop", trace_bhid, PartManager);
+        int ii, bh_idx;
+
+
+        
         inttime_t Ti_Next = find_next_kick(times.Ti_Current, times.mintimebin);
         inttime_t Ti_Last = times.Ti_Current;
 
@@ -408,7 +428,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
         else {
             afac = 1.;
         }
-
+        
         /* Compute the list of particles that cross a lightcone and write it to disc.*/
         if(All.LightconeOn)
             lightcone_compute(atime, PartManager->BoxSize, &All.CP, Ti_Last, Ti_Next);
@@ -447,35 +467,47 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                 update_random_offset(PartManager, rel_random_shift, All.RandomParticleOffset);
             }
         }
-
         int extradomain = is_timebin_active(times.mintimebin + All.MaxDomainTimeBinDepth, times.Ti_Current);
+
+
         /* drift and ddecomp decomposition */
         /* at first step this is a noop */
         if(extradomain || is_PM) {
-            /* Sync positions of all particles */
+            /* Sync positions of all particles */            
             drift_all_particles(Ti_Last, times.Ti_Current, &All.CP, rel_random_shift);
-            message(0, "*** Pass drift_all_particles ***");
+            
+            //trace_singleblackhole(Fds->FdSingleBH, atime, "drift_all_particles", trace_bhid, PartManager);
+
+            message(0, "*** Pass drift_all_particles \n ***");
             /* full decomposition rebuilds the domain, needs keys.*/
-            domain_decompose_full(ddecomp);
-        } else {
-            /* FIXME: add a parameter for ddecomp_decompose_incremental */
-            /* currently we drift all particles every step */
-            /* If it is not a PM step, do a shorter version
-             * of the ddecomp decomp which just exchanges particles.*/
+            domain_decompose_full(ddecomp);       
+            //trace_singleblackhole(Fds->FdSingleBH, atime, "domain_decompose_full", trace_bhid, PartManager);
+
+
+        }else{
             struct DriftData drift;
             drift.CP = &All.CP;
             drift.ti0 = Ti_Last;
-            drift.ti1 = times.Ti_Current;
-            domain_maintain(ddecomp, &drift);
+            drift.ti1 = times.Ti_Current;            
+            domain_maintain(ddecomp, &drift);       
         }
+        //trace_singleblackhole(Fds->FdSingleBH, atime, "after domain", trace_bhid, PartManager);
+
         update_lastactive_drift(&times);
 
 
-        ActiveParticles Act = init_empty_active_particles(0);
-        /* don't change this atime to 1 as it need to print out the actual time */
-        build_active_particles(&Act, &times, NumCurrentTiStep, atime);
-
         set_random_numbers(All.RandomSeed + times.Ti_Current);
+        
+
+        ActiveParticles Act = init_empty_active_particles(0);   
+        build_active_particles(&Act, &times, NumCurrentTiStep, atime, Ti_Last);
+        //trace_singleblackhole(Fds->FdSingleBH, atime, "build_active_particles", trace_bhid, PartManager);
+
+        if(All.KetjuOn)
+        {
+            Ketju_set_final_velocities(&Act);
+            //trace_singleblackhole(Fds->FdSingleBH, atime, "Ketju_set_final_velocities", trace_bhid, PartManager);
+        }         
 
         /* Are the particle neutrinos gravitating this timestep?
          * If so we need to add them to the tree.*/
@@ -499,13 +531,13 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
              * However, hsml is the length that encloses NumNgb gas particles, so the tree contains only gas.
              * No moments (yet). We do need hmax for hydro, but we need to compute hsml first.*/
             force_tree_rebuild_mask(&gasTree, ddecomp, GASMASK, All.OutputDir);
+            //trace_singleblackhole(Fds->FdSingleBH, atime, "force_tree_rebuild_mask", trace_bhid, PartManager);
             walltime_measure("/SPH/Build");
 
             /*Predicted SPH data.*/
             struct sph_pred_data sph_predicted = {0};
             if(All.DensityOn)
                 density(&Act, 1, DensityIndependentSphOn(), All.BlackHoleOn, times, &All.CP, &sph_predicted, GradRho_mag, &gasTree);  /* computes density, and pressure */
-
             /* adds hydrodynamical accelerations and computes du/dt  */
             if(All.HydroOn) {
                 /***** update smoothing lengths in tree *****/
@@ -523,7 +555,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
             /* Scratch data cannot be used checkpoint because FOF does an exchange.*/
             slots_free_sph_pred_data(&sph_predicted);
             force_tree_free(&gasTree);
-
+            
             /* Hydro half-kick after hydro force, as not done with the gravity.*/
             if(All.HierarchicalGravity)
                 apply_hydro_half_kick(&Act, &All.CP, &times, afac);
@@ -551,18 +583,19 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
             /* Tree freed in PM*/
             ForceTree Tree = {0};
             force_tree_full(&Tree, ddecomp, HybridNuTracer, All.OutputDir);
+            //trace_singleblackhole(Fds->FdSingleBH, atime, "force_tree_full", trace_bhid, PartManager);
             /* Non-ComovingIntegration Note: Doesn't seem to matter is we use log(a) or 1 in here*/
             gravpm_force(&pm, &Tree, &All.CP, atime, units.UnitLength_in_cm, All.OutputDir, header->TimeIC, All.FastParticleType);
             message(0,"**** Passed PM Force ****\n");
 
             /* compute and output energy statistics if desired. */
-            if(fds.FdEnergy)
+            if(Fds->FdEnergy)
                 /* Non-ComovingIntegration Note: need afac here as we are using atime purely for computing
                   physical quantities */
-                energy_statistics(fds.FdEnergy, afac, All.CP.Redshift, PartManager);
+                energy_statistics(Fds->FdEnergy, afac, All.CP.Redshift, PartManager);
         }
-        if(fds.FdBlackHoleDynamics)
-            output_blackhole_dynamics(fds.FdBlackHoleDynamics, atime, PartManager);
+        if(Fds->FdBlackHoleDynamics)
+            output_blackhole_dynamics(Fds->FdBlackHoleDynamics, atime, PartManager);
 
         /* Force tree object, reused if HierarchicalGravity is off.*/
         ForceTree Tree = {0};
@@ -582,15 +615,25 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                     GravAccel.GravAccel = (MyFloat (*) [3]) mymalloc2("GravAccel", GravAccel.nstore * sizeof(GravAccel.GravAccel[0]));
                 }
                 hierarchical_gravity_accelerations(&Act, &pm, ddecomp, GravAccel, &times, HybridNuTracer, All.FastParticleType, &All.CP, All.OutputDir);
+                //trace_singleblackhole(Fds->FdSingleBH, atime, "after hierarchical_gravity_accelerations", trace_bhid, PartManager);
             }
             else if(All.TreeGravOn && totgravactive) {
                     /* Do a short range pairwise only step if desired*/
                     const double rho0 = All.CP.Omega0 * 3 * All.CP.Hubble * All.CP.Hubble / (8 * M_PI * All.CP.GravInternal);
                     force_tree_full(&Tree, ddecomp, HybridNuTracer, All.OutputDir);
+                    //trace_singleblackhole(Fds->FdSingleBH, atime, "force_tree_full", trace_bhid, PartManager);
                     grav_short_tree(&Act, &pm, &Tree, NULL, rho0, HybridNuTracer, All.FastParticleType, times.Ti_Current);
+                    //trace_singleblackhole(Fds->FdSingleBH, atime, "grav_short_tree", trace_bhid, PartManager);
             }
         }
         message(0,"**** Passed totgravactive ****\n");
+         
+        int tree_no = 12950722;
+        //struct NODE *current = Tree.Nodes[tree_no];
+        //message(0, "DEBUG... run.c 637 treenode no %d current ChildType %d sibling %d father %d \n", tree_no, Tree.Nodes[tree_no].f.ChildType, Tree.Nodes[tree_no].sibling, Tree.Nodes[tree_no].father);
+        
+
+
 
         if(!All.HierarchicalGravity){
             /* Do both short-range gravity and hydro kicks.
@@ -598,14 +641,31 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
              * For hierarchical gravity the short-range kick is done above.
              * Synchronises TiKick and TiDrift for the active particles. */
             message(0,"**** Half Kick ****\n");
-            apply_half_kick(&Act, &All.CP, &times, afac);
+            hydro_kick = 1;
+            apply_half_kick(&Act, &All.CP, &times, afac, hydro_kick, units);
+
+            //trace_singleblackhole(Fds->FdSingleBH, atime, "second apply_half_kick", trace_bhid, PartManager);
+
         }
+
 
         /* Sets Ti_Kick in the times structure.*/
         update_kick_times(&times);
+        //message(0, "DEBUG... run.c 657 treenode no %d current ChildType %d sibling %d father %d \n", tree_no, Tree.Nodes[tree_no].f.ChildType, Tree.Nodes[tree_no].sibling, Tree.Nodes[tree_no].father);
 
         if(is_PM) {
             apply_PM_half_kick(&All.CP, &times);
+            //message(0, "DEBUG... run.c 661 treenode no %d current ChildType %d sibling %d father %d \n", tree_no, Tree.Nodes[tree_no].f.ChildType, Tree.Nodes[tree_no].sibling, Tree.Nodes[tree_no].father);
+            //trace_singleblackhole(Fds->FdSingleBH, atime, "second apply_PM_half_kick", trace_bhid, PartManager);
+        }
+
+
+        // originally put in calculate_non_standard_physics_end_of_step
+        if(All.KetjuOn){
+            //message(0, "DEBUG... run.c 668 treenode no %d current ChildType %d sibling %d father %d \n", tree_no, Tree.Nodes[tree_no].f.ChildType, Tree.Nodes[tree_no].sibling, Tree.Nodes[tree_no].father);
+            Ketju_finish_step(&Act, &times, units, NumCurrentTiStep, MPI_COMM_WORLD);
+
+
         }
 
         MPIU_Barrier(MPI_COMM_WORLD);
@@ -680,7 +740,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                 if(during_helium_reionization(1/atime - 1)) {
                     /* Helium reionization by switching on quasar bubbles*/
                     //NYC: Helium reionization not enabled for Non-ComovingIntegration
-                    do_heiii_reionization(atime, &fof, ddecomp, &All.CP, units.UnitInternalEnergy_in_cgs, fds.FdHelium);
+                    do_heiii_reionization(atime, &fof, ddecomp, &All.CP, units.UnitInternalEnergy_in_cgs, Fds->FdHelium);
                 }
 #ifdef EXCUR_REION
                 //excursion set reionisation
@@ -693,10 +753,12 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                 fof_finish(&fof);
             }
 
-            if(is_PM && All.CoolingOn)
+            if(is_PM && All.CoolingOn){
                 // Non-ComovingIntegration Note: use afac here;
                 // the atime in hubble_func does not matter because it is determined by CP.ComovingIntegrationOn
                 winds_find_vel_disp(&Act, afac, hubble_function(&All.CP, atime), &All.CP, &times, ddecomp);
+                //trace_singleblackhole(Fds->FdSingleBH, atime, "winds_find_vel_disp", trace_bhid, PartManager);
+            }
             /* Note that the tree here may be freed, if we are not a gravity-active timestep,
              * or if we are a PM step.*/
             /* If we didn't build a tree for gravity, we need to build one in BH or in winds.
@@ -706,21 +768,38 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
              * The wind tree is needed if any new stars are formed and needs DM and gas (for the default wind model).
              */
             /* Black hole accretion and feedback */
-            if(All.BlackHoleOn)
+            if(All.BlackHoleOn){
+
+                // int tree_no = 12950722;
+                // struct NODE *current = &Tree->Nodes[tree_no];
+
+
+
                 //NYC: afac here because it only enters into the physical quantity conversion (i.e. no timestep involved)
                 // Also input atime=loga (non-cosmo) because we want to output it in BH details
-                blackhole(&Act, afac, atime, &All.CP, &Tree, ddecomp, &times, units, fds.FdBlackHoles, fds.FdBlackholeDetails);
+                blackhole(&Act, afac, atime, &All.CP, &Tree, ddecomp, &times, units, Fds->FdBlackHoles, Fds->FdBlackholeDetails);
+                //trace_singleblackhole(Fds->FdSingleBH, atime, "blackhole", trace_bhid, PartManager);
+            }
             message(0, "**** Passed Black Hole stuff **** \n");
+            
+        
 
             /**** radiative cooling and star formation *****/
             if(All.CoolingOn)
                 //NYC: afac here because it only enters into the physical quantity conversion (i.e. no timestep involved)
-                cooling_and_starformation(&Act, afac, get_dloga_for_bin(times.mintimebin, times.Ti_Current), &Tree, GravAccel, ddecomp, &All.CP, GradRho_mag, fds.FdSfr);
+                cooling_and_starformation(&Act, afac, get_dloga_for_bin(times.mintimebin, times.Ti_Current), &Tree, GravAccel, ddecomp, &All.CP, GradRho_mag, Fds->FdSfr, atime);
+                //trace_singleblackhole(Fds->FdSingleBH, atime, "cooling", trace_bhid, PartManager);
         }
+
         /* We don't need this timestep's tree anymore.*/
         force_tree_free(&Tree);
         message(0, "**** Passed Gas stuff **** \n");
 
+
+
+
+        
+        
         /* If a snapshot is requested, write it.         *
          * We only attempt to output on sync points. This is the only chance where all variables are
          * synchronized in a consistent state in a K(KDDK)^mK scheme.
@@ -734,7 +813,9 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
         if (All.CP.ComovingIntegrationOn) {
             WriteFOF = 0;
         }
-        
+
+
+
         if(WriteSnapshot || WriteFOF) {
             /* Get a new snapshot*/
             SnapshotFileCount++;
@@ -758,6 +839,8 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
             write_checkpoint(SnapshotFileCount, WriteFOF, All.MetalReturnOn, atime, &All.CP, All.OutputDir, All.OutputDebugFields);
         message(0, "**** Saved checkpoint **** \n");
         
+
+
         /* Save FOF tables after checkpoint so that if there is a FOF save bug we have particle tables available to debug it*/
 
         if (WriteFOF) {
@@ -780,7 +863,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
         check_kick_drift_times(PartManager, times.Ti_Current);
 #endif
         //NYC: atime here because we want to get the real time in log file
-        write_cpu_log(NumCurrentTiStep, atime, fds.FdCPU, Clocks.ElapsedTime);    /* produce some CPU usage info */
+        write_cpu_log(NumCurrentTiStep, atime, Fds->FdCPU, Clocks.ElapsedTime);    /* produce some CPU usage info */
 
         report_memory_usage("RUN");
 
@@ -801,11 +884,35 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
             message(0, "**** Inside Non-HierarchicalGravity **** \n");
             message(0, "NumCurrentTiStep = %d \n", NumCurrentTiStep);
             const double asmth = pm.Asmth * PartManager->BoxSize / pm.Nmesh; // TODO_NYC: asmth should not change with boxsize
-            badtimestep = find_timesteps(&Act, &times, afac, All.FastParticleType, &All.CP, asmth, NumCurrentTiStep == 0);
+
+
+            
+                    
+            badtimestep = find_timesteps(&Act, &times, afac, All.FastParticleType, &All.CP, asmth, NumCurrentTiStep == 0, All.KetjuOn, units);
+            //trace_singleblackhole(Fds->FdSingleBH, atime, "find_timesteps", trace_bhid, PartManager);
+
+
             /* Update velocity and ti_kick to the new step, with the newly computed step size. Unsyncs ti_kick and ti_drift.
              * Both hydro and gravity are kicked.*/
-            apply_half_kick(&Act, &All.CP, &times, afac); //NYC: afac here because it is only passed in do_hydro_kick() to get vel limits
-            message(0, "**** Second Half Kick ****\n");
+            //apply_half_kick(&Act, &All.CP, &times, afac, All.KetjuOn, units); //NYC: afac here because it is only passed in do_hydro_kick() to get vel limits
+            //trace_singleblackhole(Fds->FdSingleBH, atime, "first apply_half_kick", trace_bhid, PartManager);
+
+            if(All.KetjuOn){
+                hydro_kick = 0;
+                apply_half_kick(&Act, &All.CP, &times, afac, hydro_kick, units); //NYC: afac here because it is only passed in do_hydro_kick() to get vel limits
+                Ketju_run_integration(&times, units, MPI_COMM_WORLD, Fds->FdSingleBH, Fds->FdKetjuRegion, trace_bhid, &All.CP, RestartSnapNum, All.OutputDir);
+                apply_hydro_half_kick(&Act, &All.CP, &times, afac);
+                //trace_singleblackhole(Fds->FdSingleBH, atime, "Ketju_run_integration", trace_bhid, PartManager);
+                }
+            else{
+                hydro_kick = 1;
+                apply_half_kick(&Act, &All.CP, &times, afac, hydro_kick, units); //NYC: afac here because it is only passed in do_hydro_kick() to get vel limits
+            }
+            message(0, "**** Second Half Kick ****\n");            
+
+
+
+            
         } else {
             /* This finds the gravity timesteps, computes the gravitational forces
              * and kicks the particles on the gravitational timeline.
@@ -815,23 +922,41 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
             if(totgravactive)
                 //Non-ComovingIntegration Note: it seems sufficient to put afac here
                 // input into long-range, shortrange grav timestep calc, which only used atime as scalefac calculation
-                badtimestep = hierarchical_gravity_and_timesteps(&Act, &pm, ddecomp, GravAccel, &times, afac, HybridNuTracer, All.FastParticleType, &All.CP, All.OutputDir);
+                badtimestep = hierarchical_gravity_and_timesteps(&Act, &pm, ddecomp, GravAccel, &times, afac, HybridNuTracer, All.FastParticleType, &All.CP, All.OutputDir, All.KetjuOn, units);                
+                //trace_singleblackhole(Fds->FdSingleBH, atime, "hierarchical_gravity_and_timesteps", trace_bhid, PartManager);
+
+            if(All.KetjuOn){
+                Ketju_run_integration(&times, units, MPI_COMM_WORLD, Fds->FdSingleBH, Fds->FdKetjuRegion, trace_bhid, &All.CP, RestartSnapNum, All.OutputDir);
+                //trace_singleblackhole(Fds->FdSingleBH, atime, "Ketju_run_integration", trace_bhid, PartManager);
+            }        
+
+
             if(GasEnabled) {
                 /* Find hydro timesteps and apply the hydro kick, unsyncing the drift and kick times. */
                 // Non-ComovingIntegration: input into do_hydro_kick, which uses atime as scalefac, so afac here
                 badtimestep += find_hydro_timesteps(&Act, &times, afac, &All.CP, NumCurrentTiStep == 0);
+
                 /* If there is no hydro kick to do we still need to update the kick times.*/
                 if(!badtimestep)
                     apply_hydro_half_kick(&Act, &All.CP, &times, afac); 
+                    //trace_singleblackhole(Fds->FdSingleBH, atime, "hierarchi hydro first kick", trace_bhid, PartManager);
             }
         }
+
+
+        //if(All.KetjuOn){
+        //    Ketju_run_integration(&times, units, MPI_COMM_WORLD, Fds->FdSingleBH, Fds->FdKetjuRegion, trace_bhid, &All.CP, RestartSnapNum, All.OutputDir);
+            //trace_singleblackhole(Fds->FdSingleBH, atime, "Ketju_run_integration", trace_bhid, PartManager);
+        //    }        
+
+
+
+
         if(badtimestep) {
             message(0, "Bad timestep spotted: terminating and saving snapshot.\n");
             dump_snapshot("TIMESTEP-DUMP", atime, &All.CP, All.OutputDir);
             endrun(0, "Ending due to bad timestep.\n");
         }
-
-
 
         /* Delayed here because it is allocated high before GravAccel*/
         if(GradRho_mag) {
@@ -841,10 +966,12 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
 
         /* Set ti_kick in the time structure*/
         update_kick_times(&times);
-
+        
         if(is_PM) {
             apply_PM_half_kick(&All.CP, &times);
+            //trace_singleblackhole(Fds->FdSingleBH, atime, "first apply_PM_half_kick", trace_bhid, PartManager);
         }
+
 
         /* We can now free the active list: the new step have new active particles*/
         free_active_particles(&Act);
@@ -853,7 +980,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
         message(0, "**** Finished One Step ****\n");
     }
 
-    close_outputfiles(&fds);
+    close_outputfiles(Fds);
 }
 
 /* Run various checks on the gravity code. Check that the short-range/long-range force split is working.*/
@@ -896,7 +1023,7 @@ runfof(const int RestartSnapNum, const inttime_t Ti_Current, const struct header
         }
         ForceTree Tree = {0};
         struct grav_accel_store gg = {0};
-        cooling_and_starformation(&Act, header->TimeSnapshot, 0, &Tree, gg, ddecomp, &All.CP, GradRho, NULL);
+        cooling_and_starformation(&Act, header->TimeSnapshot, 0, &Tree, gg, ddecomp, &All.CP, GradRho, NULL, header->TimeSnapshot);
         if(GradRho)
             myfree(GradRho);
     }

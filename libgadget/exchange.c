@@ -3,11 +3,12 @@
 #include <string.h>
 #include "exchange.h"
 #include "slotsmanager.h"
+#include "timebinmgr.h"
 #include "partmanager.h"
 #include "walltime.h"
 #include "drift.h"
 #include "timefac.h"
-
+#include "stats.h"
 #include "utils.h"
 #include "utils/mpsort.h"
 
@@ -103,6 +104,8 @@ domain_free_exchangeplan(ExchangePlan * plan)
 int domain_exchange(ExchangeLayoutFunc layoutfunc, const void * layout_userdata, int do_gc, struct DriftData * drift, struct part_manager_type * pman, struct slots_manager_type * sman, int maxiter, MPI_Comm Comm) {
     int failure = 0;
 
+
+    
     /* register the MPI types used in communication if not yet. */
     if (MPI_TYPE_PLAN_ENTRY == 0) {
         MPI_Type_contiguous(sizeof(ExchangePlanEntry), MPI_BYTE, &MPI_TYPE_PLAN_ENTRY);
@@ -111,17 +114,22 @@ int domain_exchange(ExchangeLayoutFunc layoutfunc, const void * layout_userdata,
 
     /*Structure for building a list of particles that will be exchanged*/
     ExchangePlan plan = domain_init_exchangeplan(Comm);
-
+    
     walltime_measure("/Domain/exchange/init");
 
     int iter = 0;
 
+
+    //trace_singleblackhole(FdSingleBH, -1, "inside domain_exchange: outside the loop", 8604, PartManager);
     do {
         if(iter >= maxiter) {
             failure = 1;
             break;
         }
+
+
         domain_build_exchange_list(layoutfunc, layout_userdata, &plan, (iter > 0 ? NULL : drift), pman, sman, Comm);
+
 
         /*Exit early if nothing to do*/
         if(!MPIU_Any(plan.nexchange > 0, Comm))
@@ -141,8 +149,9 @@ int domain_exchange(ExchangeLayoutFunc layoutfunc, const void * layout_userdata,
          * The gc decision is made collective in domain_exchange_once,
          * and a gc will also be done if we have no space for particles.*/
         int really_do_gc = do_gc || (plan.last < plan.nexchange);
-
         failure = domain_exchange_once(&plan, really_do_gc, pman, sman, Comm);
+
+
 
         myfree(plan.ExchangeList);
 
@@ -150,7 +159,7 @@ int domain_exchange(ExchangeLayoutFunc layoutfunc, const void * layout_userdata,
             break;
         iter++;
     }
-    while(MPIU_Any(plan.last < plan.nexchange, Comm));
+    while(MPIU_Any(plan.last < plan.nexchange, Comm));    
 #ifdef DEBUG
     /* This does not apply for the FOF code, where the exchange list is pre-assigned
      * and we only get one iteration. */
@@ -165,9 +174,10 @@ int domain_exchange(ExchangeLayoutFunc layoutfunc, const void * layout_userdata,
     }
 #endif
     domain_free_exchangeplan(&plan);
-
     return failure;
 }
+
+
 
 /*Function decides whether the GC will compact slots.
  * Sets compact[6]. Is collective.*/
@@ -211,6 +221,7 @@ static int domain_exchange_once(ExchangePlan * plan, int do_gc, struct part_mana
         slotBuf[ptype] = (char *) mymalloc2("SlotBuf", plan->toGoSum.slots[ptype] * sman->info[ptype].elsize);
     }
 
+
     partBuf = (struct particle_data *) mymalloc2("partBuf", plan->toGoSum.base * sizeof(struct particle_data));
 
     ExchangePlanEntry * toGoPtr = ta_malloc("toGoPtr", ExchangePlanEntry, plan->NTask);
@@ -236,8 +247,11 @@ static int domain_exchange_once(ExchangePlan * plan, int do_gc, struct part_mana
         toGoPtr[target].base ++;
         /* mark the particle for removal. Both secondary and base slots will be marked. */
         slots_mark_garbage(i, pman, sman);
+        //message(0, "DEBUG...exchange 239 %d \n", i);
     }
+    
 
+    
     myfree(plan->layouts);
     ta_free(toGoPtr);
     walltime_measure("/Domain/exchange/makebuf");
@@ -254,6 +268,7 @@ static int domain_exchange_once(ExchangePlan * plan, int do_gc, struct part_mana
         walltime_measure("/Domain/exchange/garbage");
     }
 
+ 
     int64_t newNumPart;
     int64_t newSlots[6] = {0};
     newNumPart = pman->NumPart + plan->toGetSum.base;
@@ -317,6 +332,8 @@ static int domain_exchange_once(ExchangePlan * plan, int do_gc, struct part_mana
                      Comm);
     }
 
+  
+
 #ifdef DEBUG
         message(0, "Done with AlltoAllv\n");
 #endif
@@ -369,12 +386,15 @@ static int domain_exchange_once(ExchangePlan * plan, int do_gc, struct part_mana
         myfree(slotBuf[ptype]);
     }
 
-    pman->NumPart = newNumPart;
 
+
+    
+    pman->NumPart = newNumPart;
+    
     for(ptype = 0; ptype < 6; ptype++) {
         if(!sman->info[ptype].enabled) continue;
         sman->info[ptype].size = newSlots[ptype];
-    }
+    }    
 
 #ifdef DEBUG
     domain_test_id_uniqueness(pman);
@@ -407,12 +427,16 @@ domain_build_exchange_list(ExchangeLayoutFunc layoutfunc, const void * layout_us
     int ThisTask;
     MPI_Comm_rank(Comm, &ThisTask);
 
+    int ii, bh_idx;
+  
     /* Can't update the random shift without re-decomposing domain*/
     const double rel_random_shift[3] = {0};
     /* Find drift factor*/
     double ddrift = 0;
+    double ddrift_test = 0;
     if(drift)
         ddrift = get_exact_drift_factor(drift->CP, drift->ti0, drift->ti1);
+        //ddrift_test = Dloga_interval_ti(drift->ti0) * (drift->ti1 - drift->ti0);
 
     /* flag the particles that need to be exported */
     size_t schedsz = plan->nexchange/numthreads+1;

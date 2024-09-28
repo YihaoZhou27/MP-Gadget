@@ -840,7 +840,7 @@ SIMPLE_PROPERTY_PI(BlackholeJumpToMinPot, JumpToMinPot, int, 1, struct bh_partic
 SIMPLE_PROPERTY_PI(BlackholeMtrack, Mtrack, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeMseed, Mseed, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeKineticFdbkEnergy, KineticFdbkEnergy, float, 1, struct bh_particle_data)
-
+SIMPLE_PROPERTY_PI(BlackholeAccpair, Binary_Accpair, uint64_t, 1, struct bh_particle_data)
 SIMPLE_SETTER_PI(STBlackholeMinPotPos , MinPotPos[0], double, 3, struct bh_particle_data)
 
 /* extra properties from excursion set addition */
@@ -1063,6 +1063,7 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
         IO_REG_NONFATAL(BlackholeMtrack,         "f4", 1, 5, IOTable);
         IO_REG_NONFATAL(BlackholeMseed,         "f4", 1, 5, IOTable);
         IO_REG_NONFATAL(BlackholeKineticFdbkEnergy, "f4", 1, 5, IOTable);
+        IO_REG_NONFATAL(BlackholeAccpair, "u8", 1, 5, IOTable);
     }
 
     /* Smoothing lengths for black hole: this is a new addition*/

@@ -12,20 +12,32 @@ GSL_LIBS ?= $(shell pkg-config --libs gsl)
 OPTIONS = $(OPTIMIZE) $(OPT)
 GADGET_TESTDATA_ROOT = $(CURDIR)/../
 
+KETJU_INTEGRATOR_DIR = ../../ketju-integrator
+
 CFLAGS = $(OPTIONS) $(GSL_INCL)
 CFLAGS += -I../depends/include
 CFLAGS += -I../
 CFLAGS += "-DLOW_PRECISION=$(LOW_PRECISION)"
 CFLAGS += "-DHIGH_PRECISION=$(HIGH_PRECISION)"
+CFLAGS += -I$(KETJU_INTEGRATOR_DIR)/include/
 #For tests
 TCFLAGS = $(CFLAGS) -DGADGET_TESTDATA_ROOT=\"$(GADGET_TESTDATA_ROOT)\"
 
 BUNDLEDLIBS = -lbigfile-mpi -lbigfile -lpfft_omp -lfftw3_mpi -lfftw3_omp -lfftw3
 LIBS  = -lm $(GSL_LIBS)
 LIBS += -L../depends/lib $(BUNDLEDLIBS)
+LIBS += -L$(KETJU_INTEGRATOR_DIR)/lib/ -lketju-integrator
+LIBS  += -lhdf5  -lz
 V ?= 0
 
+
 .objs/%.o: %.c $(INCL) Makefile $(CONFIG)
+	@cmd="$(MPICC) -c -o $@ $(CFLAGS) $<"; \
+	if test "x$(V)" = "x1" ; then echo $$cmd; fi; \
+	mkdir -p `dirname $@`; \
+	echo Compiling $<; $$cmd
+
+.objs/%.o: %.cc $(INCL) Makefile $(CONFIG) 
 	@cmd="$(MPICC) -c -o $@ $(CFLAGS) $<"; \
 	if test "x$(V)" = "x1" ; then echo $$cmd; fi; \
 	mkdir -p `dirname $@`; \
