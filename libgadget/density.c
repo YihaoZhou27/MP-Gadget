@@ -47,6 +47,14 @@ set_density_params(ParameterSet * ps)
         /*These two look like black hole parameters but they are really neighbour finding parameters*/
         DensityParams.BlackHoleNgbFactor = param_get_double(ps, "BlackHoleNgbFactor");
         DensityParams.BlackHoleMaxAccretionRadius = param_get_double(ps, "BlackHoleMaxAccretionRadius");
+
+        DensityParams.DensityScaleOn = param_get_int(ps, "DensityScaleOn");
+        DensityParams.DensityEtaScale = param_get_double(ps, "DensityResolutionEtaScale");
+        DensityParams.DensityScaleMassLimit = param_get_double(ps, "DensityScaleMassLimit")*1e-10;
+        if(DensityParams.DensityScaleOn)
+            message(1, "The Density resolution Scale Factor is %g, or gas particle with mass smaller than %g\n",
+                    DensityParams.DensityEtaScale, DensityParams.DensityScaleMassLimit);   
+
     }
     MPI_Bcast(&DensityParams, sizeof(struct density_params), MPI_BYTE, 0, MPI_COMM_WORLD);
 }
@@ -578,8 +586,19 @@ void density_check_neighbours (int i, TreeWalk * tw)
     int tid = omp_get_thread_num();
     double desnumngb = DENSITY_GET_PRIV(tw)->DesNumNgb;
 
-    if(DENSITY_GET_PRIV(tw)->BlackHoleOn && P[i].Type == 5)
+    if(DENSITY_GET_PRIV(tw)->BlackHoleOn && P[i].Type == 5){
         desnumngb = desnumngb * DensityParams.BlackHoleNgbFactor;
+    }
+
+    if(DensityParams.DensityScaleOn){
+        if(P[i].Type == 0 && (P[i].Mass < DensityParams.DensityScaleMassLimit)){
+            desnumngb = desnumngb * pow(DensityParams.DensityEtaScale, NUMDIMS);
+        }        
+        if(P[i].Type == 5){
+            desnumngb = desnumngb * pow(DensityParams.DensityEtaScale, NUMDIMS);
+        }
+
+    }
 
     MyFloat * Left = DENSITY_GET_PRIV(tw)->Left;
     MyFloat * Right = DENSITY_GET_PRIV(tw)->Right;
@@ -684,7 +703,7 @@ set_init_hsml(ForceTree * tree, DomainDecomp * ddecomp, const double MeanGasSepa
 {
     /* Need moments because we use them to set Hsml*/
     force_tree_calc_moments(tree, ddecomp);
-    const double DesNumNgb = GetNumNgb(GetDensityKernelType());
+    double DesNumNgb = GetNumNgb(GetDensityKernelType());
     int i;
     #pragma omp parallel for
     for(i = 0; i < PartManager->NumPart; i++)
@@ -694,6 +713,15 @@ set_init_hsml(ForceTree * tree, DomainDecomp * ddecomp, const double MeanGasSepa
             continue;
 
         int no = force_get_father(i, tree);
+
+        if(DensityParams.DensityScaleOn){
+            if(P[i].Type ==5){
+                DesNumNgb *= pow(DensityParams.DensityEtaScale, NUMDIMS);
+            }
+            if(P[i].Type == 0 && (P[i].Mass < DensityParams.DensityScaleMassLimit)){
+                DesNumNgb *= pow(DensityParams.DensityEtaScale, NUMDIMS);
+            }
+        }         
 
         while(10 * DesNumNgb * P[i].Mass > tree->Nodes[no].mom.mass)
         {

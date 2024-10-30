@@ -46,8 +46,11 @@
 
 static struct metal_return_params
 {
-    double Sn1aN0;
     int SPHWeighting;
+    int DensityScaleOn;
+    double DensityEtaScale;
+    double DensityScaleMassLimit;    
+    double Sn1aN0;
     double MaxNgbDeviation;
 } MetalParams;
 
@@ -67,6 +70,15 @@ set_metal_return_params(ParameterSet * ps)
         MetalParams.Sn1aN0 = param_get_double(ps, "MetalsSn1aN0");
         MetalParams.SPHWeighting = param_get_int(ps, "MetalsSPHWeighting");
         MetalParams.MaxNgbDeviation = param_get_double(ps, "MetalsMaxNgbDeviation");
+
+        MetalParams.DensityScaleOn = param_get_int(ps, "DensityScaleOn");
+        MetalParams.DensityEtaScale = param_get_double(ps, "DensityResolutionEtaScale");
+        MetalParams.DensityScaleMassLimit = param_get_double(ps, "DensityScaleMassLimit")*1e-10;
+        if(MetalParams.DensityScaleOn)
+            message(1, "The Density resolution Scale Factor is %g, or gas particle with mass smaller than %g\n",
+                    MetalParams.DensityEtaScale, MetalParams.DensityScaleMassLimit);              
+
+
     }
     MPI_Bcast(&MetalParams, sizeof(struct metal_return_params), MPI_BYTE, 0, MPI_COMM_WORLD);
 }
@@ -744,6 +756,7 @@ typedef struct {
 typedef struct
 {
     TreeWalkQueryBase base;
+    MyFloat Mass;
     MyFloat Hsml[NHSML];
 } TreeWalkQueryStellarDensity;
 
@@ -810,6 +823,7 @@ static void
 stellar_density_copy(int place, TreeWalkQueryStellarDensity * I, TreeWalk * tw)
 {
     int i;
+    I->Mass = P[place].Mass;
     for(i = 0; i < NHSML; i++)
         I->Hsml[i] = effhsml(place, i, tw);
 }
@@ -835,6 +849,12 @@ void stellar_density_check_neighbours (int i, TreeWalk * tw)
     int pi = P[i].PI;
     int tid = omp_get_thread_num();
     double desnumngb = STELLAR_DENSITY_GET_PRIV(tw)->DesNumNgb;
+    
+    if(MetalParams.DensityScaleOn){
+        if(P[i].Mass < MetalParams.DensityScaleMassLimit){
+            desnumngb = desnumngb * pow(MetalParams.DensityEtaScale, NUMDIMS);
+        }
+    }
 
     const int maxcmpt = STELLAR_DENSITY_GET_PRIV(tw)->maxcmpte[pi];
     int j;
@@ -916,6 +936,13 @@ stellar_density_ngbiter(
         }
     }
     double desnumngb = STELLAR_DENSITY_GET_PRIV(lv->tw)->DesNumNgb;
+
+
+    if(MetalParams.DensityScaleOn){
+        if(I->Mass < MetalParams.DensityScaleMassLimit){
+            desnumngb = desnumngb * pow(MetalParams.DensityEtaScale, NUMDIMS);
+        }
+    }
     /* If there is an entry which is above desired DesNumNgb,
      * we don't need to search past it. After this point
      * all entries in the Ngb table above O->Ngb are invalid.*/

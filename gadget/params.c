@@ -74,6 +74,11 @@ create_gadget_parameter_set()
     param_declare_string(ps, "CpuFile", OPTIONAL, "cpu.txt", "File to output cpu usage information");
     param_declare_string(ps, "OutputList", REQUIRED, NULL, "List of output scale factors.");
 
+    param_declare_int(ps, "DensityScaleOn", OPTIONAL, 0, "Whether we need to scale the density for less massive particle (is supposed on to be on for particle splitting).");
+    param_declare_double(ps, "DensityResolutionEtaScale", OPTIONAL, 1, "Scale the number of ngb particle when calculate the density. (used for particle splitting)");
+    param_declare_double(ps, "DensityScaleMassLimit", OPTIONAL, 0, "The Mass limit of the gas to scale the ngb part number (sml for BH of any mass will be scaled)");
+
+
     /*Cosmology parameters*/
     param_declare_double(ps, "Omega0", REQUIRED, 0.2814, "Total matter density at z=0");
     param_declare_double(ps, "CMBTemperature", OPTIONAL, 2.7255,

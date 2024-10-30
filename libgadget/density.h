@@ -9,12 +9,15 @@
 
 struct density_params
 {
+    int DensityScaleOn;
     double DensityResolutionEta;		/*!< SPH resolution eta. See Price 2011. eq 12*/
     double MaxNumNgbDeviation;	/*!< Maximum allowed deviation neighbour number */
 
     /* These are for black hole neighbour finding and so belong in the density module, not the black hole module.*/
     double BlackHoleNgbFactor;	/*!< Factor by which the normal SPH neighbour should be increased/decreased */
     double BlackHoleMaxAccretionRadius;
+    double DensityEtaScale;
+    double DensityScaleMassLimit;
 
     enum DensityKernelType DensityKernelType;  /* 0 for Cubic Spline,  (recmd NumNgb = 33)
                                1 for Quintic spline (recmd  NumNgb = 97) */
