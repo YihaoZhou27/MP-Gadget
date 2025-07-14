@@ -37,4 +37,5 @@
 
 #define  HYDROGEN_MASSFRAC 0.76	/*!< mass fraction of hydrogen, relevant only for radiative cooling */
 
+#define SOLAR_METAL 0.0127 
 #endif

@@ -31,6 +31,7 @@ struct Group
     int LenType[6];
     double MassType[6];
     double Mass;
+    double sfmp_mass;   // the mass of the star-forming, low-metallicity gas, which is used as bh-seeding criteria 
     /* Note: this is in the translated frame,
      * subtract CurrentParticleOffset to get the physical frame.*/
     double CM[3];

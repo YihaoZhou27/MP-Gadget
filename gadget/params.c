@@ -216,9 +216,15 @@ create_gadget_parameter_set()
 
     param_declare_double(ps, "BlackHoleAccretionFactor", OPTIONAL, 100, "BH accretion boosting factor relative to the rate from the Bondi accretion model.");
     param_declare_double(ps, "BlackHoleEddingtonFactor", OPTIONAL, 2.1, "Maximum Black hole accretion as a function of Eddington.");
-    param_declare_double(ps, "SeedBlackHoleMass", OPTIONAL, 2e-5, "Mass of initial black hole seed in internal mass units. If this is too much smaller than the gas particle mass, BH will not accrete.");
+    param_declare_double(ps, "SeedBlackHoleMass", OPTIONAL, 2e-5, "Mass of initial black hole seed in internal mass units. If this is too much smaller than the gas particle mass, BH will not accrete. When MaxSeedBlackHoleMass >0, this is the lower limit of the BHseed mass.");
     param_declare_double(ps, "MaxSeedBlackHoleMass", OPTIONAL, 0, "Black hole seed masses are drawn from a power law. This is the upper limit on the BH seed mass. If <= 0 then all BHs have the SeedBlackHoleMass and the power law is disabled.");
     param_declare_double(ps, "SeedBlackHoleMassIndex", OPTIONAL, -2, "Power law index of the seed mass distribution");
+
+
+    param_declare_int(ps, "BlackHoleSeedGasBased", OPTIONAL, 0, "Used gas-based black hole seeding prescriptions");
+    param_declare_double(ps, "BlackHoleSeedsfmpGas", OPTIONAL, 0.001, "The mass of star-forming, metal-poor gas for seeding blackhole. in the unit of 1e10/hh soloarmass. Only used when BlackHoleSeedGasBased = 1");
+    param_declare_double(ps, "BlackHoleseedsMetalThres", OPTIONAL, 0.0001, "The threshold of the metal-poor gas to seed blackhole, in the unit of solar metallicity (0.0127) Only used when BlackHoleSeedGasBased = 1");
+
 
     param_declare_double(ps, "BlackHoleNgbFactor", OPTIONAL, 2, "Factor by which to increase the number of neighbours for a black hole.");
 

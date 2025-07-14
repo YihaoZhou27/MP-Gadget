@@ -25,7 +25,7 @@
 #include "utils/openmpsort.h"
 #include "utils/spinlocks.h"
 #include "utils/string.h"
-
+#include "physconst.h"
 /*! \file fof.c
  *  \brief parallel FoF group finder
  */
@@ -42,10 +42,15 @@ struct FOFParams
     double MinMStarForNewSeed; /* Minimum stellar mass required before new seed */
     double FOFHaloLinkingLength;
     double FOFHaloComovingLinkingLength; /* in code units */
+    double BlackHoleSeedsfmpGas;
+    double BlackHoleseedsMetalThres;
+
+
     int FOFHaloMinLength;
     int FOFPrimaryLinkTypes;
     int FOFSecondaryLinkTypes;
     int ExcursionSetReionOn;
+    int BlackHoleSeedGasBased;
 } fof_params;
 
 /*Set the parameters of the BH module*/
@@ -59,9 +64,12 @@ void set_fof_params(ParameterSet * ps)
         fof_params.FOFHaloMinLength = param_get_int(ps, "FOFHaloMinLength");
         fof_params.MinFoFMassForNewSeed = param_get_double(ps, "MinFoFMassForNewSeed");
         fof_params.MinMStarForNewSeed = param_get_double(ps, "MinMStarForNewSeed");
+        fof_params.BlackHoleSeedsfmpGas = param_get_double(ps, "BlackHoleSeedsfmpGas");
+        fof_params.BlackHoleseedsMetalThres = param_get_double(ps, "BlackHoleseedsMetalThres");
         fof_params.FOFPrimaryLinkTypes = param_get_int(ps, "FOFPrimaryLinkTypes");
         fof_params.FOFSecondaryLinkTypes = param_get_int(ps, "FOFSecondaryLinkTypes");
         fof_params.ExcursionSetReionOn = param_get_int(ps, "ExcursionSetReionOn");
+        fof_params.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
     }
     MPI_Bcast(&fof_params, sizeof(struct FOFParams), MPI_BYTE, 0, MPI_COMM_WORLD);
 }
@@ -77,6 +85,10 @@ void set_fof_testpar(int FOFSaveParticles, double FOFHaloLinkingLength, int FOFH
     /* For seeding (not yet tested)*/
     fof_params.MinFoFMassForNewSeed = 2;
     fof_params.MinMStarForNewSeed = 5e-4;
+
+    fof_params.BlackHoleSeedGasBased = 0;
+    fof_params.BlackHoleSeedsfmpGas = 1e-3;
+    fof_params.BlackHoleseedsMetalThres = 1e-4;
 
 }
 
@@ -599,6 +611,7 @@ static void fof_reduce_group(void * pdst, void * psrc) {
     }
 
     gdst->Sfr += gsrc->Sfr;
+    gdst->sfmp_mass += gsrc->sfmp_mass;
     gdst->GasMetalMass += gsrc->GasMetalMass;
     gdst->StellarMetalMass += gsrc->StellarMetalMass;
     gdst->MassHeIonized += gsrc->MassHeIonized;
@@ -651,6 +664,11 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
         int j;
         for(j = 0; j < NMETALS; j++)
             gdst->GasMetalElemMass[j] += SPHP(index).Metals[j] * P[index].Mass;
+
+        if (SPHP(index).Sfr > 0 && SPHP(index).Metallicity < (fof_params.BlackHoleseedsMetalThres * SOLAR_METAL)){
+            gdst->sfmp_mass += P[index].Mass;
+        }
+
     }
     if(P[index].Type == 4) {
         int j;
@@ -1355,11 +1373,20 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
     #pragma omp parallel for reduction(+:Nexport)
     for(i = 0; i < fof->Ngroups; i++)
     {
-        Marked[i] =
-            (fof->Group[i].Mass >= fof_params.MinFoFMassForNewSeed)
-        &&  (fof->Group[i].MassType[4] >= fof_params.MinMStarForNewSeed)
-        &&  (fof->Group[i].LenType[5] == 0)
-        &&  (fof->Group[i].seed_index >= 0);
+        if (fof_params.BlackHoleSeedGasBased){
+            Marked[i] =
+                (fof->Group[i].Mass >= fof_params.MinFoFMassForNewSeed)
+            &&  (fof->Group[i].sfmp_mass >= fof_params.BlackHoleSeedsfmpGas)
+            &&  (fof->Group[i].LenType[5] == 0)
+            &&  (fof->Group[i].seed_index >= 0);
+        }
+        else{
+            Marked[i] =
+                (fof->Group[i].Mass >= fof_params.MinFoFMassForNewSeed)
+            &&  (fof->Group[i].MassType[4] >= fof_params.MinMStarForNewSeed)
+            &&  (fof->Group[i].LenType[5] == 0)
+            &&  (fof->Group[i].seed_index >= 0);
+        }
 
         if(Marked[i]) Nexport ++;
     }
