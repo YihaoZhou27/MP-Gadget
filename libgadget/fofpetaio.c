@@ -533,6 +533,7 @@ SIMPLE_PROPERTY_FOF(GasMetalElemMass, GasMetalElemMass[0], float, NMETALS)
 SIMPLE_PROPERTY_FOF(StellarMetalElemMass, StellarMetalElemMass[0], float, NMETALS)
 SIMPLE_PROPERTY_FOF(BlackholeMass, BH_Mass, float, 1)
 SIMPLE_PROPERTY_FOF(BlackholeAccretionRate, BH_Mdot, float, 1)
+SIMPLE_PROPERTY_FOF(GasSfmpMass, sfmp_mass, float, 1)
 SIMPLE_PROPERTY_FOF(MassHeIonized, MassHeIonized, float, 1)
 
 static void fof_register_io_blocks(int MetalReturnOn, struct IOTable * IOTable) {
@@ -565,4 +566,5 @@ static void fof_register_io_blocks(int MetalReturnOn, struct IOTable * IOTable) 
     /* Zero if black hole is not on*/
     IO_REG(BlackholeMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
     IO_REG(BlackholeAccretionRate, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+    IO_REG(GasSfmpMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
 }
