@@ -127,7 +127,7 @@ petaio_build_selection(int * selection,
 
     #pragma omp parallel for reduction(+: ptype_count[:6])
     for(i = 0; i < NumPart; i ++) {
-        if(P[i].IsGarbage)
+        if(Parts[i].IsGarbage)
             continue;
         if((select_func == NULL) || (select_func(i, Parts) != 0)) {
             int ptype = Parts[i].Type;
@@ -144,7 +144,7 @@ petaio_build_selection(int * selection,
     ptype_count[5] = 0;
     for(i = 0; i < NumPart; i ++) {
         int ptype = Parts[i].Type;
-        if(P[i].IsGarbage)
+        if(Parts[i].IsGarbage)
             continue;
         if((select_func == NULL) || (select_func(i, Parts) != 0)) {
             selection[ptype_offset[ptype] + ptype_count[ptype]] = i;
@@ -317,6 +317,9 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
                 keep |= (0 == strcmp(IOTable->ent[i].name, "BlackholeMass"));
                 keep |= (0 == strcmp(IOTable->ent[i].name, "MinPotPos"));
             }
+            /* Some IC codes may set the gas particle mass directly, rather than in the header*/
+            if(ptype == 0 && header->MassTable[ptype] <= 0)
+                keep |= (0 == strcmp(IOTable->ent[i].name, "Mass"));
             if(!keep) continue;
         }
         if(IOTable->ent[i].setter == NULL) {
