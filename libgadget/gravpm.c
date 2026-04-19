@@ -15,9 +15,12 @@
 
 #include "cosmology.h"
 #include "neutrinos_lra.h"
+#include "tidalfield.h"
+#include "slotsmanager.h"
 
 static int pm_mark_region_for_node(int startno, int rid, int * RegionInd, const ForceTree * tt);
 static void convert_node_to_region(PetaPM * pm, PetaPMRegion * r, struct NODE * Nodes);
+static double diff_kernel(double w);
 
 static int hybrid_nu_gravpm_is_active(int i);
 static void potential_transfer(PetaPM * pm, int64_t k2, int kpos[3], pfft_complex * value);
@@ -37,6 +40,63 @@ static PetaPMFunctions functions [] =
     {"ForceZ", force_z_transfer, readout_force_z},
     {NULL, NULL, NULL},
 };
+
+/* --- PM tidal tensor transfer functions ---
+ * T_ij(k) = -K_i * K_j * Phi(k), where K_i is the discrete derivative operator.
+ * This is a real multiplication (second derivative in Fourier space). */
+static void tidal_transfer(PetaPM * pm, int ki, int kj, pfft_complex * value) {
+    double fac = diff_kernel(ki * (2 * M_PI / pm->Nmesh)) * (pm->Nmesh / pm->BoxSize)
+               * diff_kernel(kj * (2 * M_PI / pm->Nmesh)) * (pm->Nmesh / pm->BoxSize);
+    /* Negative sign: T_ij = d^2 Phi / dx_i dx_j, Fourier gives (ik_i)(ik_j) = -k_i k_j */
+    fac = -fac;
+    value[0][0] *= fac;
+    value[0][1] *= fac;
+}
+static void tidal_xx_transfer(PetaPM * pm, int64_t k2, int kpos[3], pfft_complex * value) {
+    tidal_transfer(pm, kpos[0], kpos[0], value);
+}
+static void tidal_yy_transfer(PetaPM * pm, int64_t k2, int kpos[3], pfft_complex * value) {
+    tidal_transfer(pm, kpos[1], kpos[1], value);
+}
+static void tidal_zz_transfer(PetaPM * pm, int64_t k2, int kpos[3], pfft_complex * value) {
+    tidal_transfer(pm, kpos[2], kpos[2], value);
+}
+static void tidal_xy_transfer(PetaPM * pm, int64_t k2, int kpos[3], pfft_complex * value) {
+    tidal_transfer(pm, kpos[0], kpos[1], value);
+}
+static void tidal_xz_transfer(PetaPM * pm, int64_t k2, int kpos[3], pfft_complex * value) {
+    tidal_transfer(pm, kpos[0], kpos[2], value);
+}
+static void tidal_yz_transfer(PetaPM * pm, int64_t k2, int kpos[3], pfft_complex * value) {
+    tidal_transfer(pm, kpos[1], kpos[2], value);
+}
+
+/* --- PM tidal tensor readout functions ---
+ * Only accumulate for gas particles (Type == 0). */
+static void readout_tidal_xx(PetaPM * pm, int i, double * mesh, double weight) {
+    if(P[i].Type != 0) return;
+    SphP[P[i].PI].TidalTensorPM[0] += weight * mesh[0];
+}
+static void readout_tidal_yy(PetaPM * pm, int i, double * mesh, double weight) {
+    if(P[i].Type != 0) return;
+    SphP[P[i].PI].TidalTensorPM[1] += weight * mesh[0];
+}
+static void readout_tidal_zz(PetaPM * pm, int i, double * mesh, double weight) {
+    if(P[i].Type != 0) return;
+    SphP[P[i].PI].TidalTensorPM[2] += weight * mesh[0];
+}
+static void readout_tidal_xy(PetaPM * pm, int i, double * mesh, double weight) {
+    if(P[i].Type != 0) return;
+    SphP[P[i].PI].TidalTensorPM[3] += weight * mesh[0];
+}
+static void readout_tidal_xz(PetaPM * pm, int i, double * mesh, double weight) {
+    if(P[i].Type != 0) return;
+    SphP[P[i].PI].TidalTensorPM[4] += weight * mesh[0];
+}
+static void readout_tidal_yz(PetaPM * pm, int i, double * mesh, double weight) {
+    if(P[i].Type != 0) return;
+    SphP[P[i].PI].TidalTensorPM[5] += weight * mesh[0];
+}
 
 static PetaPMRegion * _prepare(PetaPM * pm, PetaPMParticleStruct * pstruct, void * userdata, int * Nregions);
 
@@ -85,10 +145,19 @@ gravpm_force(PetaPM * pm, DomainDecomp * ddecomp, Cosmology * CP, double Time, d
         pstruct.active = &hybrid_nu_gravpm_is_active;
 
     int i;
+    int tidal_on = get_tidalfield_on();
+
     #pragma omp parallel for
     for(i = 0; i < PartManager->NumPart; i++)
     {
         P[i].GravPM[0] = P[i].GravPM[1] = P[i].GravPM[2] = 0;
+    }
+
+    /* Initialize PM tidal tensor storage for gas particles */
+    if(tidal_on) {
+        #pragma omp parallel for
+        for(i = 0; i < SlotsManager->info[0].size; i++)
+            memset(SphP[i].TidalTensorPM, 0, sizeof(SphP[i].TidalTensorPM));
     }
 
     /* Tree freed in PM*/
@@ -106,7 +175,25 @@ gravpm_force(PetaPM * pm, DomainDecomp * ddecomp, Cosmology * CP, double Time, d
      * Therefore the force transfer functions are based on the potential,
      * not the density.
      * */
-    petapm_force(pm, _prepare, &global_functions, functions, &pstruct, &Tree);
+
+    /* Build functions array: 4 standard + up to 6 tidal + 1 NULL terminator */
+    PetaPMFunctions allfunctions[11];
+    int nfunc = 0;
+    allfunctions[nfunc++] = (PetaPMFunctions){"Potential", NULL, readout_potential};
+    allfunctions[nfunc++] = (PetaPMFunctions){"ForceX", force_x_transfer, readout_force_x};
+    allfunctions[nfunc++] = (PetaPMFunctions){"ForceY", force_y_transfer, readout_force_y};
+    allfunctions[nfunc++] = (PetaPMFunctions){"ForceZ", force_z_transfer, readout_force_z};
+    if(tidal_on) {
+        allfunctions[nfunc++] = (PetaPMFunctions){"TidalXX", tidal_xx_transfer, readout_tidal_xx};
+        allfunctions[nfunc++] = (PetaPMFunctions){"TidalYY", tidal_yy_transfer, readout_tidal_yy};
+        allfunctions[nfunc++] = (PetaPMFunctions){"TidalZZ", tidal_zz_transfer, readout_tidal_zz};
+        allfunctions[nfunc++] = (PetaPMFunctions){"TidalXY", tidal_xy_transfer, readout_tidal_xy};
+        allfunctions[nfunc++] = (PetaPMFunctions){"TidalXZ", tidal_xz_transfer, readout_tidal_xz};
+        allfunctions[nfunc++] = (PetaPMFunctions){"TidalYZ", tidal_yz_transfer, readout_tidal_yz};
+    }
+    allfunctions[nfunc] = (PetaPMFunctions){NULL, NULL, NULL};
+
+    petapm_force(pm, _prepare, &global_functions, allfunctions, &pstruct, &Tree);
     powerspectrum_sum(pm->ps);
     /*Now save the power spectrum*/
     powerspectrum_save(pm->ps, PowerOutputDir, "powerspectrum", Time, GrowthFactor(CP, Time, 1.0));

@@ -126,6 +126,8 @@ struct sph_particle_data
     MyFloat zreion; /* redshift when a particle is first ionised */
     MyFloat EscapeFraction; /* Escape fraction for SFR -> J21 calculation */
 #endif
+    MyFloat TidalFieldEigenvalues[3]; /* Tidal tensor eigenvalues, sorted descending: lambda1 >= lambda2 >= lambda3 */
+    MyFloat TidalTensorPM[6]; /* PM long-range tidal tensor: xx, yy, zz, xy, xz, yz */
 };
 
 extern struct slots_manager_type {

@@ -42,6 +42,11 @@ void gravpm_init_periodic(PetaPM * pm, double BoxSize, double Asmth, int Nmesh, 
 /* Apply the short-range window function, which includes the smoothing kernel.*/
 int grav_apply_short_range_window(double r, double * fac, double * pot, const double cellsize);
 
+/* Apply the short-range window for tidal tensor computation.
+ * Returns the window value W(r) and its derivative dW/dr.
+ * Returns 1 if beyond table range (should discard), 0 otherwise. */
+int grav_short_range_window_tidal(double r, double * window, double * dwindow_dr, const double cellsize);
+
 /* Set up the module*/
 void set_gravshort_tree_params(ParameterSet * ps);
 /* Helpers for the tests*/

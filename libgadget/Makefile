@@ -58,6 +58,7 @@ GADGET_OBJS =  \
 	 gravpm.o powerspectrum.o \
 	 forcetree.o \
 	 petapm.o gravity.o \
+	 tidalfield.o \
 	 densitykernel.o lightcone.o walltime.o\
 	 runtests.o \
 	 neutrinos_lra.o \
