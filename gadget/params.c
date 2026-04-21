@@ -258,6 +258,7 @@ create_gadget_parameter_set()
     param_declare_int(ps, "StarClusterOn", OPTIONAL, 0, "Enable star-cluster bh seeding formation.");
     param_declare_int(ps, "BHseedMassScaleMsc", OPTIONAL, 0, "When star-cluster bh seeding formation is enabled, whether the seed mass is scaled by the star cluster mass. If so, parameter SeedBlackHoleMass is in unit of Msc. If not, it is in mass unit.");
     param_declare_double(ps, "MinMscForBHseed", OPTIONAL, 0.0001, "When star-cluster bh seeding formation is enabled, the minimum star cluster mass for seeding black hole. Only used when BHseedMassScaleMsc = 1.");
+    param_declare_int(ps, "StarClusterEvolution", OPTIONAL, 0, "Enable stellar evolution (mass and metal return) for star clusters on BH particles. Only used when StarClusterOn = 1.");
 
     static ParameterEnum BlackHoleFeedbackMethodEnum [] = {
         {"mass", BH_FEEDBACK_MASS},

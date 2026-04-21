@@ -72,6 +72,7 @@ static struct run_params
 
     int BlackHoleOn;  /* if black holes are enabled */
     int StarClusterOn; /* if star cluster bh seeding formation is enabled */
+    int StarClusterEvolution; /* if stellar evolution for star clusters is enabled */
     int BlackHoleSeedHaloBased; /* if the bh seeding is halo-based */
     int BlackHoleSeedGasBased; /* if the bh seeding is gas-based */
 
@@ -166,6 +167,7 @@ set_all_global_params(ParameterSet * ps)
 
         All.BlackHoleOn = param_get_int(ps, "BlackHoleOn");
         All.StarClusterOn = param_get_int(ps, "StarClusterOn");
+        All.StarClusterEvolution = param_get_int(ps, "StarClusterEvolution");
         All.BlackHoleSeedHaloBased = param_get_int(ps, "BlackHoleSeedHaloBased");
         All.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
 
@@ -625,7 +627,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                 double AvgGasMass = All.CP.OmegaBaryon * 3 * All.CP.Hubble * All.CP.Hubble / (8 * M_PI * All.CP.GravInternal) * pow(PartManager->BoxSize, 3) / header->NTotalInit[0];
                 metal_return(&Act, &gasTree, &All.CP, atime, AvgGasMass);
                 /* Stellar evolution for star clusters attached to BH particles */
-                if(All.StarClusterOn)
+                if(All.StarClusterOn && All.StarClusterEvolution)
                     starcluster_metal_return(&Act, &gasTree, &All.CP, atime, AvgGasMass);
             }
 
