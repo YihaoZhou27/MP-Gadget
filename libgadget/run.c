@@ -27,6 +27,7 @@
 #include "hydra.h"
 #include "sfr_eff.h"
 #include "metal_return.h"
+#include "starcluster_evolution.h"
 #include "slotsmanager.h"
 #include "hci.h"
 #include "fof.h"
@@ -70,6 +71,10 @@ static struct run_params
     int TreeGravOn;     /* tree gravity force is enabled*/
 
     int BlackHoleOn;  /* if black holes are enabled */
+    int StarClusterOn; /* if star cluster bh seeding formation is enabled */
+    int BlackHoleSeedHaloBased; /* if the bh seeding is halo-based */
+    int BlackHoleSeedGasBased; /* if the bh seeding is gas-based */
+
     int StarformationOn;  /* if star formation is enabled */
     int MetalReturnOn; /* If late return of metals from AGB stars is enabled*/
     int LightconeOn;    /* Enable the light cone module,
@@ -160,6 +165,9 @@ set_all_global_params(ParameterSet * ps)
         All.RandomSeed = param_get_int(ps, "RandomSeed");
 
         All.BlackHoleOn = param_get_int(ps, "BlackHoleOn");
+        All.StarClusterOn = param_get_int(ps, "StarClusterOn");
+        All.BlackHoleSeedHaloBased = param_get_int(ps, "BlackHoleSeedHaloBased");
+        All.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
 
         All.StarformationOn = param_get_int(ps, "StarformationOn");
         All.MetalReturnOn = param_get_int(ps, "MetalReturnOn");
@@ -181,6 +189,11 @@ set_all_global_params(ParameterSet * ps)
         {
                 endrun(1, "You try to use the code with star formation enabled,\n"
                           "but you did not switch on cooling.\nThis mode is not supported.\n");
+        }
+        if (All.BlackHoleOn && !(All.StarClusterOn || All.BlackHoleSeedHaloBased || All.BlackHoleSeedGasBased))
+        {
+            endrun(1, "You try to use the code with black holes enabled,\n"
+                          "but you did not switch on star cluster bh seeding or halo-based or gas-based black hole seeding.\nThis mode is not supported.\n");
         }
         All.ExcursionSetReionOn = param_get_int(ps,"ExcursionSetReionOn");
         All.UVBGdim = param_get_int(ps, "UVBGdim");
@@ -611,6 +624,9 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
             if(All.MetalReturnOn) {
                 double AvgGasMass = All.CP.OmegaBaryon * 3 * All.CP.Hubble * All.CP.Hubble / (8 * M_PI * All.CP.GravInternal) * pow(PartManager->BoxSize, 3) / header->NTotalInit[0];
                 metal_return(&Act, &gasTree, &All.CP, atime, AvgGasMass);
+                /* Stellar evolution for star clusters attached to BH particles */
+                if(All.StarClusterOn)
+                    starcluster_metal_return(&Act, &gasTree, &All.CP, atime, AvgGasMass);
             }
 
             /* this will find new black hole seed halos.

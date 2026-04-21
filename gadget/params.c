@@ -221,6 +221,7 @@ create_gadget_parameter_set()
     param_declare_double(ps, "SeedBlackHoleMassIndex", OPTIONAL, -2, "Power law index of the seed mass distribution");
 
 
+    param_declare_int(ps, "BlackHoleSeedHaloBased", OPTIONAL, 1, "Used halo-based black hole seeding prescriptions");
     param_declare_int(ps, "BlackHoleSeedGasBased", OPTIONAL, 0, "Used gas-based black hole seeding prescriptions");
     param_declare_double(ps, "BlackHoleSeedsfmpGas", OPTIONAL, 0.001, "The mass of star-forming, metal-poor gas for seeding blackhole. in the unit of 1e10/hh soloarmass. Only used when BlackHoleSeedGasBased = 1");
     param_declare_double(ps, "BlackHoleseedsMetalThres", OPTIONAL, 0.0001, "The threshold of the metal-poor gas to seed blackhole, in the unit of solar metallicity (0.0127) Only used when BlackHoleSeedGasBased = 1");
@@ -252,6 +253,11 @@ create_gadget_parameter_set()
     param_declare_int(ps,"BH_DRAG",OPTIONAL, 1, "Add drag force to the BH dynamic");
     param_declare_int(ps,"MergeGravBound",OPTIONAL, 1, "If set to 1, apply gravitational bound criteria for merging event. This criteria would be automatically turned off if reposition is enabled.");
     param_declare_double(ps, "SeedBHDynMass", OPTIONAL, -1, "The initial dynamic mass of BH, default -1 will use the mass of gas particle. Larger Mdyn would help to stablize the BH in the early phase if turning off reposition.");
+
+    /*Star cluster parameters*/
+    param_declare_int(ps, "StarClusterOn", OPTIONAL, 0, "Enable star-cluster bh seeding formation.");
+    param_declare_int(ps, "BHseedMassScaleMsc", OPTIONAL, 0, "When star-cluster bh seeding formation is enabled, whether the seed mass is scaled by the star cluster mass. If so, parameter SeedBlackHoleMass is in unit of Msc. If not, it is in mass unit.");
+    param_declare_double(ps, "MinMscForBHseed", OPTIONAL, 0.0001, "When star-cluster bh seeding formation is enabled, the minimum star cluster mass for seeding black hole. Only used when BHseedMassScaleMsc = 1.");
 
     static ParameterEnum BlackHoleFeedbackMethodEnum [] = {
         {"mass", BH_FEEDBACK_MASS},

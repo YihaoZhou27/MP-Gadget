@@ -53,4 +53,11 @@ void stellar_density(const ActiveParticles * act, MyFloat * StarVolumeSPH, MyFlo
 
 /* Determines whether metal return runs for this star this timestep*/
 int metals_haswork(int i, MyFloat * MassReturn);
+
+/* Utility functions also used by starcluster_evolution */
+double atime_to_myr(Cosmology *CP, double atime1, double atime2, gsl_integration_workspace * gsl_work);
+void find_mass_bin_limits(double * masslow, double * masshigh, const double dtstart, const double dtend, double stellarmetal, gsl_interp2d * lifetime_tables);
+double compute_imf_norm(gsl_integration_workspace * gsl_work);
+double mass_yield(double dtmyrstart, double dtmyrend, double stellarmetal, double hub, struct interps * interp, double imf_norm, gsl_integration_workspace * gsl_work, double masslow, double masshigh);
+double metal_yield(double dtmyrstart, double dtmyrend, double stellarmetal, double hub, struct interps * interp, MyFloat * MetalYields, double imf_norm, gsl_integration_workspace * gsl_work, double masslow, double masshigh);
 #endif

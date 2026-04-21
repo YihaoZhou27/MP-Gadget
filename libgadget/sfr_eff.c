@@ -28,6 +28,7 @@
 #include "slotsmanager.h"
 #include "walltime.h"
 #include "winds.h"
+#include "starcluster.h"
 /*Only for the star slot reservation*/
 #include "forcetree.h"
 #include "domain.h"
@@ -54,6 +55,7 @@ static struct SFRParams
     double TempClouds;
     double MaxSfrTimescale;
     int BHFeedbackUseTcool;
+    int StarClusterOn; /* if star cluster bh seeding formation is enabled */
     /*!< may be used to set a floor for the gas temperature */
     double MinGasTemp;
 
@@ -71,6 +73,8 @@ static struct SFRParams
     double temp_to_u;
     /* COnversion factor from internal SFR units to solar masses per year*/
     double UnitSfr_in_solar_per_year;
+    /* Conversion factor from code pressure (GAMMA_MINUS1 * rho_phys * u) to P/k_B [K/cm^3] */
+    double pressure_to_pkb;
     /* The temperature boost from reionisation. Following 1807.09282,
      * we use a fixed, density independent value of 20000 K. I also tried
      * their eq. 3-4 but found that for this low resolution (of the UV grid) the
@@ -168,6 +172,7 @@ void set_sfr_params(ParameterSet * ps)
         if(sfr_params.BHFeedbackUseTcool > 3 || sfr_params.BHFeedbackUseTcool < 0)
             endrun(0, "BHFeedbackUseTcool mode %d not supported\n", sfr_params.BHFeedbackUseTcool);
         /*Lyman-alpha forest parameters*/
+        sfr_params.StarClusterOn = param_get_int(ps, "StarClusterOn");
         sfr_params.QuickLymanAlphaProbability = param_get_double(ps, "QuickLymanAlphaProbability");
         sfr_params.QuickLymanAlphaTempThresh = param_get_double(ps, "QuickLymanAlphaTempThresh");
         sfr_params.HIReionTemp = param_get_double(ps, "HIReionTemp");
@@ -652,6 +657,20 @@ static int make_particle_star(int child, int parent, int placement, double Time)
     STARP(child).LastEnrichmentMyr = 0;
     STARP(child).TotalMassReturned = 0;
     STARP(child).BirthDensity = oldslot.Density;
+    const double a3inv = 1.0 / (Time * Time * Time);
+    STARP(child).BirthInternalEnergy = oldslot.Entropy * entropy_to_u(oldslot.Density, a3inv);
+
+    if (sfr_params.StarClusterOn) {
+        double Pressure_over_kB = GAMMA_MINUS1 * STARP(child).BirthDensity * a3inv
+                                  * STARP(child).BirthInternalEnergy * sfr_params.pressure_to_pkb;
+        STARP(child).ClusterFormationEfficiency = get_cluster_formation_efficiency(Pressure_over_kB);
+        STARP(child).ClusterMass = P[child].Mass * STARP(child).ClusterFormationEfficiency;
+    }
+    else {
+        STARP(child).ClusterFormationEfficiency = 0;
+        STARP(child).ClusterMass = 0;
+    }
+
     STARP(child).VDisp = oldslot.VDisp;
     /*Copy metallicity*/
     STARP(child).Metallicity = oldslot.Metallicity;
@@ -899,6 +918,8 @@ void init_cooling_and_star_formation(int CoolingOn, int StarformationOn, Cosmolo
     sfr_params.temp_to_u = (1.0 / GAMMA_MINUS1) * (BOLTZMANN / PROTONMASS) / units.UnitInternalEnergy_in_cgs;
 
     sfr_params.UnitSfr_in_solar_per_year = (units.UnitMass_in_g / SOLAR_MASS) / (units.UnitTime_in_s / SEC_PER_YEAR);
+
+    sfr_params.pressure_to_pkb = coolunits.density_in_phys_cgs * coolunits.uu_in_cgs / BOLTZMANN;
 
     init_cooling(sfr_params.TreeCoolFile, sfr_params.J21CoeffFile, sfr_params.MetalCoolFile, sfr_params.ReionHistFile, coolunits, CP);
 

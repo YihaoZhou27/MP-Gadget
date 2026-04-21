@@ -815,6 +815,9 @@ SIMPLE_PROPERTY_PI(ElectronAbundance, Ne, float, 1, struct sph_particle_data)
 SIMPLE_PROPERTY_PI(DelayTime, DelayTime, float, 1, struct sph_particle_data)
 SIMPLE_PROPERTY_TYPE_PI(StarFormationTime, 4, FormationTime, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(BirthDensity, BirthDensity, float, 1, struct star_particle_data)
+SIMPLE_PROPERTY_PI(BirthInternalEnergy, BirthInternalEnergy, float, 1, struct star_particle_data)
+SIMPLE_PROPERTY_PI(ClusterFormationEfficiency, ClusterFormationEfficiency, float, 1, struct star_particle_data)
+SIMPLE_PROPERTY_PI(ClusterMass, ClusterMass, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_TYPE_PI(Metallicity, 4, Metallicity, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_TYPE_PI(LastEnrichmentMyr, 4, LastEnrichmentMyr, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_TYPE_PI(TotalMassReturned, 4, TotalMassReturned, float, 1, struct star_particle_data)
@@ -834,6 +837,12 @@ SIMPLE_PROPERTY_PI(BlackholeJumpToMinPot, JumpToMinPot, int, 1, struct bh_partic
 SIMPLE_PROPERTY_PI(BlackholeMtrack, Mtrack, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeMseed, Mseed, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeKineticFdbkEnergy, KineticFdbkEnergy, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(BlackholeStarClusterMass, StarClusterMass, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(BlackholeStarClusterFormationTime, StarClusterFormationTime, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(BlackholeStarClusterMetallicity, StarClusterMetallicity, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(BlackholeStarClusterMetals, StarClusterMetals[0], float, NMETALS, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(BlackholeStarClusterLastEnrichmentMyr, StarClusterLastEnrichmentMyr, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(BlackholeStarClusterTotalMassReturned, StarClusterTotalMassReturned, float, 1, struct bh_particle_data)
 
 SIMPLE_SETTER_PI(STBlackholeMinPotPos , MinPotPos[0], double, 3, struct bh_particle_data)
 
@@ -1012,6 +1021,9 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
     IO_REG_NONFATAL(DelayTime,  "f4", 1, 0, IOTable);
 
     IO_REG_NONFATAL(BirthDensity, "f4", 1, 4, IOTable);
+    IO_REG_NONFATAL(BirthInternalEnergy, "f4", 1, 4, IOTable);
+    IO_REG_NONFATAL(ClusterFormationEfficiency, "f4", 1, 4, IOTable);
+    IO_REG_NONFATAL(ClusterMass, "f4", 1, 4, IOTable);
     IO_REG_TYPE(StarFormationTime, "f4", 1, 4, IOTable);
     IO_REG_TYPE(Metallicity,       "f4", 1, 0, IOTable);
     IO_REG_TYPE(Metallicity,       "f4", 1, 4, IOTable);
@@ -1035,6 +1047,12 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
     IO_REG(BlackholeMtrack,         "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeMseed,         "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeKineticFdbkEnergy, "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(BlackholeStarClusterMass, "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(BlackholeStarClusterFormationTime, "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(BlackholeStarClusterMetallicity, "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(BlackholeStarClusterMetals, "f4", NMETALS, 5, IOTable);
+    IO_REG_NONFATAL(BlackholeStarClusterLastEnrichmentMyr, "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(BlackholeStarClusterTotalMassReturned, "f4", 1, 5, IOTable);
 
     /* Smoothing lengths for black hole: this is a new addition*/
     IO_REG_NONFATAL(SmoothingLength,  "f4", 1, 5, IOTable);

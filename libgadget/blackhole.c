@@ -50,6 +50,9 @@ struct BlackholeParams
     double SeedBlackHoleMass;	/*!< (minimum) Seed black hole mass */
     double MaxSeedBlackHoleMass; /* Maximum black hole seed mass*/
     double SeedBlackHoleMassIndex; /* Power law index for BH seed mass*/
+
+    int StarClusterOn; /* If 1, enable star-cluster bh seeding formation */
+    int BHseedMassScaleMsc; /* When star-cluster bh seeding formation is enabled, whether the seed mass is scaled by the star cluster mass. If so, parameter SeedBlackHoleMass is in unit of Msc. If not, it is in mass unit. */
     /************************************************************************/
 } blackhole_params;
 
@@ -117,6 +120,8 @@ void set_blackhole_params(ParameterSet * ps)
         blackhole_params.SeedBlackHoleMass = param_get_double(ps, "SeedBlackHoleMass");
         blackhole_params.MaxSeedBlackHoleMass = param_get_double(ps,"MaxSeedBlackHoleMass");
         blackhole_params.SeedBlackHoleMassIndex = param_get_double(ps,"SeedBlackHoleMassIndex");
+        blackhole_params.StarClusterOn = param_get_int(ps, "StarClusterOn");
+        blackhole_params.BHseedMassScaleMsc = param_get_int(ps, "BHseedMassScaleMsc");
         /***********************************************************************************/
     }
     MPI_Bcast(&blackhole_params, sizeof(struct BlackholeParams), MPI_BYTE, 0, MPI_COMM_WORLD);
@@ -322,6 +327,10 @@ blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree *
     priv->BH_accreted_Mass = (MyFloat *) mymalloc("BH_accretedmass", SlotsManager->info[5].size * sizeof(MyFloat));
     priv->BH_accreted_BHMass = (MyFloat *) mymalloc("BH_accreted_BHMass", SlotsManager->info[5].size * sizeof(MyFloat));
     priv->BH_accreted_momentum = (MyFloat (*) [3]) mymalloc("BH_accretemom", 3* SlotsManager->info[5].size * sizeof(priv->BH_accreted_momentum[0]));
+    priv->BH_accreted_StarClusterMass = (MyFloat *) mymalloc("BH_accreted_SCMass", SlotsManager->info[5].size * sizeof(MyFloat));
+    priv->BH_accreted_SCMetallicityWeighted = (MyFloat *) mymalloc("BH_accreted_SCMetW", SlotsManager->info[5].size * sizeof(MyFloat));
+    priv->BH_accreted_SCMetalsWeighted = (MyFloat (*) [NMETALS]) mymalloc("BH_accreted_SCMetalsW", NMETALS * SlotsManager->info[5].size * sizeof(MyFloat));
+    priv->BH_accreted_SCTotalMassReturned = (MyFloat *) mymalloc("BH_accreted_SCTMR", SlotsManager->info[5].size * sizeof(MyFloat));
 
     /* Now do the swallowing of particles and dump feedback energy */
     /* We also merge BHs here. Only BHs which are not themselves
@@ -347,6 +356,10 @@ blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree *
         *bhdetailswritten += collect_BH_info(ActiveBlackHoles, NumActiveBlackHoles, priv, PartManager, (struct bh_particle_data*) SlotsManager->info[5].ptr, FdBlackholeDetails);
     }
 
+    myfree(priv->BH_accreted_SCTotalMassReturned);
+    myfree(priv->BH_accreted_SCMetalsWeighted);
+    myfree(priv->BH_accreted_SCMetallicityWeighted);
+    myfree(priv->BH_accreted_StarClusterMass);
     myfree(priv->BH_accreted_momentum);
     myfree(priv->BH_accreted_BHMass);
     myfree(priv->BH_accreted_Mass);
@@ -420,7 +433,12 @@ blackhole_accretion_postprocess(int i, TreeWalk * tw)
         /* motivated by BH gaining momentum from the accreted gas            */
         /*c.f.section 3.2,in http://www.tapir.caltech.edu/~phopkins/public/notes_blackholes.pdf */
         double fac = 0;
-        if (blackhole_params.BH_DRAG == 1) fac = BHP(i).Mdot/P[i].Mass;
+        if (blackhole_params.BH_DRAG == 1) {
+            double bh_dyn_mass = P[i].Mass - BHP(i).StarClusterMass;
+            if(bh_dyn_mass < BHP(i).Mass)
+                bh_dyn_mass = BHP(i).Mass;
+            fac = BHP(i).Mdot / bh_dyn_mass;
+        }
         if (blackhole_params.BH_DRAG == 2) fac = blackhole_params.BlackHoleEddingtonFactor * meddington/BHP(i).Mass;
         fac *= BH_GET_PRIV(tw)->atime; /* dv = acc * kick_fac = acc * a^{-1}dt, therefore acc = a*dv/dt  */
         for(k = 0; k < 3; k++) {
@@ -679,7 +697,9 @@ blackhole_accretion_copy(int place, TreeWalkQueryBHAccretion * I, TreeWalk * tw)
         I->Accel[k] = P[place].FullTreeGravAccel[k] + P[place].GravPM[k] + BHP(place).DFAccel[k];
     }
     I->Hsml = P[place].Hsml;
-    I->Mass = P[place].Mass;
+    I->Mass = P[place].Mass - BHP(place).StarClusterMass;
+    if(I->Mass < BHP(place).Mass)
+        I->Mass = BHP(place).Mass;
     I->BH_Mass = BHP(place).Mass;
     I->Density = BHP(place).Density;
     I->ID = P[place].ID;
@@ -705,6 +725,10 @@ typedef struct {
     MyFloat Mass; /* the accreted Mdyn */
     MyFloat AccretedMomentum[3];
     MyFloat BH_Mass;
+    MyFloat StarClusterMass; /* star cluster mass from merged BHs */
+    MyFloat StarClusterMetallicityWeighted; /* mass-weighted metallicity from merged BHs */
+    float StarClusterMetalsWeighted[NMETALS]; /* mass-weighted species metals from merged BHs */
+    MyFloat StarClusterTotalMassReturned; /* sum of total mass returned from merged BHs */
     int BH_CountProgs;
     int BH_minTimeBin;
 } TreeWalkResultBHFeedback;
@@ -789,8 +813,17 @@ blackhole_feedback_ngbiter(TreeWalkQueryBHFeedback * I,
         BHP(other).encounter = 0;
         O->BH_CountProgs += BHP(other).CountProgs;
         O->BH_Mass += (BHP(other).Mass);
+        O->StarClusterMass += BHP(other).StarClusterMass;
+        O->StarClusterMetallicityWeighted += BHP(other).StarClusterMetallicity * BHP(other).StarClusterMass;
+        {
+            int k;
+            for(k = 0; k < NMETALS; k++)
+                O->StarClusterMetalsWeighted[k] += BHP(other).StarClusterMetals[k] * BHP(other).StarClusterMass;
+        }
+        O->StarClusterTotalMassReturned += BHP(other).StarClusterTotalMassReturned;
 
-        /* Active mass tracer for the other BH*/
+        /* Active mass tracer for the other BH: include StarClusterMass
+         * for momentum conservation. */
         double othermass = P[other].Mass;
         if (blackhole_params.SeedBHDynMass>0 && I->Mtrack>0){
             /* If the other BH has not yet reached the dynamical mass, we should accrete the Mtrack*/
@@ -942,6 +975,12 @@ blackhole_feedback_reduce(int place, TreeWalkResultBHFeedback * remote, enum Tre
 
     TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_Mass[PI], remote->Mass);
     TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_BHMass[PI], remote->BH_Mass);
+    TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_StarClusterMass[PI], remote->StarClusterMass);
+    TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_SCMetallicityWeighted[PI], remote->StarClusterMetallicityWeighted);
+    for(k = 0; k < NMETALS; k++) {
+        TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_SCMetalsWeighted[PI][k], remote->StarClusterMetalsWeighted[k]);
+    }
+    TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_SCTotalMassReturned[PI], remote->StarClusterTotalMassReturned);
     for(k = 0; k < 3; k++) {
         TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_momentum[PI][k], remote->AccretedMomentum[k]);
     }
@@ -958,28 +997,55 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
     if(BH_GET_PRIV(tw)->BH_accreted_BHMass[PI] > 0){
        BHP(n).Mass += BH_GET_PRIV(tw)->BH_accreted_BHMass[PI];
     }
+    /* Merge star cluster mass from swallowed BHs.
+     * Add to both BHP.StarClusterMass (tracking) and P.Mass (gravity). */
+    if(BH_GET_PRIV(tw)->BH_accreted_StarClusterMass[PI] > 0){
+        /* Merge metallicity with mass-weighting before updating mass */
+        MyFloat old_sc_mass = BHP(n).StarClusterMass;
+        MyFloat new_sc_mass = BH_GET_PRIV(tw)->BH_accreted_StarClusterMass[PI];
+        MyFloat total_sc_mass = old_sc_mass + new_sc_mass;
+        if(total_sc_mass > 0) {
+            BHP(n).StarClusterMetallicity = (BHP(n).StarClusterMetallicity * old_sc_mass
+                + BH_GET_PRIV(tw)->BH_accreted_SCMetallicityWeighted[PI]) / total_sc_mass;
+            int k;
+            for(k = 0; k < NMETALS; k++)
+                BHP(n).StarClusterMetals[k] = (BHP(n).StarClusterMetals[k] * old_sc_mass
+                    + BH_GET_PRIV(tw)->BH_accreted_SCMetalsWeighted[PI][k]) / total_sc_mass;
+        }
+        BHP(n).StarClusterMass += new_sc_mass;
+        P[n].Mass += new_sc_mass;
+        BHP(n).StarClusterTotalMassReturned += BH_GET_PRIV(tw)->BH_accreted_SCTotalMassReturned[PI];
+    }
     if(BH_GET_PRIV(tw)->BH_accreted_Mass[PI] > 0)
     {
         /* velocity feedback due to accretion; momentum conservation.
-         * This does nothing with repositioning on.*/
+         * This does nothing with repositioning on.
+         * Use full P[n].Mass (including StarClusterMass) for momentum conservation,
+         * and accmass includes the swallowed BH's StarClusterMass for momentum. */
         const MyFloat accmass = BH_GET_PRIV(tw)->BH_accreted_Mass[PI];
         int k;
         /* Need to add the momentum from Mtrack as well*/
         for(k = 0; k < 3; k++)
             P[n].Vel[k] = (P[n].Vel[k] * P[n].Mass + BH_GET_PRIV(tw)->BH_accreted_momentum[PI][k]) / (P[n].Mass + accmass);
+        /* accmass comes from P[other].Mass of swallowed particles, which for BHs
+         * includes their StarClusterMass. Since the star cluster component was already
+         * merged into P[n].Mass above (in the BH_accreted_StarClusterMass block),
+         * subtract it here to get the pure dynamic mass contribution and avoid
+         * double-counting. For swallowed gas particles, StarClusterMass is 0. */
+        const MyFloat dynaccmass = accmass - BH_GET_PRIV(tw)->BH_accreted_StarClusterMass[PI];
         /* Add the mass to Mtrack if there is room*/
         const double SeedBHDynMass = blackhole_params.SeedBHDynMass;
-        if(SeedBHDynMass > 0 && BHP(n).Mtrack + accmass < SeedBHDynMass) {
+        if(SeedBHDynMass > 0 && BHP(n).Mtrack + dynaccmass < SeedBHDynMass) {
             /* Still seed mass regime*/
-            BHP(n).Mtrack += accmass;
+            BHP(n).Mtrack += dynaccmass;
         } else if(BHP(n).Mtrack < SeedBHDynMass) {
-            /* Transitioning to regular BH */
-            P[n].Mass = BHP(n).Mtrack + accmass;
+            /* Transitioning to regular BH: restore StarClusterMass into P.Mass */
+            P[n].Mass = BHP(n).Mtrack + dynaccmass + BHP(n).StarClusterMass;
             BHP(n).Mtrack = SeedBHDynMass;
         }
         else {
             /* Already regular BH, add accretion to regular mass*/
-            P[n].Mass += accmass;
+            P[n].Mass += dynaccmass;
         }
     }
 
@@ -1053,7 +1119,7 @@ bh_powerlaw_seed_mass(const MyIDType ID, const RandTable * const rnd)
 }
 
 void
-blackhole_make_one(int index, const double atime, const RandTable * const rnd) {
+blackhole_make_one(int index, const double atime, const RandTable * const rnd, MyFloat StarClusterMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals) {
     if(P[index].Type != 0)
         endrun(7772, "Only Gas turns into blackholes, what's wrong?");
 
@@ -1065,12 +1131,17 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd) {
      * between the gas and BH mass. */
     child = slots_convert(child, 5, -1, PartManager, SlotsManager);
 
+
     /* The accretion mass should always be the seed black hole mass,
      * irrespective of the gravitational mass of the particle.*/
     if(blackhole_params.MaxSeedBlackHoleMass > 0)
         BHP(child).Mass = bh_powerlaw_seed_mass(P[child].ID, rnd);
     else
         BHP(child).Mass = blackhole_params.SeedBlackHoleMass;
+
+    if (blackhole_params.StarClusterOn && blackhole_params.BHseedMassScaleMsc){
+        BHP(child).Mass = BHP(child).Mass * StarClusterMass;
+    }
 
     BHP(child).Mseed = BHP(child).Mass;
     BHP(child).Mdot = 0;
@@ -1079,6 +1150,29 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd) {
     BHP(child).Density = 0;
     /* Make sure initially active*/
     BHP(child).TimeBinDynFric = P[child].TimeBinHydro;
+
+    if (blackhole_params.StarClusterOn){
+        BHP(child).StarClusterMass = StarClusterMass;
+    }
+    else{
+        BHP(child).StarClusterMass = 0;
+    }
+    if (blackhole_params.StarClusterOn && StarClusterMass > 0){
+        BHP(child).StarClusterFormationTime = atime;
+        BHP(child).StarClusterMetallicity = StarClusterMetallicity;
+        int k;
+        for(k = 0; k < NMETALS; k++)
+            BHP(child).StarClusterMetals[k] = StarClusterMetals ? StarClusterMetals[k] : 0;
+    }
+    else{
+        BHP(child).StarClusterFormationTime = -1;
+        BHP(child).StarClusterMetallicity = 0;
+        int k;
+        for(k = 0; k < NMETALS; k++)
+            BHP(child).StarClusterMetals[k] = 0;
+    }
+    BHP(child).StarClusterLastEnrichmentMyr = 0;
+    BHP(child).StarClusterTotalMassReturned = 0;
 
     /* It is important to initialize MinPotPos to the current position of
      * a BH to avoid drifting to unknown locations (0,0,0) immediately
@@ -1102,8 +1196,13 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd) {
     else{
         BHP(child).Mtrack = -1; /* This column is not used then. */
     }
-    if(P[child].Mass < BHP(child).Mass || P[child].Mass < BHP(child).Mtrack)
-        message(1, "WARNING: BH Mass (%g) for ID %ld is larger than particle mass (%g) or mtrack (%g)\n", BHP(child).Mass, P[child].ID, P[child].Mass, BHP(child).Mtrack);
+    /* Add star cluster mass to P.Mass so it contributes to gravity.
+     * This is done after Mtrack/SeedBHDynMass setup so those are unaffected. */
+    if(BHP(child).StarClusterMass > 0)
+        P[child].Mass += BHP(child).StarClusterMass;
+
+    if(P[child].Mass - BHP(child).StarClusterMass < BHP(child).Mass || P[child].Mass - BHP(child).StarClusterMass < BHP(child).Mtrack)
+        message(1, "WARNING: BH Mass (%g) for ID %ld is larger than particle mass (%g) or mtrack (%g)\n", BHP(child).Mass, P[child].ID, P[child].Mass - BHP(child).StarClusterMass, BHP(child).Mtrack);
 
     /* Initialize KineticFdbkEnergy, keep zero if BlackHoleKineticOn is not turned on */
     BHP(child).KineticFdbkEnergy = 0;

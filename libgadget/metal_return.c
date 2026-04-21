@@ -160,7 +160,7 @@ double atime_integ(double atime, void * params)
 }
 
 /* Compute the difference in internal time units between two scale factors.*/
-static double atime_to_myr(Cosmology *CP, double atime1, double atime2, gsl_integration_workspace * gsl_work)
+double atime_to_myr(Cosmology *CP, double atime1, double atime2, gsl_integration_workspace * gsl_work)
 {
     /* t = dt/da da = 1/(Ha) da*/
     /* Approximate hubble function as constant here: we only care
@@ -394,7 +394,7 @@ double compute_snii_yield(gsl_interp2d * snii_interp, const double * snii_weight
 }
 
 /* Compute the total mass yield for this star in this timestep*/
-static double mass_yield(double dtmyrstart, double dtmyrend, double stellarmetal, double hub, struct interps * interp, double imf_norm, gsl_integration_workspace * gsl_work, double masslow, double masshigh)
+double mass_yield(double dtmyrstart, double dtmyrend, double stellarmetal, double hub, struct interps * interp, double imf_norm, gsl_integration_workspace * gsl_work, double masslow, double masshigh)
 {
     /* Number of AGB stars/SnII by integrating the IMF*/
     double agbyield = compute_agb_yield(interp->agb_mass_interp, agb_total_mass, stellarmetal, masslow, masshigh, gsl_work);
@@ -410,7 +410,7 @@ static double mass_yield(double dtmyrstart, double dtmyrend, double stellarmetal
 }
 
 /* Compute the total metal yield for this star in this timestep*/
-static double metal_yield(double dtmyrstart, double dtmyrend, double stellarmetal, double hub, struct interps * interp, MyFloat * MetalYields, double imf_norm, gsl_integration_workspace * gsl_work, double masslow, double masshigh)
+double metal_yield(double dtmyrstart, double dtmyrend, double stellarmetal, double hub, struct interps * interp, MyFloat * MetalYields, double imf_norm, gsl_integration_workspace * gsl_work, double masslow, double masshigh)
 {
     double MetalGenerated = 0;
     /* Number of AGB stars/SnII by integrating the IMF*/

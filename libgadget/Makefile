@@ -51,7 +51,7 @@ GADGET_OBJS =  \
 	 timebinmgr.o \
 	 run.o drift.o stats.o \
 	 timestep.o init.o checkpoint.o \
-	 sfr_eff.o cooling.o cooling_rates.o cooling_uvfluc.o cooling_qso_lightup.o \
+	 sfr_eff.o starcluster.o starcluster_evolution.o cooling.o cooling_rates.o cooling_uvfluc.o cooling_qso_lightup.o \
 	 winds.o veldisp.o density.o metal_return.o \
 	 treewalk.o cosmology.o \
 	 gravshort-tree.o gravshort-pair.o hydra.o  timefac.o \

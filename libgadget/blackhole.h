@@ -4,6 +4,7 @@
 #include "forcetree.h"
 #include "density.h"
 #include "utils/system.h"
+#include "slotsmanager.h"
 
 struct BHPriv {
     /* Temporary array to store the IDs of the swallowing black hole for gas.
@@ -19,6 +20,10 @@ struct BHPriv {
     MyFloat * BH_accreted_Mass;
     MyFloat * BH_accreted_BHMass;
     MyFloat (*BH_accreted_momentum)[3];
+    MyFloat * BH_accreted_StarClusterMass;
+    MyFloat * BH_accreted_SCMetallicityWeighted;
+    MyFloat (* BH_accreted_SCMetalsWeighted)[NMETALS];
+    MyFloat * BH_accreted_SCTotalMassReturned;
 
     /* This is a temporary computed in the accretion treewalk and used
      * in the feedback treewalk*/
@@ -63,6 +68,6 @@ void set_blackhole_params(ParameterSet * ps);
 void blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree * tree, DomainDecomp * ddecomp, DriftKickTimes * times, RandTable * rnd, const struct UnitSystem units, FILE * FdBlackHoles, FILE * FdBlackholeDetails, size_t *bhdetailswritten);
 
 /* Make a black hole from the particle at index. Random number generator used for the initial mass drawn from a power law.*/
-void blackhole_make_one(int index, const double atime, const RandTable * const rnd);
+void blackhole_make_one(int index, const double atime, const RandTable * const rnd, MyFloat StarClusterMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals);
 
 #endif

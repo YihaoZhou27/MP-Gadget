@@ -25,6 +25,8 @@ struct particle_data_ext {
 #endif
 };
 
+#define NMETALS 9
+
 /* Data stored for each black hole in addition to collisionless data*/
 struct bh_particle_data {
     struct particle_data_ext base;
@@ -65,9 +67,16 @@ struct bh_particle_data {
     MyFloat MinPotVel[3];
 
     int CountProgs;
-};
 
-#define NMETALS 9
+    /***********************/
+    MyFloat StarClusterMass; /*!< Mass of the star cluster sticked to the black hole */
+    MyFloat StarClusterFormationTime; /*!< Formation time of the star cluster sticked to the black hole */
+    MyFloat StarClusterMetallicity;        /*!< Total metallicity of the star cluster SSP */
+    float StarClusterMetals[NMETALS];      /*!< Species-specific metal masses in star cluster */
+    float StarClusterLastEnrichmentMyr;    /*!< Last enrichment time in Myr since formation */
+    MyFloat StarClusterTotalMassReturned;  /*!< Cumulative mass returned to gas from star cluster */
+
+};
 
 /*Data for each star particle*/
 struct star_particle_data
@@ -84,7 +93,10 @@ struct star_particle_data
     float Metals[NMETALS];      /* Metal mass of each species in star particle*/
     float VDisp; /* 1D DM Velocity dispersion on creation for the winds*/
     float BirthDensity;       /*!< Density of gas particle at star formation. */
+    MyFloat BirthInternalEnergy; /*!< Internal energy of gas particle at star formation. */
     float FormationTime;      /*!< formation time of star particle */
+    MyFloat ClusterFormationEfficiency; /*!< Cluster formation efficiency of star particle */
+    MyFloat ClusterMass; /*!< Mass of the cluster formed from this star particle */  
 };
 
 /* the following structure holds data that is stored for each SPH particle in addition to the collisionless
