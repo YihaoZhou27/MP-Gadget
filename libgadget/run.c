@@ -36,6 +36,7 @@
 #include "neutrinos_lra.h"
 #include "stats.h"
 #include "veldisp.h"
+#include "gasveldisp.h"
 #include "physconst.h"
 #include "plane.h"
 
@@ -72,6 +73,7 @@ static struct run_params
 
     int BlackHoleOn;  /* if black holes are enabled */
     int StarClusterOn; /* if star cluster bh seeding formation is enabled */
+    int SCgasVDisp; /* if gas/stellar velocity dispersion calculation is enabled */
     int BlackHoleSeedHaloBased; /* if the bh seeding is halo-based */
     int BlackHoleSeedGasBased; /* if the bh seeding is gas-based */
 
@@ -166,6 +168,7 @@ set_all_global_params(ParameterSet * ps)
 
         All.BlackHoleOn = param_get_int(ps, "BlackHoleOn");
         All.StarClusterOn = param_get_int(ps, "StarClusterOn");
+        All.SCgasVDisp = param_get_int(ps, "SCgasVDisp");
         All.BlackHoleSeedHaloBased = param_get_int(ps, "BlackHoleSeedHaloBased");
         All.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
 
@@ -679,6 +682,11 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
             if(All.CoolingOn)
                 cooling_and_starformation(&Act, atime, get_dloga_for_bin(times.mintimebin, times.Ti_Current), &gasTree, GravAccel, ddecomp, &All.CP, GradRho_mag, &rnd, fds.FdSfr);
         }
+        /* Gas+Star velocity dispersion: runs every PM step when SCgasVDisp is enabled.
+         * Reuses the existing gasTree for gas neighbors; builds a small star-only tree internally. */
+        if(GasEnabled && is_PM && All.SCgasVDisp)
+            gas_star_veldisp(&Act, &All.CP, &times, &gasTree, ddecomp, All.OutputDir);
+
         /* We don't need this timestep's tree anymore.*/
         force_tree_free(&gasTree);
 
