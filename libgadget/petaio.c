@@ -1091,6 +1091,12 @@ SIMPLE_GETTER_PI(GTCurlVel, CurlVel, float, 1, struct sph_particle_data)
 SIMPLE_GETTER_PI(GTVelDisp, VDisp, float, 1, struct sph_particle_data)
 SIMPLE_GETTER_PI(GTBHVelDisp, VDisp, float, 1, struct bh_particle_data)
 SIMPLE_GETTER_PI(GTStarVelDisp, VDisp, float, 1, struct star_particle_data)
+SIMPLE_GETTER_PI(GTVDispGas, VDisp_gas, float, 1, struct sph_particle_data)
+SIMPLE_GETTER_PI(GTVDispStar, VDisp_star, float, 1, struct sph_particle_data)
+SIMPLE_GETTER_PI(GTVDispMgas, VDisp_mgas, float, 1, struct sph_particle_data)
+SIMPLE_GETTER_PI(GTVDispMstar, VDisp_mstar, float, 1, struct sph_particle_data)
+SIMPLE_GETTER_PI(GTVDispNgas, VDisp_Ngas, int, 1, struct sph_particle_data)
+SIMPLE_GETTER_PI(GTVDispNstar, VDisp_Nstar, int, 1, struct sph_particle_data)
 
 void register_debug_io_blocks(struct IOTable * IOTable)
 {
@@ -1113,6 +1119,12 @@ void register_debug_io_blocks(struct IOTable * IOTable)
     IO_REG_WRONLY(VelDisp,       "f4", 1, 0, IOTable);
     IO_REG_WRONLY(BHVelDisp,       "f4", 1, 5, IOTable);
     IO_REG_WRONLY(StarVelDisp,       "f4", 1, 4, IOTable);
+    IO_REG_WRONLY(VDispGas,    "f4", 1, 0, IOTable);
+    IO_REG_WRONLY(VDispStar,   "f4", 1, 0, IOTable);
+    IO_REG_WRONLY(VDispMgas,   "f4", 1, 0, IOTable);
+    IO_REG_WRONLY(VDispMstar,  "f4", 1, 0, IOTable);
+    IO_REG_WRONLY(VDispNgas,   "i4", 1, 0, IOTable);
+    IO_REG_WRONLY(VDispNstar,  "i4", 1, 0, IOTable);
 
     /*Sort IO blocks so similar types are together; then ordered by the sequence they are declared. */
     qsort_openmp(IOTable->ent, IOTable->used, sizeof(struct IOTableEntry), order_by_type);

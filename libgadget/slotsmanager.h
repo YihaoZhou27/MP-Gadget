@@ -128,6 +128,12 @@ struct sph_particle_data
                    density normalized to the hydrogen number density. Gives
                    indirectly ionization state and mean molecular weight. */
     MyFloat VDisp; /* 1D DM Velocity dispersion, for the winds*/
+    MyFloat VDisp_gas;   /* 1D gas velocity dispersion within Hsml */
+    MyFloat VDisp_star;  /* 1D stellar velocity dispersion within Hsml */
+    MyFloat VDisp_mgas;  /* Total gas mass within Hsml */
+    MyFloat VDisp_mstar; /* Total stellar mass within Hsml */
+    int VDisp_Ngas;      /* Number of gas neighbors within Hsml */
+    int VDisp_Nstar;     /* Number of star neighbors within Hsml */
     MyFloat DelayTime;		/*!< SH03: remaining maximum decoupling time of wind particle */
                             /*!< VS08: remaining waiting for wind particle to be eligible to form winds again */
 
