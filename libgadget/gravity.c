@@ -64,3 +64,29 @@ grav_apply_short_range_window(double r, double * fac, double * pot, const double
     *pot *= (tabindex + 1 - i) * shortrange_table_potential[tabindex] + (i - tabindex) * shortrange_table_potential[tabindex];
     return 0;
 }
+
+/* Apply the short-range window function for the tidal tensor computation.
+ * Returns the window value W(r) in *window and its derivative dW/dr in *dwindow_dr.
+ * The tidal tensor needs both W and dW/dr because:
+ *   T_ij = m * [(fac*W) delta_ij + d_i d_j (fac'*W + fac*W') / r]
+ * Returns 1 if r is beyond the table range (node should be discarded), 0 otherwise. */
+int
+grav_short_range_window_tidal(double r, double * window, double * dwindow_dr, const double cellsize)
+{
+    const double dx = shortrange_force_kernels[1][0]; /* table spacing in mesh units */
+    double idx = r / cellsize / dx; /* fractional table index */
+    size_t tabindex = floor(idx);
+    if(tabindex >= NTAB - 1)
+        return 1;
+
+    /* W(r) via linear interpolation, same as grav_apply_short_range_window */
+    double frac = idx - tabindex;
+    *window = (1.0 - frac) * shortrange_table[tabindex] + frac * shortrange_table[tabindex + 1];
+
+    /* dW/dr via finite difference of the table.
+     * dW/d(idx) = shortrange_table[tabindex+1] - shortrange_table[tabindex]
+     * dr = cellsize * dx * d(idx), so dW/dr = dW/d(idx) / (cellsize * dx) */
+    *dwindow_dr = (shortrange_table[tabindex + 1] - shortrange_table[tabindex]) / (cellsize * dx);
+
+    return 0;
+}

@@ -23,6 +23,7 @@
 #include "utils/mymalloc.h"
 #include "utils/openmpsort.h"
 #include "utils/string.h"
+#include "tidalfield.h"
 /************
  *
  * The IO api , intented to replace io.c and read_ic.c
@@ -826,6 +827,7 @@ SIMPLE_PROPERTY_TYPE_PI(Metals, 4, Metals[0], float, NMETALS, struct star_partic
 SIMPLE_PROPERTY_TYPE_PI(Metals, 0, Metals[0], float, NMETALS, struct sph_particle_data)
 
 SIMPLE_GETTER_PI(GTStarFormationRate, Sfr, float, 1, struct sph_particle_data)
+SIMPLE_GETTER_PI(GTTidalFieldEigenvalues, TidalFieldEigenvalues[0], float, 3, struct sph_particle_data)
 SIMPLE_PROPERTY_TYPE_PI(StarFormationTime, 5, FormationTime, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeMass, Mass, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeDensity, Density, float, 1, struct bh_particle_data)
@@ -1035,6 +1037,10 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
         IO_REG_NONFATAL(SmoothingLength,  "f4", 1, 4, IOTable);
     }
     /* end SF */
+
+    /* Tidal field eigenvalues for gas */
+    if(get_tidalfield_on())
+        IO_REG_WRONLY(TidalFieldEigenvalues, "f4", 3, 0, IOTable);
 
     /* Black hole */
     IO_REG_TYPE(StarFormationTime, "f4", 1, 5, IOTable);
