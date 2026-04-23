@@ -144,6 +144,11 @@ struct sph_particle_data
     MyFloat zreion; /* redshift when a particle is first ionised */
     MyFloat EscapeFraction; /* Escape fraction for SFR -> J21 calculation */
 #endif
+    MyFloat ClusterFormationEfficiency; /*!< Cluster formation efficiency based on current gas pressure */
+    MyFloat SumSFRdt;       /*!< Cumulative SFR * dt over the particle history, using dM = M*(1-exp(-p)) [internal mass units] */
+    MyFloat SumSFRdt_v2;    /*!< Cumulative SFR * dt over the particle history, using sm = smr*dtime [internal mass units] */
+    MyFloat SumSpawnedMass;  /*!< Cumulative mass of star particles spawned from this gas [internal mass units] */
+    MyFloat SumSFRdtCFE;    /*!< Cumulative SFR * dt * ClusterFormationEfficiency over the particle history [internal mass units] */
 };
 
 extern struct slots_manager_type {

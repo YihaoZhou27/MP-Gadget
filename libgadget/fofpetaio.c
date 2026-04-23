@@ -35,7 +35,7 @@ int fof_select_func(int i, const struct particle_data * Parts)
     return Parts[i].GrNr >= 0 && Parts[i].Swallowed == 0;
 }
 
-int fof_save_particles(FOFGroups * fof, char * fname, int SaveParticles, Cosmology * CP, double atime, const double * MassTable, int MetalReturnOn, MPI_Comm Comm) {
+int fof_save_particles(FOFGroups * fof, char * fname, int SaveParticles, Cosmology * CP, double atime, const double * MassTable, int MetalReturnOn, const int OutputDebugFields, MPI_Comm Comm) {
     int i;
     struct IOTable FOFIOTable = {0};
 
@@ -77,6 +77,8 @@ int fof_save_particles(FOFGroups * fof, char * fname, int SaveParticles, Cosmolo
     if(SaveParticles) {
         struct IOTable IOTable = {0};
         register_io_blocks(&IOTable, 1, MetalReturnOn);
+        if(OutputDebugFields)
+            register_debug_io_blocks(&IOTable);
         struct part_manager_type * halo_pman = NULL;
         struct slots_manager_type * halo_sman = NULL;
         int64_t NpigLocal = 0;
@@ -535,6 +537,7 @@ SIMPLE_PROPERTY_FOF(BlackholeMass, BH_Mass, float, 1)
 SIMPLE_PROPERTY_FOF(BlackholeAccretionRate, BH_Mdot, float, 1)
 SIMPLE_PROPERTY_FOF(GasSfmpMass, sfmp_mass, float, 1)
 SIMPLE_PROPERTY_FOF(MassHeIonized, MassHeIonized, float, 1)
+SIMPLE_PROPERTY_FOF(StarClusterMass, StarClusterMass, float, 1)
 
 static void fof_register_io_blocks(int MetalReturnOn, struct IOTable * IOTable) {
     IOTable->used = 0;
@@ -567,4 +570,5 @@ static void fof_register_io_blocks(int MetalReturnOn, struct IOTable * IOTable) 
     IO_REG(BlackholeMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
     IO_REG(BlackholeAccretionRate, "f4", 1, PTYPE_FOF_GROUP, IOTable);
     IO_REG(GasSfmpMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+    IO_REG(StarClusterMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
 }

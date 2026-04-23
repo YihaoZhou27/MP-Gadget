@@ -73,11 +73,8 @@ static struct run_params
 
     int BlackHoleOn;  /* if black holes are enabled */
     int StarClusterOn; /* if star cluster bh seeding formation is enabled */
-<<<<<<< HEAD
-    int StarClusterEvolution; /* if stellar evolution for star clusters is enabled */
-=======
+    int StarClusterEvolution; /* if star cluster stellar evolution is enabled */
     int SCgasVDisp; /* if gas/stellar velocity dispersion calculation is enabled */
->>>>>>> a4be5a2df2b7e6a0eb52f272ef904ecb0a2f236a
     int BlackHoleSeedHaloBased; /* if the bh seeding is halo-based */
     int BlackHoleSeedGasBased; /* if the bh seeding is gas-based */
 
@@ -172,11 +169,8 @@ set_all_global_params(ParameterSet * ps)
 
         All.BlackHoleOn = param_get_int(ps, "BlackHoleOn");
         All.StarClusterOn = param_get_int(ps, "StarClusterOn");
-<<<<<<< HEAD
         All.StarClusterEvolution = param_get_int(ps, "StarClusterEvolution");
-=======
         All.SCgasVDisp = param_get_int(ps, "SCgasVDisp");
->>>>>>> a4be5a2df2b7e6a0eb52f272ef904ecb0a2f236a
         All.BlackHoleSeedHaloBased = param_get_int(ps, "BlackHoleSeedHaloBased");
         All.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
 
@@ -737,7 +731,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
 
         /* Save FOF tables after checkpoint so that if there is a FOF save bug we have particle tables available to debug it*/
         if(WriteFOF) {
-            int domain_needed = fof_save_groups(&fof, All.OutputDir, All.FOFFileBase, SnapshotFileCount, &All.CP, atime, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
+            int domain_needed = fof_save_groups(&fof, All.OutputDir, All.FOFFileBase, SnapshotFileCount, &All.CP, atime, header->MassTable, All.MetalReturnOn, All.OutputDebugFields, MPI_COMM_WORLD);
             /* In case we need to do a second exchange to get back to a sensible compact mass distribution*/
             fof_finish(&fof);
             if(domain_needed) {
@@ -879,7 +873,7 @@ runfof(const int RestartSnapNum, const inttime_t Ti_Current, const struct header
             myfree(GradRho);
     }
     FOFGroups fof = fof_fof(ddecomp, 1, MPI_COMM_WORLD);
-    fof_save_groups(&fof, All.OutputDir, All.FOFFileBase, RestartSnapNum, &All.CP, header->TimeSnapshot, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
+    fof_save_groups(&fof, All.OutputDir, All.FOFFileBase, RestartSnapNum, &All.CP, header->TimeSnapshot, header->MassTable, All.MetalReturnOn, All.OutputDebugFields, MPI_COMM_WORLD);
     fof_finish(&fof);
 }
 
