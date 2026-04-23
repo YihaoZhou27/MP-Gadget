@@ -433,20 +433,24 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential, MPI
                    sfof_params.LinkingLength, sfof_params.MinLength, OutputPotential);
 
     /* Step 4: Run the FOF algorithm */
-    SecondFOFResult * result = (SecondFOFResult *) mymalloc("SecFOF_Result", sizeof(SecondFOFResult));
-    result->fof = fof_fof(ddecomp, 1, Comm);
+    FOFGroups fof = fof_fof(ddecomp, 1, Comm);
 
     /* Step 5: Copy GrNr -> SecGrNr */
     #pragma omp parallel for
     for(i = 0; i < PartManager->NumPart; i++)
         P[i].SecGrNr = P[i].GrNr;
 
-    /* Step 6: Restore original GrNr */
+    /* Step 6: Restore original GrNr and free saved_GrNr
+     * (must free before allocating result to respect stack allocator order) */
     #pragma omp parallel for
     for(i = 0; i < PartManager->NumPart; i++)
         P[i].GrNr = saved_GrNr[i];
 
     myfree(saved_GrNr);
+
+    /* Step 6b: Allocate result struct (after saved_GrNr is freed) */
+    SecondFOFResult * result = (SecondFOFResult *) mymalloc("SecFOF_Result", sizeof(SecondFOFResult));
+    result->fof = fof;
 
     /* Step 7: Restore original FOF parameters */
     fof_set_params(save_PrimaryLinkTypes, save_SecondaryLinkTypes,
