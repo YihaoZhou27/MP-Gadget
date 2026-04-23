@@ -73,11 +73,8 @@ static struct run_params
 
     int BlackHoleOn;  /* if black holes are enabled */
     int StarClusterOn; /* if star cluster bh seeding formation is enabled */
-<<<<<<< HEAD
     int StarClusterEvolution; /* if stellar evolution for star clusters is enabled */
-=======
     int SCgasVDisp; /* if gas/stellar velocity dispersion calculation is enabled */
->>>>>>> a4be5a2df2b7e6a0eb52f272ef904ecb0a2f236a
     int BlackHoleSeedHaloBased; /* if the bh seeding is halo-based */
     int BlackHoleSeedGasBased; /* if the bh seeding is gas-based */
 
@@ -172,14 +169,8 @@ set_all_global_params(ParameterSet * ps)
 
         All.BlackHoleOn = param_get_int(ps, "BlackHoleOn");
         All.StarClusterOn = param_get_int(ps, "StarClusterOn");
-<<<<<<< HEAD
         All.StarClusterEvolution = param_get_int(ps, "StarClusterEvolution");
-=======
-        All.SCgasVDisp = param_get_int(ps, "SCgasVDisp");
->>>>>>> a4be5a2df2b7e6a0eb52f272ef904ecb0a2f236a
-        All.BlackHoleSeedHaloBased = param_get_int(ps, "BlackHoleSeedHaloBased");
         All.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
-
         All.StarformationOn = param_get_int(ps, "StarformationOn");
         All.MetalReturnOn = param_get_int(ps, "MetalReturnOn");
         All.MaxDomainTimeBinDepth = param_get_int(ps, "MaxDomainTimeBinDepth");
