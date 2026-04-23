@@ -30,6 +30,7 @@
 #include "slotsmanager.h"
 #include "hci.h"
 #include "fof.h"
+#include "secondfof.h"
 #include "cooling_qso_lightup.h"
 #include "lightcone.h"
 #include "neutrinos_lra.h"
@@ -699,6 +700,13 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
             fof = fof_fof(ddecomp, 1, MPI_COMM_WORLD);
         }
 
+        /* Run second FOF before snapshot so SecGrNr is available for output.
+         * Only computes groups and sets SecGrNr; catalog I/O is deferred. */
+        SecondFOFResult * secfof = NULL;
+        if(WriteFOF && get_secondfof_on()) {
+            secfof = secondfof_run(ddecomp, GetOutputPotential(), MPI_COMM_WORLD);
+        }
+
         /* WriteFOF just reminds the checkpoint code to save GroupID*/
         if(WriteSnapshot)
             write_checkpoint(SnapshotFileCount, WriteFOF, All.MetalReturnOn, atime, &All.CP, All.OutputDir, All.OutputDebugFields);
@@ -708,6 +716,14 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
             int domain_needed = fof_save_groups(&fof, All.OutputDir, All.FOFFileBase, SnapshotFileCount, &All.CP, atime, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
             /* In case we need to do a second exchange to get back to a sensible compact mass distribution*/
             fof_finish(&fof);
+
+            /* Write second FOF catalog after checkpoint and halo PIG, for I/O safety */
+            if(secfof) {
+                secondfof_write(secfof, All.OutputDir, SnapshotFileCount, atime,
+                                &All.CP, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
+                secondfof_finish(secfof);
+            }
+
             if(domain_needed) {
                 /* Because this Peano sorts the particles, it should avoid a
                  * single iteration of the domain exchange sending more particles
@@ -847,8 +863,22 @@ runfof(const int RestartSnapNum, const inttime_t Ti_Current, const struct header
             myfree(GradRho);
     }
     FOFGroups fof = fof_fof(ddecomp, 1, MPI_COMM_WORLD);
+
+    /* Run second FOF computation (sets SecGrNr) before saving catalogs */
+    SecondFOFResult * secfof = NULL;
+    if(get_secondfof_on()) {
+        secfof = secondfof_run(ddecomp, GetOutputPotential(), MPI_COMM_WORLD);
+    }
+
     fof_save_groups(&fof, All.OutputDir, All.FOFFileBase, RestartSnapNum, &All.CP, header->TimeSnapshot, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
     fof_finish(&fof);
+
+    /* Write second FOF catalog after halo PIG */
+    if(secfof) {
+        secondfof_write(secfof, All.OutputDir, RestartSnapNum, header->TimeSnapshot,
+                        &All.CP, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
+        secondfof_finish(secfof);
+    }
 }
 
 void

@@ -9,6 +9,14 @@
 void set_fof_params(ParameterSet * ps);
 
 void fof_init(double DMMeanSeparation);
+
+/* Allow secondfof.c to temporarily override FOF parameters */
+void fof_get_params(int *PrimaryLinkTypes, int *SecondaryLinkTypes,
+                    double *ComovingLinkingLength, int *MinLength,
+                    int *PotentialMin);
+void fof_set_params(int PrimaryLinkTypes, int SecondaryLinkTypes,
+                    double ComovingLinkingLength, int MinLength,
+                    int PotentialMin);
 /* For the tests*/
 void set_fof_testpar(int FOFSaveParticles, double FOFHaloLinkingLength, int FOFHaloMinLength);
 
@@ -57,6 +65,13 @@ struct Group
 
     int seed_index;
     int seed_task;
+
+    /* Minimum gravitational potential among primary-linked particles.
+     * Tracked during catalogue compilation, reduced across MPI ranks. */
+    float PotMin;
+    /* Position of the primary particle with minimum potential
+     * (in the translated frame, subtract CurrentParticleOffset for physical). */
+    double PotMinPos[3];
 };
 
 /* Structure to hold all allocated FOF groups*/
