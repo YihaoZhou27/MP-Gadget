@@ -158,7 +158,7 @@ grav_short_tree(const ActiveParticles * act, PetaPM * pm, ForceTree * tree, MyFl
 
     /* Tidal field diagnostics and cleanup */
     if(priv.TidalTensorStore) {
-        tidal_field_diagnostics(priv.TidalTensorStore, priv.G);
+        // tidal_field_diagnostics(priv.TidalTensorStore, priv.G);
         myfree(priv.TidalTensorStore);
     }
 

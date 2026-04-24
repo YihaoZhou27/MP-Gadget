@@ -334,6 +334,8 @@ cooling_and_starformation(ActiveParticles * act, double Time, double dloga, Forc
         if(child == parent)
             stars_converted++;
         else {
+            /* Accumulate the spawned star mass on the parent gas particle */
+            SPHP(parent).SumSpawnedMass += P[child].Mass;
             /* Update the active particle list when a new star is formed.*/
             stars_spawned_gravity += add_new_particle_to_active(parent, child, act);
             copy_gravaccel_new_particle(parent, child, GravAccel.GravAccel, GravAccel.nstore);
@@ -516,6 +518,13 @@ cooling_direct(int i, const double redshift, const double a3inv, const double hu
     SPHP(i).Entropy = unew / enttou;
     /* Cooling gas is not forming stars*/
     SPHP(i).Sfr = 0;
+
+    /* Update the gas ClusterFormationEfficiency based on current density and entropy */
+    if (sfr_params.StarClusterOn) {
+        double Pressure_over_kB = GAMMA_MINUS1 * SPHP(i).Density * a3inv
+                                  * unew * sfr_params.pressure_to_pkb;
+        SPHP(i).ClusterFormationEfficiency = get_cluster_formation_efficiency(Pressure_over_kB);
+    }
 }
 
 /* Returns the density threshold for star formation in comoving units*/
@@ -787,6 +796,19 @@ starformation(int i, double *localsfr, MyFloat * sm_out, MyFloat * sum_sm, MyFlo
 
     SPHP(i).Ne = sfr_data.ne;
     *localsfr += SPHP(i).Sfr;
+
+    /* Update the gas ClusterFormationEfficiency based on current density and entropy */
+    if (sfr_params.StarClusterOn) {
+        double InternalEnergy = SPHP(i).Entropy * entropy_to_u(SPHP(i).Density, a3inv);
+        double Pressure_over_kB = GAMMA_MINUS1 * SPHP(i).Density * a3inv
+                                  * InternalEnergy * sfr_params.pressure_to_pkb;
+        SPHP(i).ClusterFormationEfficiency = get_cluster_formation_efficiency(Pressure_over_kB);
+    }
+
+    /* Accumulate SFR * dt and SFR * dt * CFE (in internal mass units) */
+    SPHP(i).SumSFRdt += dM;
+    SPHP(i).SumSFRdt_v2 += sm;
+    SPHP(i).SumSFRdtCFE += dM * SPHP(i).ClusterFormationEfficiency;
 
     const double w = get_random_number(P[i].ID, rnd);
     const double frac = (1 - exp(-p));

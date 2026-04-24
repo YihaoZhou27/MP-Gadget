@@ -1192,12 +1192,12 @@ static void fof_assign_grnr(struct BaseGroup * base, const int NgroupsExt, MPI_C
 }
 
 int
-fof_save_groups(FOFGroups * fof, const char * OutputDir, const char * FOFFileBase, int num, Cosmology * CP, double atime, const double * MassTable, int MetalReturnOn, MPI_Comm Comm)
+fof_save_groups(FOFGroups * fof, const char * OutputDir, const char * FOFFileBase, int num, Cosmology * CP, double atime, const double * MassTable, int MetalReturnOn, const int OutputDebugFields, MPI_Comm Comm)
 {
     char * fname = fastpm_strdup_printf("%s/%s_%03d", OutputDir, FOFFileBase, num);
     message(0, "Saving particle groups into %s\n", fname);
 
-    return fof_save_particles(fof, fname, fof_params.FOFSaveParticles, CP, atime, MassTable, MetalReturnOn, Comm);
+    return fof_save_particles(fof, fname, fof_params.FOFSaveParticles, CP, atime, MassTable, MetalReturnOn, OutputDebugFields, Comm);
 }
 
 /* FIXME: these shall goto the private member of secondary tree walk */
