@@ -1,6 +1,8 @@
 #ifndef FOF_H
 #define FOF_H
 
+#include <bigfile.h>
+
 #include "utils/paramset.h"
 #include "timestep.h"
 #include "slotsmanager.h"
@@ -101,5 +103,16 @@ int fof_save_groups(FOFGroups * fof, const char * OutputDir, const char * FOFFil
 /* Does the actual saving of the particles
  Returns 1 if a domain_exchange is needed afterwards.*/
 int fof_save_particles(FOFGroups * fof, char * fname, int SaveParticles, Cosmology * CP, double atime, const double * MassTable, int MetalReturnOn, MPI_Comm Comm);
+
+/* Save particle catalog (type subdirectories 0/, 1/, ..., 5/) into an already-open BigFile.
+ * Particles with GrNr >= 0 are selected and sorted by (Type, GrNr).
+ * If swap_group_ids is set, GrNr and SecGrNr are swapped on the distributed
+ * particles before writing IO blocks, so that GroupID gets the original primary
+ * FOF value and SecGroupID gets the secondary FOF value.
+ * Returns 1 if a domain_maintain is needed afterwards (when PartManager was reused). */
+int fof_save_particles_to_bigfile(BigFile * bf, int MetalReturnOn, Cosmology * CP, double atime, int swap_group_ids, MPI_Comm Comm);
+
+/* Selection function: returns true for particles that belong to a FOF group. */
+int fof_select_func(int i, const struct particle_data * Parts);
 
 #endif

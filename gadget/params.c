@@ -220,6 +220,8 @@ create_gadget_parameter_set()
     param_declare_int(ps, "SecondFOFMinLength", OPTIONAL, 32, "Minimum particle count per group in second FOF.");
     param_declare_string(ps, "SecondFOFFileBase", OPTIONAL, "SecPIG", "Base name of the second FOF catalog files.");
     param_declare_int(ps, "SecondFOFSize", OPTIONAL, 0, "Compute group size properties (R50, R90, Rmax) in second FOF.");
+    param_declare_int(ps, "SecFOFonly", OPTIONAL, 0, "If 1, skip saving the primary FOF catalog (PIG) and only save the second FOF catalog (SecPIG). Primary FOF still runs internally.");
+    param_declare_int(ps, "SeedInSecFOF", OPTIONAL, 0, "If 1, seed black holes using the secondary FOF catalog instead of the primary FOF catalog.");
 
     /*Black holes*/
     param_declare_int(ps, "BlackHoleOn", REQUIRED, 1, "Master switch to enable black hole formation and feedback. If this is on, type 5 particles are treated as black holes.");

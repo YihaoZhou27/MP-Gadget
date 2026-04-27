@@ -9,6 +9,13 @@
 void set_secondfof_params(ParameterSet * ps);
 int get_secondfof_on(void);
 const char * get_secondfof_filebase(void);
+int get_secondfof_only(void);
+int get_seed_in_secfof(void);
+
+/* Run a secondary FOF specifically for BH seeding: swaps FOF params,
+ * runs fof_fof, calls fof_seed, then restores params and frees. */
+void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
+                    double atime, const RandTable * rnd, MPI_Comm Comm);
 
 /* Opaque handle holding second FOF results between run and write phases */
 typedef struct SecondFOFResult SecondFOFResult;

@@ -626,7 +626,12 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                 /* Seeding: builds its own tree.*/
                 FOFGroups fof = fof_fof(ddecomp, 0, MPI_COMM_WORLD);
                 if(All.BlackHoleOn && atime >= TimeNextSeedingCheck) {
-                    fof_seed(&fof, &Act, atime, &rnd, MPI_COMM_WORLD);
+                    if(get_seed_in_secfof() && get_secondfof_on()) {
+                        /* Seed BH using secondary FOF catalog */
+                        secondfof_seed(ddecomp, &Act, atime, &rnd, MPI_COMM_WORLD);
+                    } else {
+                        fof_seed(&fof, &Act, atime, &rnd, MPI_COMM_WORLD);
+                    }
                     TimeNextSeedingCheck = atime * All.TimeBetweenSeedingSearch;
                 }
 
@@ -713,16 +718,22 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
 
         /* Save FOF tables after checkpoint so that if there is a FOF save bug we have particle tables available to debug it*/
         if(WriteFOF) {
-            int domain_needed = fof_save_groups(&fof, All.OutputDir, All.FOFFileBase, SnapshotFileCount, &All.CP, atime, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
-            /* In case we need to do a second exchange to get back to a sensible compact mass distribution*/
-            fof_finish(&fof);
+            int domain_needed = 0;
+            /* Skip saving the primary FOF catalog if SecFOFonly is set */
+            if(!get_secondfof_only())
+                domain_needed = fof_save_groups(&fof, All.OutputDir, All.FOFFileBase, SnapshotFileCount, &All.CP, atime, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
 
-            /* Write second FOF catalog after checkpoint and halo PIG, for I/O safety */
+            /* Write second FOF catalog after checkpoint and halo PIG, for I/O safety.
+             * Must finish second FOF before primary FOF to respect stack allocator (LIFO) order:
+             * primary Group was allocated first, then second FOF's Group/Result/Output on top. */
             if(secfof) {
                 secondfof_write(secfof, All.OutputDir, SnapshotFileCount, atime,
                                 &All.CP, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
                 secondfof_finish(secfof);
             }
+
+            /* Free primary FOF after second FOF is freed */
+            fof_finish(&fof);
 
             if(domain_needed) {
                 /* Because this Peano sorts the particles, it should avoid a
@@ -870,15 +881,17 @@ runfof(const int RestartSnapNum, const inttime_t Ti_Current, const struct header
         secfof = secondfof_run(ddecomp, GetOutputPotential(), MPI_COMM_WORLD);
     }
 
-    fof_save_groups(&fof, All.OutputDir, All.FOFFileBase, RestartSnapNum, &All.CP, header->TimeSnapshot, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
-    fof_finish(&fof);
+    /* Skip saving the primary FOF catalog if SecFOFonly is set */
+    if(!get_secondfof_only())
+        fof_save_groups(&fof, All.OutputDir, All.FOFFileBase, RestartSnapNum, &All.CP, header->TimeSnapshot, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
 
-    /* Write second FOF catalog after halo PIG */
+    /* Must finish second FOF before primary FOF to respect stack allocator (LIFO) order */
     if(secfof) {
         secondfof_write(secfof, All.OutputDir, RestartSnapNum, header->TimeSnapshot,
                         &All.CP, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
         secondfof_finish(secfof);
     }
+    fof_finish(&fof);
 }
 
 void
