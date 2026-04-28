@@ -45,7 +45,7 @@ include ../Makefile.version
 
 GADGET_OBJS =  \
 	 gdbtools.o hci.o\
-	 fof.o fofpetaio.o petaio.o \
+	 fof.o fofpetaio.o secondfof.o petaio.o \
 	 domain.o exchange.o slotsmanager.o partmanager.o \
 	 blackhole.o bhinfo.o bhdynfric.o \
 	 timebinmgr.o \

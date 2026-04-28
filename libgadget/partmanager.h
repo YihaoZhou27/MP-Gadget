@@ -71,6 +71,16 @@ struct particle_data
     /* FOF Group number: only has meaning during FOF.*/
     /* Transient but hard to move to private arrays because it needs to
      * travel with the particle during exchange*/
+    int64_t GrNr;
+    int64_t SecGrNr;    /* Second FOF group number; -1 if not in any group */
+    MyFloat Potential;		/* Gravitational potential. This is the total potential only on a PM timestep,
+                             * after gravtree+gravpm is called. We do not save the potential on short timesteps
+                             * for hierarchical gravity as it would only be from active particles.*/
+#ifdef DEBUG
+    /* Kick times for both hydro and grav*/
+    inttime_t Ti_kick_hydro;
+    inttime_t Ti_kick_grav;
+#endif
 };
 
 extern struct part_manager_type {

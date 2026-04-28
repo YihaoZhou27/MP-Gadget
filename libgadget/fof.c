@@ -56,6 +56,7 @@ struct FOFParams
     int StarClusterOn;
     int BHseedMassScaleMsc;
     double MinMscForBHseed;
+    int FOFPotentialMin;
 } fof_params;
 
 /*Set the parameters of the BH module*/
@@ -82,6 +83,7 @@ void set_fof_params(ParameterSet * ps)
 
         if(fof_params.StarClusterOn && fof_params.BHseedMassScaleMsc && fof_params.MinMscForBHseed <= 0)
             endrun(1, "MinMscForBHseed must be > 0 when StarClusterOn and BHseedMassScaleMsc are enabled.\n");
+        fof_params.FOFPotentialMin = param_get_int(ps, "FOFPotentialMin");
     }
     MPI_Bcast(&fof_params, sizeof(struct FOFParams), MPI_BYTE, 0, MPI_COMM_WORLD);
 }
@@ -102,11 +104,34 @@ void set_fof_testpar(int FOFSaveParticles, double FOFHaloLinkingLength, int FOFH
     fof_params.BlackHoleSeedsfmpGas = 1e-3;
     fof_params.BlackHoleseedsMetalThres = 1e-4;
 
+    fof_params.FOFPotentialMin = 0;
 }
 
 void fof_init(double DMMeanSeparation)
 {
     fof_params.FOFHaloComovingLinkingLength = fof_params.FOFHaloLinkingLength * DMMeanSeparation;
+}
+
+void fof_get_params(int *PrimaryLinkTypes, int *SecondaryLinkTypes,
+                    double *ComovingLinkingLength, int *MinLength,
+                    int *PotentialMin)
+{
+    *PrimaryLinkTypes = fof_params.FOFPrimaryLinkTypes;
+    *SecondaryLinkTypes = fof_params.FOFSecondaryLinkTypes;
+    *ComovingLinkingLength = fof_params.FOFHaloComovingLinkingLength;
+    *MinLength = fof_params.FOFHaloMinLength;
+    *PotentialMin = fof_params.FOFPotentialMin;
+}
+
+void fof_set_params(int PrimaryLinkTypes, int SecondaryLinkTypes,
+                    double ComovingLinkingLength, int MinLength,
+                    int PotentialMin)
+{
+    fof_params.FOFPrimaryLinkTypes = PrimaryLinkTypes;
+    fof_params.FOFSecondaryLinkTypes = SecondaryLinkTypes;
+    fof_params.FOFHaloComovingLinkingLength = ComovingLinkingLength;
+    fof_params.FOFHaloMinLength = MinLength;
+    fof_params.FOFPotentialMin = PotentialMin;
 }
 
 static double fof_periodic_wrap(double x, double BoxSize)
@@ -643,6 +668,13 @@ static void fof_reduce_group(void * pdst, void * psrc) {
         gdst->seed_index = gsrc->seed_index;
         gdst->seed_task = gsrc->seed_task;
     }
+    if(fof_params.FOFPotentialMin && gsrc->PotMin < gdst->PotMin)
+    {
+        gdst->PotMin = gsrc->PotMin;
+        int d;
+        for(d = 0; d < 3; d++)
+            gdst->PotMinPos[d] = gsrc->PotMinPos[d];
+    }
 
     int d1, d2;
     for(d1 = 0; d1 < 3; d1++)
@@ -666,6 +698,7 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
         memset(gdst, 0, sizeof(gdst[0]));
         gdst->base = base;
         gdst->seed_index = gdst->seed_task = -1;
+        gdst->PotMin = 1e30;
     }
 
     gdst->Length ++;
@@ -712,6 +745,17 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
             gdst->seed_index = index;
             gdst->seed_task = ThisTask;
         }
+
+    /* Track minimum potential among primary-linked particles.
+     * Used by second FOF for group center; only when FOFPotentialMin is enabled. */
+    if(fof_params.FOFPotentialMin && ((1 << P[index].Type) & fof_params.FOFPrimaryLinkTypes)) {
+        if(P[index].Potential < gdst->PotMin) {
+            gdst->PotMin = P[index].Potential;
+            int d;
+            for(d = 0; d < 3; d++)
+                gdst->PotMinPos[d] = P[index].Pos[d];
+        }
+    }
 
     int d1, d2;
     double xyz[3];

@@ -160,6 +160,114 @@ int fof_save_particles(FOFGroups * fof, char * fname, int SaveParticles, Cosmolo
     return domain_needed;
 }
 
+/* Save particle data (subdirectories 0/, 1/, ..., 5/) to an already-open BigFile.
+ * Selects particles with GrNr >= 0, sorts by (Type, GrNr).
+ * Caller is responsible for setting GrNr appropriately before calling.
+ * Returns 1 if domain_maintain is needed (when PartManager was reused). */
+int fof_save_particles_to_bigfile(BigFile * bf, int MetalReturnOn, Cosmology * CP, double atime, int swap_group_ids, MPI_Comm Comm)
+{
+    int i;
+    int domain_needed = 0;
+    struct IOTable IOTable = {0};
+    register_io_blocks(&IOTable, 1, MetalReturnOn);
+    struct part_manager_type * halo_pman = NULL;
+    struct slots_manager_type * halo_sman = NULL;
+    int64_t NpigLocal = 0;
+    int64_t atleast[6]={0};
+    /* Count how many particles we have */
+    #pragma omp parallel for reduction(+: NpigLocal, atleast[:6])
+    for(i = 0; i < PartManager->NumPart; i ++) {
+        if(P[i].GrNr >= 0) {
+            NpigLocal++;
+            int type = P[i].Type;
+            if(type < 6 && type >= 0 && SlotsManager->info[type].enabled)
+                atleast[type]++;
+        }
+    }
+
+    int64_t NpigGlobal, NumPartGlobal;
+    MPI_Allreduce(&NpigLocal, &NpigGlobal, 1, MPI_INT64, MPI_SUM, Comm);
+    MPI_Allreduce(&PartManager->NumPart, &NumPartGlobal, 1, MPI_INT64, MPI_SUM, Comm);
+
+    if(NpigGlobal == 0) {
+        message(0, "No particles in groups to save.\n");
+        destroy_io_blocks(&IOTable);
+        return 0;
+    }
+
+    struct part_manager_type npartman = {0};
+    struct slots_manager_type nslotman = {0};
+    if(NpigGlobal > 0.25 * NumPartGlobal) {
+        halo_pman = PartManager;
+        halo_sman = SlotsManager;
+        message(0, "Re-using partmanager for particle catalog: total pig %ld, global %ld\n", NpigGlobal, NumPartGlobal);
+        domain_needed = 1;
+    }
+    else {
+        message(0, "Using new partmanager for particle catalog: total pig %ld, global %ld\n", NpigGlobal, NumPartGlobal);
+        halo_pman = &npartman;
+        halo_sman = &nslotman;
+    }
+    if(fof_distribute_particles(halo_pman, halo_sman, NpigLocal, atleast, Comm)) {
+        destroy_io_blocks(&IOTable);
+        return domain_needed;
+    }
+
+    /* Build selection BEFORE the GrNr/SecGrNr swap. At this point GrNr holds
+     * the secondary FOF ID (>= 0 for all grouped particles), so fof_select_func
+     * (which checks GrNr >= 0) correctly selects every particle. If we built the
+     * selection after the swap, particles in a secondary FOF but not in any primary
+     * FOF (original GrNr = -1) would be excluded, causing a mismatch with the
+     * header's NumPartInGroupTotal. */
+    int * selection = (int *) mymalloc("Selection", sizeof(int) * halo_pman->NumPart);
+
+    int64_t ptype_offset[6]={0};
+    int64_t ptype_count[6]={0};
+    petaio_build_selection(selection, ptype_offset, ptype_count, halo_pman->Base, halo_pman->NumPart, fof_select_func);
+
+    /* For the secondary FOF catalog, GrNr was temporarily set to SecGrNr
+     * (for selection/sorting) and SecGrNr was set to the original primary GrNr.
+     * Now that distribution and selection are done, swap them back so that the
+     * IO getters write the correct values: GroupID = primary, SecGroupID = secondary. */
+    if(swap_group_ids) {
+        #pragma omp parallel for
+        for(i = 0; i < halo_pman->NumPart; i++) {
+            int64_t tmp = halo_pman->Base[i].GrNr;
+            halo_pman->Base[i].GrNr = halo_pman->Base[i].SecGrNr;
+            halo_pman->Base[i].SecGrNr = tmp;
+        }
+    }
+
+    struct conversions conv = {0};
+    conv.atime = atime;
+    conv.hubble = hubble_function(CP, atime);
+
+    walltime_measure("/FOF/IO/argind");
+
+    for(i = 0; i < IOTable.used; i ++) {
+        char blockname[128];
+        int ptype = IOTable.ent[i].ptype;
+        BigArray array = {0};
+        if(ptype < 6 && ptype >= 0) {
+            sprintf(blockname, "%d/%s", ptype, IOTable.ent[i].name);
+            petaio_build_buffer(&array, &IOTable.ent[i], selection + ptype_offset[ptype], ptype_count[ptype], halo_pman->Base, halo_sman, &conv);
+
+            message(0, "Writing Block %s\n", blockname);
+
+            petaio_save_block(bf, blockname, &array, 1);
+            petaio_destroy_buffer(&array);
+        }
+    }
+    myfree(selection);
+    if(halo_pman != PartManager) {
+        myfree(halo_sman->Base);
+        myfree(halo_pman->Base);
+    }
+    walltime_measure("/FOF/IO/WriteParticles");
+    destroy_io_blocks(&IOTable);
+    return domain_needed;
+}
+
 struct PartIndex {
     uint64_t origin;
     union {

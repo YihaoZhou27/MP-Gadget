@@ -34,6 +34,5 @@ Options.mk
 yyh_tests/
 .vscode/
 .DS_Store
-plan/
 CLAUDE.md
 AGENTS.md

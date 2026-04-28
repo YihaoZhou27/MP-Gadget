@@ -11,6 +11,7 @@
 #include <libgadget/density.h>
 #include <libgadget/hydra.h>
 #include <libgadget/fof.h>
+#include <libgadget/secondfof.h>
 #include <libgadget/init.h>
 #include <libgadget/run.h>
 #include <libgadget/timebinmgr.h>
@@ -206,9 +207,21 @@ create_gadget_parameter_set()
     param_declare_int(ps, "FOFSaveParticles", OPTIONAL, 1, "Save particles in the FOF catalog.");
     param_declare_double(ps, "FOFHaloLinkingLength", OPTIONAL, 0.2, "Linking length for Friends of Friends halos.");
     param_declare_int(ps, "FOFHaloMinLength", OPTIONAL, 32, "Minimum number of particles per FOF Halo.");
+    param_declare_int(ps, "FOFPotentialMin", OPTIONAL, 0, "Track the position of minimum gravitational potential in FOF groups.");
     param_declare_double(ps, "MinFoFMassForNewSeed", OPTIONAL, 2, "Minimal halo mass for seeding tracer particles in internal mass units.");
     param_declare_double(ps, "MinMStarForNewSeed", OPTIONAL, 5e-4, "Minimal stellar mass in halo for seeding black holes in internal mass units.");
     param_declare_double(ps, "TimeBetweenSeedingSearch", OPTIONAL, 1.04, "Scale factor fraction increase between Seeding Attempts.");
+
+    /* Second FOF (star-primary) */
+    param_declare_int(ps, "SecondFOFOn", OPTIONAL, 0, "Enable second FOF pass for star clusters.");
+    param_declare_int(ps, "SecondFOFPrimaryLinkTypes", OPTIONAL, 16, "2^ particle types for primary linking in second FOF.");
+    param_declare_int(ps, "SecondFOFSecondaryLinkTypes", OPTIONAL, 1, "2^ particle types for secondary linking in second FOF.");
+    param_declare_double(ps, "SecondFOFLinkingLength", OPTIONAL, 0.01, "Comoving linking length for second FOF in code units (kpc/h).");
+    param_declare_int(ps, "SecondFOFMinLength", OPTIONAL, 32, "Minimum particle count per group in second FOF.");
+    param_declare_string(ps, "SecondFOFFileBase", OPTIONAL, "SecPIG", "Base name of the second FOF catalog files.");
+    param_declare_int(ps, "SecondFOFSize", OPTIONAL, 0, "Compute group size properties (R50, R90, Rmax) in second FOF.");
+    param_declare_int(ps, "SecFOFonly", OPTIONAL, 0, "If 1, skip saving the primary FOF catalog (PIG) and only save the second FOF catalog (SecPIG). Primary FOF still runs internally.");
+    param_declare_int(ps, "SeedInSecFOF", OPTIONAL, 0, "If 1, seed black holes using the secondary FOF catalog instead of the primary FOF catalog.");
 
     /*Black holes*/
     param_declare_int(ps, "BlackHoleOn", REQUIRED, 1, "Master switch to enable black hole formation and feedback. If this is on, type 5 particles are treated as black holes.");
@@ -448,6 +461,7 @@ void read_parameter_file(char *fname, int * ShowBacktrace, double * MaxMemSizePe
     set_uvbg_params(ps);
     set_winds_params(ps);
     set_fof_params(ps);
+    set_secondfof_params(ps);
     set_blackhole_params(ps);
     set_metal_return_params(ps);
     set_stats_params(ps);

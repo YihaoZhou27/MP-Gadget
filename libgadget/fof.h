@@ -1,6 +1,8 @@
 #ifndef FOF_H
 #define FOF_H
 
+#include <bigfile.h>
+
 #include "utils/paramset.h"
 #include "timestep.h"
 #include "slotsmanager.h"
@@ -9,6 +11,14 @@
 void set_fof_params(ParameterSet * ps);
 
 void fof_init(double DMMeanSeparation);
+
+/* Allow secondfof.c to temporarily override FOF parameters */
+void fof_get_params(int *PrimaryLinkTypes, int *SecondaryLinkTypes,
+                    double *ComovingLinkingLength, int *MinLength,
+                    int *PotentialMin);
+void fof_set_params(int PrimaryLinkTypes, int SecondaryLinkTypes,
+                    double ComovingLinkingLength, int MinLength,
+                    int PotentialMin);
 /* For the tests*/
 void set_fof_testpar(int FOFSaveParticles, double FOFHaloLinkingLength, int FOFHaloMinLength);
 
@@ -63,6 +73,12 @@ struct Group
     MyFloat StarClusterMass; /*!< Mass of the star cluster sticked to the black hole */
     MyFloat StarClusterMetallicity; /*!< Mass-weighted metallicity sum for star cluster */
     float StarClusterMetalElemMass[NMETALS]; /*!< Mass-weighted species metal sums for star cluster */
+    /* Minimum gravitational potential among primary-linked particles.
+     * Tracked during catalogue compilation, reduced across MPI ranks. */
+    float PotMin;
+    /* Position of the primary particle with minimum potential
+     * (in the translated frame, subtract CurrentParticleOffset for physical). */
+    double PotMinPos[3];
 };
 
 /* Structure to hold all allocated FOF groups*/
@@ -92,5 +108,16 @@ int fof_save_groups(FOFGroups * fof, const char * OutputDir, const char * FOFFil
 /* Does the actual saving of the particles
  Returns 1 if a domain_exchange is needed afterwards.*/
 int fof_save_particles(FOFGroups * fof, char * fname, int SaveParticles, Cosmology * CP, double atime, const double * MassTable, int MetalReturnOn, const int OutputDebugFields, MPI_Comm Comm);
+
+/* Save particle catalog (type subdirectories 0/, 1/, ..., 5/) into an already-open BigFile.
+ * Particles with GrNr >= 0 are selected and sorted by (Type, GrNr).
+ * If swap_group_ids is set, GrNr and SecGrNr are swapped on the distributed
+ * particles before writing IO blocks, so that GroupID gets the original primary
+ * FOF value and SecGroupID gets the secondary FOF value.
+ * Returns 1 if a domain_maintain is needed afterwards (when PartManager was reused). */
+int fof_save_particles_to_bigfile(BigFile * bf, int MetalReturnOn, Cosmology * CP, double atime, int swap_group_ids, MPI_Comm Comm);
+
+/* Selection function: returns true for particles that belong to a FOF group. */
+int fof_select_func(int i, const struct particle_data * Parts);
 
 #endif

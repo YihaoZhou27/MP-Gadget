@@ -18,6 +18,7 @@
 #include "partmanager.h"
 #include "config.h"
 #include "neutrinos_lra.h"
+#include "secondfof.h"
 #include "physconst.h"
 #include "utils/endrun.h"
 #include "utils/mymalloc.h"
@@ -84,6 +85,11 @@ set_petaio_params(ParameterSet * ps)
 int GetUsePeculiarVelocity(void)
 {
     return IO.UsePeculiarVelocity;
+}
+
+int GetOutputPotential(void)
+{
+    return IO.OutputPotential;
 }
 
 static void petaio_write_header(BigFile * bf, const double atime, const int64_t * NTotal, const Cosmology * CP, const struct header_data * data);
@@ -805,7 +811,7 @@ static void STVelocity(int i, float * out, void * baseptr, void * smanptr, const
 }
 SIMPLE_PROPERTY(Mass, Mass, float, 1)
 SIMPLE_PROPERTY(ID, ID, uint64_t, 1)
-SIMPLE_GETTER(GTPotential, Potential, float, 1, struct particle_data)
+SIMPLE_PROPERTY(Potential, Potential, float, 1)
 SIMPLE_GETTER(GTTimeBinHydro, TimeBinHydro, int, 1, struct particle_data)
 SIMPLE_GETTER(GTTimeBinGravity, TimeBinGravity, int, 1, struct particle_data)
 SIMPLE_PROPERTY(SmoothingLength, Hsml, float, 1)
@@ -873,6 +879,8 @@ static void GTBlackholeMinPotPos(int i, double * out, void * baseptr, void * sma
 
 /*This is only used if FoF is enabled*/
 SIMPLE_GETTER(GTGroupID, GrNr, uint32_t, 1, struct particle_data)
+/*This is only used if SecondFOF is enabled*/
+SIMPLE_GETTER(GTSecGroupID, SecGrNr, uint32_t, 1, struct particle_data)
 static void GTNeutralHydrogenFraction(int i, float * out, void * baseptr, void * smanptr, const struct conversions * params) {
     double redshift = 1./params->atime - 1;
     struct particle_data * pl = ((struct particle_data *) baseptr)+i;
@@ -984,9 +992,11 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
         IO_REG(Velocity, "f4", 3, i, IOTable);
         IO_REG(ID,       "u8", 1, i, IOTable);
         if(IO.OutputPotential)
-            IO_REG_WRONLY(Potential, "f4", 1, i, IOTable);
+            IO_REG_NONFATAL(Potential, "f4", 1, i, IOTable);
         if(WriteGroupID)
             IO_REG_WRONLY(GroupID, "u4", 1, i, IOTable);
+        if(WriteGroupID && get_secondfof_on())
+            IO_REG_WRONLY(SecGroupID, "u4", 1, i, IOTable);
         if(IO.OutputTimebins) {
             IO_REG_WRONLY(TimeBinHydro,       "u4", 1, i, IOTable);
             IO_REG_WRONLY(TimeBinGravity,       "u4", 1, i, IOTable);
