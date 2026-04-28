@@ -170,6 +170,7 @@ set_all_global_params(ParameterSet * ps)
         All.BlackHoleOn = param_get_int(ps, "BlackHoleOn");
         All.StarClusterOn = param_get_int(ps, "StarClusterOn");
         All.StarClusterEvolution = param_get_int(ps, "StarClusterEvolution");
+        All.SCgasVDisp = param_get_int(ps, "SCgasVDisp");
         All.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
         All.StarformationOn = param_get_int(ps, "StarformationOn");
         All.MetalReturnOn = param_get_int(ps, "MetalReturnOn");

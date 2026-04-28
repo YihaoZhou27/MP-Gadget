@@ -63,6 +63,8 @@ struct Group
     MyFloat StarClusterMass; /*!< Mass of the star cluster sticked to the black hole */
     MyFloat StarClusterMetallicity; /*!< Mass-weighted metallicity sum for star cluster */
     float StarClusterMetalElemMass[NMETALS]; /*!< Mass-weighted species metal sums for star cluster */
+    MyFloat StarClusterMassSample; /*!< Sum of StarClusterMass_sample for all hosted stars */
+    int NscSample; /*!< Sum of Nsc_sample for all hosted stars */
 };
 
 /* Structure to hold all allocated FOF groups*/

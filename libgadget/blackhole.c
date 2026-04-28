@@ -52,6 +52,7 @@ struct BlackholeParams
     double SeedBlackHoleMassIndex; /* Power law index for BH seed mass*/
 
     int StarClusterOn; /* If 1, enable star-cluster bh seeding formation */
+    int StarClusterSampling; /* If 1, use sampled star cluster mass for BH seeding */
     int BHseedMassScaleMsc; /* When star-cluster bh seeding formation is enabled, whether the seed mass is scaled by the star cluster mass. If so, parameter SeedBlackHoleMass is in unit of Msc. If not, it is in mass unit. */
     /************************************************************************/
 } blackhole_params;
@@ -121,6 +122,7 @@ void set_blackhole_params(ParameterSet * ps)
         blackhole_params.MaxSeedBlackHoleMass = param_get_double(ps,"MaxSeedBlackHoleMass");
         blackhole_params.SeedBlackHoleMassIndex = param_get_double(ps,"SeedBlackHoleMassIndex");
         blackhole_params.StarClusterOn = param_get_int(ps, "StarClusterOn");
+        blackhole_params.StarClusterSampling = param_get_int(ps, "StarClusterSampling");
         blackhole_params.BHseedMassScaleMsc = param_get_int(ps, "BHseedMassScaleMsc");
         /***********************************************************************************/
     }

@@ -21,6 +21,7 @@
 #include <string.h>
 #include <math.h>
 #include <omp.h>
+#include <gsl/gsl_sf_expint.h>
 #include "libgadget/timebinmgr.h"
 #include "physconst.h"
 #include "sfr_eff.h"
@@ -56,8 +57,15 @@ static struct SFRParams
     double MaxSfrTimescale;
     int BHFeedbackUseTcool;
     int StarClusterOn; /* if star cluster bh seeding formation is enabled */
+    int StarClusterSampling; /* if star cluster mass sampling is enabled (requires StarClusterOn) */
     /*!< may be used to set a floor for the gas temperature */
     double MinGasTemp;
+    /* Precomputed constants for M_cstar calculation (in code units) */
+    double t_sn_code;    /* Supernova timescale t_sn = 3 Myr in code time */
+    double phi_fb_code;  /* Feedback efficiency phi_fb = 0.16 cm^2/s^3 in code units */
+    /* Mass limits for msc_ave calculation (in code mass units) */
+    double msc_min_code; /* 1e2 Msun in code mass */
+    double msc_max_code; /* 1e8 Msun in code mass */
 
     /* Unit conversion factor for the sfr_due_to_h2 function*/
     double tau_fmol_unit;
@@ -127,7 +135,7 @@ static void cooling_relaxed(int i, double dtime, struct UVBG * local_uvbg, const
 static int add_new_particle_to_active(const int parent, const int child, ActiveParticles * act);
 static int copy_gravaccel_new_particle(const int parent, const int child, MyFloat (* GravAccel)[3], int64_t nstoredgravaccel);
 
-static int make_particle_star(int child, int parent, int placement, double Time);
+static int make_particle_star(int child, int parent, int placement, double Time, const double GravInternal, const RandTable * const rnd);
 static int starformation(int i, double *localsfr, MyFloat * sm_out, MyFloat * sum_sm, MyFloat * sum_dtime, MyFloat * GradRho, const double redshift, const double a3inv, const double hubble, const double GravInternal, const struct UVBG * const GlobalUVBG, const RandTable * const rnd);
 static int quicklyastarformation(int i, const double a3inv, const RandTable * const rnd);
 static double get_sfr_factor_due_to_selfgravity(int i, const double atime, const double a3inv, const double hubble, const double GravInternal);
@@ -173,6 +181,15 @@ void set_sfr_params(ParameterSet * ps)
             endrun(0, "BHFeedbackUseTcool mode %d not supported\n", sfr_params.BHFeedbackUseTcool);
         /*Lyman-alpha forest parameters*/
         sfr_params.StarClusterOn = param_get_int(ps, "StarClusterOn");
+        sfr_params.StarClusterSampling = param_get_int(ps, "StarClusterSampling");
+        if(sfr_params.StarClusterSampling && !sfr_params.StarClusterOn)
+            endrun(0, "StarClusterSampling = 1 requires StarClusterOn = 1\n");
+        if(sfr_params.StarClusterOn) {
+            int GasTidalField = param_get_int(ps, "GasTidalField");
+            int SCgasVDisp = param_get_int(ps, "SCgasVDisp");
+            if(!GasTidalField || !SCgasVDisp)
+                endrun(0, "StarClusterOn = 1 requires GasTidalField = 1 and SCgasVDisp = 1\n");
+        }
         sfr_params.QuickLymanAlphaProbability = param_get_double(ps, "QuickLymanAlphaProbability");
         sfr_params.QuickLymanAlphaTempThresh = param_get_double(ps, "QuickLymanAlphaTempThresh");
         sfr_params.HIReionTemp = param_get_double(ps, "HIReionTemp");
@@ -329,7 +346,7 @@ cooling_and_starformation(ActiveParticles * act, double Time, double dloga, Forc
     {
         int child = NewStars[i];
         int parent = NewParents[i];
-        make_particle_star(child, parent, firststarslot+i, Time);
+        make_particle_star(child, parent, firststarslot+i, Time, CP->GravInternal, rnd);
         sum_mass_stars += P[child].Mass;
         if(child == parent)
             stars_converted++;
@@ -648,7 +665,7 @@ double get_helium_neutral_fraction_sfreff(int ion, double redshift, double hubbl
 /* This function turns a particle into a star. It returns 1 if a particle was
  * converted and 2 if a new particle was spawned. This is used
  * above to set stars_{spawned|converted}*/
-static int make_particle_star(int child, int parent, int placement, double Time)
+static int make_particle_star(int child, int parent, int placement, double Time, const double GravInternal, const RandTable * const rnd)
 {
     int retflag = 2;
     if(P[parent].Type != 0)
@@ -670,14 +687,191 @@ static int make_particle_star(int child, int parent, int placement, double Time)
     STARP(child).BirthInternalEnergy = oldslot.Entropy * entropy_to_u(oldslot.Density, a3inv);
 
     if (sfr_params.StarClusterOn) {
-        double Pressure_over_kB = GAMMA_MINUS1 * STARP(child).BirthDensity * a3inv
-                                  * STARP(child).BirthInternalEnergy * sfr_params.pressure_to_pkb;
-        STARP(child).ClusterFormationEfficiency = get_cluster_formation_efficiency(Pressure_over_kB);
-        STARP(child).ClusterMass = P[child].Mass * STARP(child).ClusterFormationEfficiency;
+        const double G = GravInternal;
+        const double rho_phys = STARP(child).BirthDensity * a3inv;
+        const double u = STARP(child).BirthInternalEnergy;
+        const double Pressure = GAMMA_MINUS1 * rho_phys * u;
+
+        /* Cluster formation efficiency from pressure */
+        double Pressure_over_kB = Pressure * sfr_params.pressure_to_pkb;
+        double CFE = get_cluster_formation_efficiency(Pressure_over_kB);
+        STARP(child).ClusterFormationEfficiency = CFE;
+        STARP(child).ClusterMass = P[child].Mass * CFE;
+
+        /* --- M_cstar: star cluster mass from Toomre mass model --- */
+
+        /* Pressure correction factor phi_P from stellar/gas velocity dispersion */
+        double phi_P = 1.0;
+        const int Ncut = 5;
+        if(oldslot.VDisp_Nstar > Ncut) {
+            double m_total = oldslot.VDisp_mstar + oldslot.VDisp_mgas;
+            if(m_total > 0 && oldslot.VDisp_mgas > 0 && oldslot.VDisp_star > 0) {
+                double f_gas = oldslot.VDisp_mgas / m_total;
+                phi_P = 1.0 + oldslot.VDisp_gas / oldslot.VDisp_star * (1.0 / f_gas - 1.0);
+            }
+        }
+
+        /* Gas surface density: Sigma_gas = sqrt(2 * P / (pi * G * phi_P)) */
+        double Sigma_gas = sqrt(2.0 * Pressure / (M_PI * G * phi_P));
+
+        /* Epicyclic frequency squared from tidal field eigenvalues:
+         * kappa^2 = trace(T) + lambda_1 where lambda_1 is the largest eigenvalue.
+         * Eigenvalues are stored sorted descending. */
+        double trace = oldslot.TidalFieldEigenvalues[0] + oldslot.TidalFieldEigenvalues[1] + oldslot.TidalFieldEigenvalues[2];
+        double kappa_sq = trace + oldslot.TidalFieldEigenvalues[0];
+
+        /* Toomre mass: M_T = 4 * pi^5 * G^2 * Sigma_gas^3 / kappa^4 */
+        double M_T = 0;
+        if(kappa_sq > 0)
+            M_T = 4.0 * pow(M_PI, 5) * G * G * Sigma_gas * Sigma_gas * Sigma_gas
+                / (kappa_sq * kappa_sq);
+
+        /* Toomre mass collapse fraction f_coll */
+        double f_coll = 1.0;
+        if(kappa_sq > 0 && rho_phys > 0) {
+            const double esp_ff = 0.012;
+            const double t_sn = sfr_params.t_sn_code;
+            const double phi_fb = sfr_params.phi_fb_code;
+
+            double sigma_loc = sqrt(Pressure / rho_phys);
+            double t_ff = sqrt(3.0 * M_PI / (32.0 * G * rho_phys));
+            double tff_2D = sqrt(2.0 * M_PI / kappa_sq);
+
+            double term_tmp = 4.0 * t_ff * sigma_loc * sigma_loc
+                            / (phi_fb * esp_ff * t_sn * t_sn);
+            double t_fbg = t_sn / 2.0 * (1.0 + sqrt(1.0 + term_tmp));
+            f_coll = t_fbg / tff_2D;
+            if(f_coll > 1.0)
+                f_coll = 1.0;
+        }
+
+        /* M_cstar = 0.1 * CFE * f_coll * M_T */
+        double Mcstar = 0.1 * CFE * f_coll * M_T;
+        STARP(child).Mcstar = Mcstar;
+
+        if(sfr_params.StarClusterSampling) {
+            /* Average cluster mass from n(m) ~ m^-2 exp(-m/Mcstar) over [m_min, m_max]:
+             * <m> = Mcstar * [E1(x_min) - E1(x_max)] /
+             *       [exp(-x_min)/x_min - exp(-x_max)/x_max + E1(x_max) - E1(x_min)]
+             * where x = m / Mcstar and E1 is the exponential integral. */
+            /* Flag to skip Poisson sampling and mass sampling if Msc_ave is invalid */
+            int skip_sampling = 0;
+            if(Mcstar > 0) {
+                double x_min = sfr_params.msc_min_code / Mcstar;
+                double x_max = sfr_params.msc_max_code / Mcstar;
+                double E1_min = gsl_sf_expint_E1(x_min);
+                double E1_max = gsl_sf_expint_E1(x_max);
+                double numer = E1_min - E1_max;
+                double denom = exp(-x_min) / x_min - exp(-x_max) / x_max + E1_max - E1_min;
+                if(denom > 0)
+                    STARP(child).Msc_ave = Mcstar * numer / denom;
+                else {
+                    STARP(child).Msc_ave = 0;
+                    skip_sampling = 1;
+                }
+            }
+            else {
+                STARP(child).Msc_ave = 0;
+                skip_sampling = 1;
+            }
+
+            /* Number of star clusters */
+            if(STARP(child).Msc_ave > 0)
+                STARP(child).NumStarCluster = STARP(child).ClusterMass / STARP(child).Msc_ave;
+            else
+                STARP(child).NumStarCluster = 0;
+
+            /* Poisson sample from NumStarCluster.
+             * Offsets ID+10..ID+11 are reserved for this sampling;
+             * existing code uses ID+0..4 and ID+23. */
+            double lambda = STARP(child).NumStarCluster;
+            if(skip_sampling)
+                lambda = 0;
+            if(lambda > 30) {
+                /* Normal approximation: N(lambda, lambda) */
+                double u1 = get_random_number(P[child].ID + 10, rnd);
+                double u2 = get_random_number(P[child].ID + 11, rnd);
+                /* Guard against u1 == 0 (gsl_rng_uniform returns [0,1)) */
+                if(u1 < 1e-20)
+                    u1 = 1e-20;
+                /* Box-Muller transform for a standard normal */
+                double z = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+                int sample = (int)(lambda + sqrt(lambda) * z + 0.5);
+                STARP(child).Nsc_sample = sample > 0 ? sample : 0;
+            }
+            else if(lambda > 0) {
+                /* Knuth's algorithm for small lambda (lambda <= 30) */
+                const int max_iter = 200;
+                double L = exp(-lambda);
+                double p = 1.0;
+                int k = 0;
+                uint64_t seed = P[child].ID + 10;
+                do {
+                    k++;
+                    p *= get_random_number(seed, rnd);
+                    seed++;
+                    if(k > max_iter)
+                        endrun(7773, "Poisson sampling exceeded %d iterations for lambda=%g, particle ID=%ld\n",
+                               max_iter, lambda, (long)P[child].ID);
+                } while(p > L);
+                STARP(child).Nsc_sample = k - 1;
+            }
+            else {
+                STARP(child).Nsc_sample = 0;
+            }
+
+            /* Sample Nsc_sample cluster masses from n(m) ~ m^-2 exp(-m/Mcstar)
+             * on [m_min, m_max] using inverse CDF with bisection.
+             * CDF(x) = [e^{-x_min}/x_min - e^{-x}/x + E1(x) - E1(x_min)] / norm
+             * where x = m / Mcstar. Bisection has fixed iteration count (no while loop).
+             * Random seed offsets: ID + 300 + s (s = 0..Nsc_sample-1). */
+            double total_sample_mass = 0;
+            int Nsc = STARP(child).Nsc_sample;
+            if(Nsc > 0 && Mcstar > 0) {
+                double x_min_s = sfr_params.msc_min_code / Mcstar;
+                double x_max_s = sfr_params.msc_max_code / Mcstar;
+                double E1_xmin = gsl_sf_expint_E1(x_min_s);
+                double emxmin_over_xmin = exp(-x_min_s) / x_min_s;
+                /* CDF normalization */
+                double g_norm = emxmin_over_xmin - exp(-x_max_s) / x_max_s
+                              + gsl_sf_expint_E1(x_max_s) - E1_xmin;
+
+                for(int s = 0; s < Nsc; s++) {
+                    double u_s = get_random_number(P[child].ID + 300 + (uint64_t)s, rnd);
+                    double target = u_s * g_norm;
+
+                    /* Bisection: find x in [x_min_s, x_max_s] such that g(x) = target */
+                    double lo = x_min_s, hi = x_max_s;
+                    for(int iter = 0; iter < 50; iter++) {
+                        double mid = 0.5 * (lo + hi);
+                        double g_mid = emxmin_over_xmin - exp(-mid) / mid
+                                     + gsl_sf_expint_E1(mid) - E1_xmin;
+                        if(g_mid < target)
+                            lo = mid;
+                        else
+                            hi = mid;
+                    }
+                    total_sample_mass += Mcstar * 0.5 * (lo + hi);
+                }
+            }
+            STARP(child).StarClusterMass_sample = total_sample_mass;
+        }
+        else {
+            /* StarClusterSampling off: skip sampling, set to initial values */
+            STARP(child).Msc_ave = 0;
+            STARP(child).NumStarCluster = 0;
+            STARP(child).Nsc_sample = 0;
+            STARP(child).StarClusterMass_sample = 0;
+        }
     }
     else {
         STARP(child).ClusterFormationEfficiency = 0;
         STARP(child).ClusterMass = 0;
+        STARP(child).Mcstar = 0;
+        STARP(child).Msc_ave = 0;
+        STARP(child).NumStarCluster = 0;
+        STARP(child).Nsc_sample = 0;
+        STARP(child).StarClusterMass_sample = 0;
     }
 
     STARP(child).VDisp = oldslot.VDisp;
@@ -941,7 +1135,18 @@ void init_cooling_and_star_formation(int CoolingOn, int StarformationOn, Cosmolo
 
     sfr_params.UnitSfr_in_solar_per_year = (units.UnitMass_in_g / SOLAR_MASS) / (units.UnitTime_in_s / SEC_PER_YEAR);
 
-    sfr_params.pressure_to_pkb = coolunits.density_in_phys_cgs * coolunits.uu_in_cgs / BOLTZMANN;
+    sfr_params.pressure_to_pkb = coolunits.density_in_phys_cgs * coolunits.uu_in_cgs / BOLTZMANN;  // ~22500 
+    /* Precompute constants for M_cstar (star cluster mass) calculation */
+    /* t_sn = 3 Myr in code time units: 3 * SEC_PER_MEGAYEAR / UnitTime_in_s (note UnitTime includes h) */
+    sfr_params.t_sn_code = 3.0 * SEC_PER_MEGAYEAR / (units.UnitTime_in_s / CP->HubbleParam);
+    /* phi_fb = 0.16 cm^2/s^3 in code units:
+     * code_velocity^2 / code_time = UnitVelocity^2 / (UnitLength/UnitVelocity)
+     * = UnitVelocity^3 / UnitLength. Divide by h factor from code_time. */
+    sfr_params.phi_fb_code = 0.16 / (units.UnitVelocity_in_cm_per_s * units.UnitVelocity_in_cm_per_s
+                                     / (units.UnitTime_in_s / CP->HubbleParam));
+    /* Mass limits for msc_ave: 1e2 and 1e8 solar masses in code mass units */
+    sfr_params.msc_min_code = 1e2 * SOLAR_MASS / units.UnitMass_in_g;
+    sfr_params.msc_max_code = 1e8 * SOLAR_MASS / units.UnitMass_in_g;
 
     init_cooling(sfr_params.TreeCoolFile, sfr_params.J21CoeffFile, sfr_params.MetalCoolFile, sfr_params.ReionHistFile, coolunits, CP);
 

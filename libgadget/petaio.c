@@ -819,6 +819,11 @@ SIMPLE_PROPERTY_PI(BirthDensity, BirthDensity, float, 1, struct star_particle_da
 SIMPLE_PROPERTY_PI(BirthInternalEnergy, BirthInternalEnergy, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(ClusterFormationEfficiency, ClusterFormationEfficiency, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(ClusterMass, ClusterMass, float, 1, struct star_particle_data)
+SIMPLE_PROPERTY_PI(Mcstar, Mcstar, float, 1, struct star_particle_data)
+SIMPLE_PROPERTY_PI(Msc_ave, Msc_ave, float, 1, struct star_particle_data)
+SIMPLE_PROPERTY_PI(NumStarCluster, NumStarCluster, float, 1, struct star_particle_data)
+SIMPLE_PROPERTY_PI(Nsc_sample, Nsc_sample, int, 1, struct star_particle_data)
+SIMPLE_PROPERTY_PI(StarClusterMass_sample, StarClusterMass_sample, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_TYPE_PI(ClusterFormationEfficiency, 0, ClusterFormationEfficiency, float, 1, struct sph_particle_data)
 SIMPLE_PROPERTY_PI(SumSFRdt, SumSFRdt, float, 1, struct sph_particle_data)
 SIMPLE_PROPERTY_PI(SumSpawnedMass, SumSpawnedMass, float, 1, struct sph_particle_data)
@@ -1031,6 +1036,8 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
     IO_REG_NONFATAL(BirthInternalEnergy, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(ClusterFormationEfficiency, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(ClusterMass, "f4", 1, 4, IOTable);
+    IO_REG_NONFATAL(Msc_ave, "f4", 1, 4, IOTable);
+    IO_REG_NONFATAL(StarClusterMass_sample, "f4", 1, 4, IOTable);
     IO_REG_TYPE(ClusterFormationEfficiency, "f4", 1, 0, IOTable);
     IO_REG_NONFATAL(SumSFRdt,       "f4", 1, 0, IOTable);
     IO_REG_NONFATAL(SumSpawnedMass, "f4", 1, 0, IOTable);
@@ -1141,6 +1148,9 @@ void register_debug_io_blocks(struct IOTable * IOTable)
     IO_REG_WRONLY(VDispNgas,   "i4", 1, 0, IOTable);
     IO_REG_WRONLY(VDispNstar,  "i4", 1, 0, IOTable);
     IO_REG_WRONLY(SumSFRdt_v2,  "f4", 1, 0, IOTable);
+    IO_REG_WRONLY(Mcstar,          "f4", 1, 4, IOTable);
+    IO_REG_WRONLY(NumStarCluster,  "f4", 1, 4, IOTable);
+    IO_REG_WRONLY(Nsc_sample,     "i4", 1, 4, IOTable);
 
     /*Sort IO blocks so similar types are together; then ordered by the sequence they are declared. */
     qsort_openmp(IOTable->ent, IOTable->used, sizeof(struct IOTableEntry), order_by_type);
