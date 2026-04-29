@@ -1119,52 +1119,71 @@ bh_powerlaw_seed_mass(const MyIDType ID, const RandTable * const rnd)
 }
 
 void
-blackhole_make_one(int index, const double atime, const RandTable * const rnd, MyFloat StarClusterMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals) {
-    if(P[index].Type != 0)
-        endrun(7772, "Only Gas turns into blackholes, what's wrong?");
+blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals) {
+    int child;
+    int spawn_from_star = seeded_by_starcluster && (P[index].Type == 4);
 
-    int child = index;
+    if(spawn_from_star) {
+        /* Star-cluster seeding in secondary FOF: spawn a new BH next to
+         * the star.  The parent star is NOT modified. */
+        if(P[index].Type != 4)
+            endrun(7773, "blackhole_make_one spawn_from_star called on non-star particle (type %d).\n",
+                   P[index].Type);
+        int64_t new_child = atomic_fetch_and_add_64(&PartManager->NumPart, 1);
+        if(new_child >= PartManager->MaxPart)
+            endrun(8888, "Tried to spawn BH from star: NumPart=%ld MaxPart=%ld.\n",
+                   new_child, PartManager->MaxPart);
 
-    /* Make the new particle a black hole: use all the P[i].Mass
-     * so we don't have lots of low mass tracers.
-     * If the BH seed mass is small this may lead to a mismatch
-     * between the gas and BH mass. */
-    child = slots_convert(child, 5, -1, PartManager, SlotsManager);
-
+        PartManager->Base[new_child] = PartManager->Base[index];
+        PartManager->Base[index].Generation++;
+        uint64_t g = PartManager->Base[index].Generation;
+        PartManager->Base[new_child].ID = (PartManager->Base[index].ID & 0x00ffffffffffffffL) + (g << 56L);
+        if(g >= (1 << (64 - 56L)))
+            endrun(1, "Particle %ld (ID: %ld) generation %ld wrapped.\n",
+                   (long)index, (long)PartManager->Base[index].ID, (long)g);
+        PartManager->Base[new_child].PI = -1;
+        if(blackhole_params.SeedBHDynMass > 0)
+            P[new_child].Mass = blackhole_params.SeedBHDynMass;
+        else
+            P[new_child].Mass = blackhole_params.SeedBlackHoleMass;
+        child = slots_convert(new_child, 5, -1, PartManager, SlotsManager);
+    } else {
+        /* Standard gas-based seeding: convert the gas particle in-place.
+         * The full P[i].Mass is kept so we don't leave low-mass tracers. */
+        if(P[index].Type != 0)
+            endrun(7772, "Only Gas turns into blackholes, what's wrong?");
+        child = slots_convert(index, 5, -1, PartManager, SlotsManager);
+    }
 
     /* The accretion mass should always be the seed black hole mass,
-     * irrespective of the gravitational mass of the particle.*/
+     * irrespective of the gravitational mass of the particle. */
     if(blackhole_params.MaxSeedBlackHoleMass > 0)
         BHP(child).Mass = bh_powerlaw_seed_mass(P[child].ID, rnd);
     else
         BHP(child).Mass = blackhole_params.SeedBlackHoleMass;
 
-    if (blackhole_params.StarClusterOn && blackhole_params.BHseedMassScaleMsc){
-        BHP(child).Mass = BHP(child).Mass * StarClusterMass;
-    }
+    if(seeded_by_starcluster && blackhole_params.BHseedMassScaleMsc)
+        BHP(child).Mass *= StarClusterMass;
 
     BHP(child).Mseed = BHP(child).Mass;
     BHP(child).Mdot = 0;
     BHP(child).FormationTime = atime;
     BHP(child).SwallowID = (MyIDType) -1;
     BHP(child).Density = 0;
-    /* Make sure initially active*/
     BHP(child).TimeBinDynFric = P[child].TimeBinHydro;
 
-    if (blackhole_params.StarClusterOn){
+    if(blackhole_params.StarClusterOn) {
         BHP(child).StarClusterMass = StarClusterMass;
-    }
-    else{
+    } else {
         BHP(child).StarClusterMass = 0;
     }
-    if (blackhole_params.StarClusterOn && StarClusterMass > 0){
+    if(blackhole_params.StarClusterOn && StarClusterMass > 0) {
         BHP(child).StarClusterFormationTime = atime;
         BHP(child).StarClusterMetallicity = StarClusterMetallicity;
         int k;
         for(k = 0; k < NMETALS; k++)
             BHP(child).StarClusterMetals[k] = StarClusterMetals ? StarClusterMetals[k] : 0;
-    }
-    else{
+    } else {
         BHP(child).StarClusterFormationTime = -1;
         BHP(child).StarClusterMetallicity = 0;
         int k;
@@ -1174,9 +1193,8 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, M
     BHP(child).StarClusterLastEnrichmentMyr = 0;
     BHP(child).StarClusterTotalMassReturned = 0;
 
-    /* It is important to initialize MinPotPos to the current position of
-     * a BH to avoid drifting to unknown locations (0,0,0) immediately
-     * after the BH is created. */
+    /* Initialize MinPotPos to the current position to avoid drifting
+     * to unknown locations (0,0,0) immediately after creation. */
     int j;
     for(j = 0; j < 3; j++) {
         BHP(child).MinPotPos[j] = P[child].Pos[j];
@@ -1189,22 +1207,32 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, M
     BHP(child).JumpToMinPot = 0;
     BHP(child).CountProgs = 1;
 
-    if (blackhole_params.SeedBHDynMass>0){
-        BHP(child).Mtrack = P[child].Mass;
+    if(blackhole_params.SeedBHDynMass > 0) {
+        /* For BH seeding from gas particle, Mtrack starts at the original gas particle
+         * mass and grows via gas swallowing until it reaches SeedBHDynMass
+         * (the "seed regime").  For BH seeding from star cluster there is no original gas
+         * particle, so initialize Mtrack to BHP.Mass (the intrinsic BH seed
+         * mass) so the BH enters the seed regime and must swallow gas to
+         * reach SeedBHDynMass, same as gas-seeded BHs. */
+        if(spawn_from_star)
+            BHP(child).Mtrack = BHP(child).Mass;
+        else
+            BHP(child).Mtrack = P[child].Mass;
         P[child].Mass = blackhole_params.SeedBHDynMass;
-    }
-    else{
-        BHP(child).Mtrack = -1; /* This column is not used then. */
+    } else {
+        BHP(child).Mtrack = -1;
     }
     /* Add star cluster mass to P.Mass so it contributes to gravity.
      * This is done after Mtrack/SeedBHDynMass setup so those are unaffected. */
     if(BHP(child).StarClusterMass > 0)
         P[child].Mass += BHP(child).StarClusterMass;
 
-    if(P[child].Mass - BHP(child).StarClusterMass < BHP(child).Mass || P[child].Mass - BHP(child).StarClusterMass < BHP(child).Mtrack)
-        message(1, "WARNING: BH Mass (%g) for ID %ld is larger than particle mass (%g) or mtrack (%g)\n", BHP(child).Mass, P[child].ID, P[child].Mass - BHP(child).StarClusterMass, BHP(child).Mtrack);
+    if(!spawn_from_star &&
+       (P[child].Mass - BHP(child).StarClusterMass < BHP(child).Mass ||
+        P[child].Mass - BHP(child).StarClusterMass < BHP(child).Mtrack))
+        message(1, "WARNING: BH Mass (%g) for ID %ld is larger than particle mass (%g) or mtrack (%g)\n",
+                BHP(child).Mass, P[child].ID, P[child].Mass - BHP(child).StarClusterMass, BHP(child).Mtrack);
 
-    /* Initialize KineticFdbkEnergy, keep zero if BlackHoleKineticOn is not turned on */
     BHP(child).KineticFdbkEnergy = 0;
     BHP(child).VDisp = 0;
 }

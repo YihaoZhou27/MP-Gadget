@@ -221,7 +221,8 @@ create_gadget_parameter_set()
     param_declare_string(ps, "SecondFOFFileBase", OPTIONAL, "SecPIG", "Base name of the second FOF catalog files.");
     param_declare_int(ps, "SecondFOFSize", OPTIONAL, 0, "Compute group size properties (R50, R90, Rmax) in second FOF.");
     param_declare_int(ps, "SecFOFonly", OPTIONAL, 0, "If 1, skip saving the primary FOF catalog (PIG) and only save the second FOF catalog (SecPIG). Primary FOF still runs internally.");
-    param_declare_int(ps, "SeedInSecFOF", OPTIONAL, 0, "If 1, seed black holes using the secondary FOF catalog instead of the primary FOF catalog.");
+    param_declare_int(ps, "SeedInSecFOFasStarCluster", OPTIONAL, 0, "If 1, use StarCluster BH-seeding in the secondary FOF catalog. Requires SecondFOFOn=1 and StarClusterOn=1.");
+    param_declare_int(ps, "SecFOFStarCluster", OPTIONAL, 1, "Flag that second FOF groups are star clusters. Requires SecondFOFOn=1 and StarClusterOn=1. Writes StarClusterMass/Metallicity/MetalElemMass to SecPIG.");
 
     /*Black holes*/
     param_declare_int(ps, "BlackHoleOn", REQUIRED, 1, "Master switch to enable black hole formation and feedback. If this is on, type 5 particles are treated as black holes.");
@@ -229,12 +230,13 @@ create_gadget_parameter_set()
 
     param_declare_double(ps, "BlackHoleAccretionFactor", OPTIONAL, 100, "BH accretion boosting factor relative to the rate from the Bondi accretion model.");
     param_declare_double(ps, "BlackHoleEddingtonFactor", OPTIONAL, 2.1, "Maximum Black hole accretion as a function of Eddington.");
-    param_declare_double(ps, "SeedBlackHoleMass", OPTIONAL, 2e-5, "Mass of initial black hole seed in internal mass units. If this is too much smaller than the gas particle mass, BH will not accrete. When MaxSeedBlackHoleMass >0, this is the lower limit of the BHseed mass.");
+    param_declare_double(ps, "SeedBlackHoleMass", OPTIONAL, 2e-5, "Mass of initial black hole seed in internal mass units. If this is too much smaller than the gas particle mass, BH will not accrete. When MaxSeedBlackHoleMass >0, this is the lower limit of the BHseed mass. When BHseedMassScaleMsc = 1, this is in the unit of star cluster mass.");
     param_declare_double(ps, "MaxSeedBlackHoleMass", OPTIONAL, 0, "Black hole seed masses are drawn from a power law. This is the upper limit on the BH seed mass. If <= 0 then all BHs have the SeedBlackHoleMass and the power law is disabled.");
     param_declare_double(ps, "SeedBlackHoleMassIndex", OPTIONAL, -2, "Power law index of the seed mass distribution");
 
 
     param_declare_int(ps, "BlackHoleSeedHaloBased", OPTIONAL, 1, "Used halo-based black hole seeding prescriptions");
+    param_declare_int(ps, "BlackHoleSeedStarCluster", OPTIONAL, 0, "Enable StarCluster-based black hole seeding.");
     param_declare_int(ps, "BlackHoleSeedGasBased", OPTIONAL, 0, "Used gas-based black hole seeding prescriptions");
     param_declare_double(ps, "BlackHoleSeedsfmpGas", OPTIONAL, 0.001, "The mass of star-forming, metal-poor gas for seeding blackhole. in the unit of 1e10/hh soloarmass. Only used when BlackHoleSeedGasBased = 1");
     param_declare_double(ps, "BlackHoleseedsMetalThres", OPTIONAL, 0.0001, "The threshold of the metal-poor gas to seed blackhole, in the unit of solar metallicity (0.0127) Only used when BlackHoleSeedGasBased = 1");

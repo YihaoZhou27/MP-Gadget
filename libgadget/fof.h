@@ -19,6 +19,10 @@ void fof_get_params(int *PrimaryLinkTypes, int *SecondaryLinkTypes,
 void fof_set_params(int PrimaryLinkTypes, int SecondaryLinkTypes,
                     double ComovingLinkingLength, int MinLength,
                     int PotentialMin);
+void fof_get_seed_params(int *BlackHoleSeedStarCluster, int *BlackHoleSeedHaloBased,
+                         int *BlackHoleSeedGasBased);
+void fof_set_seed_params(int BlackHoleSeedStarCluster, int BlackHoleSeedHaloBased,
+                         int BlackHoleSeedGasBased);
 /* For the tests*/
 void set_fof_testpar(int FOFSaveParticles, double FOFHaloLinkingLength, int FOFHaloMinLength);
 
@@ -68,6 +72,11 @@ struct Group
 
     int seed_index;
     int seed_task;
+
+    /* Star particle at the potential minimum, used for star-cluster BH seeding
+     * in secondary FOF (where groups have no gas). */
+    int seed_index_star;
+    int seed_task_star;
 
     /***********************/
     MyFloat StarClusterMass; /*!< Mass of the star cluster sticked to the black hole */

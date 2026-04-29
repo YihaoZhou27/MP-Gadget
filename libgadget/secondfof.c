@@ -35,7 +35,8 @@ struct SecondFOFParams {
     int MinLength;
     int ComputeSize;        /* compute R50, R90, Rmax */
     int SecFOFonly;          /* skip primary FOF catalog, only save SecPIG */
-    int SeedInSecFOF;       /* seed BH using secondary FOF instead of primary */
+    int SeedInSecFOFasStarCluster; /* use StarCluster BH-seeding in sec FOF catalog */
+    int SecFOFStarCluster;  /* flag that sec FOF groups are star clusters (requires SecondFOFOn && StarClusterOn) */
     char SecondFOFFileBase[256];
 };
 
@@ -53,10 +54,46 @@ void set_secondfof_params(ParameterSet * ps)
         sfof_params.MinLength = param_get_int(ps, "SecondFOFMinLength");
         sfof_params.ComputeSize = param_get_int(ps, "SecondFOFSize");
         sfof_params.SecFOFonly = param_get_int(ps, "SecFOFonly");
-        sfof_params.SeedInSecFOF = param_get_int(ps, "SeedInSecFOF");
+        sfof_params.SeedInSecFOFasStarCluster = param_get_int(ps, "SeedInSecFOFasStarCluster");
+        sfof_params.SecFOFStarCluster = param_get_int(ps, "SecFOFStarCluster");
+        int StarClusterOn = param_get_int(ps, "StarClusterOn");
+        if(sfof_params.SeedInSecFOFasStarCluster && (!sfof_params.SecondFOFOn || !StarClusterOn || !sfof_params.SecFOFStarCluster)) {
+            message(0, "SeedInSecFOFasStarCluster requires SecondFOFOn=1, StarClusterOn=1, and SecFOFStarCluster=1; disabling.\n");
+            sfof_params.SeedInSecFOFasStarCluster = 0;
+        }
+        if(sfof_params.SecondFOFOn && StarClusterOn) {
+            if(sfof_params.SecFOFStarCluster && sfof_params.PrimaryLinkTypes != (1 << 4))
+                endrun(1, "SecFOFStarCluster requires SecondFOFPrimaryLinkTypes = 16 (type 4, star particles).\n");
+        }
+        /* Validate MinMscForBHseed for secondary seeding: secondfof_seed
+         * forcibly enables BlackHoleSeedStarCluster at runtime, so the
+         * validation in set_fof_params (which only checks the param-file
+         * value of BlackHoleSeedStarCluster) can miss this. */
+        if(sfof_params.SeedInSecFOFasStarCluster) {
+            int BHseedMassScaleMsc = param_get_int(ps, "BHseedMassScaleMsc");
+            double MinMscForBHseed = param_get_double(ps, "MinMscForBHseed");
+            if(BHseedMassScaleMsc && MinMscForBHseed <= 0)
+                endrun(1, "MinMscForBHseed must be > 0 when SeedInSecFOFasStarCluster and BHseedMassScaleMsc are enabled.\n");
+            /* BH particles (type 5) must be a secondary link type so that newly
+             * seeded BHs are included in the secondary FOF groups. */
+            if(!(sfof_params.SecondaryLinkTypes & (1 << 5)))
+                endrun(1, "SeedInSecFOFasStarCluster requires type 5 (BH) in SecondFOFSecondaryLinkTypes.\n");
+            /* FOFPotentialMin must be on so the star at the potential minimum
+             * can be identified as the seed particle location. */
+            int FOFPotentialMin = param_get_int(ps, "FOFPotentialMin");
+            if(!FOFPotentialMin)
+                endrun(1, "SeedInSecFOFasStarCluster requires FOFPotentialMin = 1.\n");
+        }
         strncpy(sfof_params.SecondFOFFileBase, param_get_string(ps, "SecondFOFFileBase"), sizeof(sfof_params.SecondFOFFileBase) - 1);
     }
     MPI_Bcast(&sfof_params, sizeof(struct SecondFOFParams), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    /* Temporary: seeding in secondary FOF and primary FOF cannot both be
+     * active in the same run. Override fof_params on all MPI ranks since
+     * fof.c stores the seeding flags in a separate module-global struct. */
+    if(sfof_params.SeedInSecFOFasStarCluster) {
+        fof_set_seed_params(0, 0, 0);
+    }
 }
 
 int get_secondfof_on(void)
@@ -76,7 +113,7 @@ int get_secondfof_only(void)
 
 int get_seed_in_secfof(void)
 {
-    return sfof_params.SeedInSecFOF;
+    return sfof_params.SeedInSecFOFasStarCluster;
 }
 
 /* Extended group properties for the second FOF.
@@ -88,7 +125,7 @@ struct SecondGroupExtra {
     float  R90;             /* 90%-mass radius of primary particles */
     float  Rmax;            /* Max primary particle separation from center */
     int32_t PrimaryFOFNum;  /* Number of distinct primary FOF groups hosting particles of this sec FOF */
-    int32_t PrimaryFOFID;   /* Primary FOF GrNr that hosts the largest fraction of primary-linked particles; -1 if none */
+    int64_t PrimaryFOFID;   /* Primary FOF GrNr that hosts the largest fraction of primary-linked particles; -1 if none */
 };
 
 /* (distance, mass, GrNr) tuple for computing group sizes. */
@@ -103,6 +140,30 @@ static int cmp_dist_mass_grp_by_dist(const void * a, const void * b)
     const struct dist_mass_grp * da = (const struct dist_mass_grp *)a;
     const struct dist_mass_grp * db = (const struct dist_mass_grp *)b;
     return (da->dist > db->dist) - (da->dist < db->dist);
+}
+
+/* Sort by GrNr first, then by dist — so each group's particles are
+ * contiguous and already distance-sorted within the block. */
+static int cmp_dist_mass_grp_by_grp_dist(const void * a, const void * b)
+{
+    const struct dist_mass_grp * da = (const struct dist_mass_grp *)a;
+    const struct dist_mass_grp * db = (const struct dist_mass_grp *)b;
+    if(da->GrNr != db->GrNr)
+        return (da->GrNr > db->GrNr) - (da->GrNr < db->GrNr);
+    return (da->dist > db->dist) - (da->dist < db->dist);
+}
+
+/* Comparator for grp_center: sort by GrNr */
+struct grp_center {
+    int64_t GrNr;
+    double PotMinPos[3];
+};
+
+static int cmp_grp_center_by_grnr(const void * a, const void * b)
+{
+    const struct grp_center * ca = (const struct grp_center *)a;
+    const struct grp_center * cb = (const struct grp_center *)b;
+    return (ca->GrNr > cb->GrNr) - (ca->GrNr < cb->GrNr);
 }
 
 /*
@@ -135,10 +196,6 @@ secondfof_compute_sizes(FOFGroups * fof, struct SecondGroupExtra * extra, MPI_Co
         total_groups += grp_counts[i];
     }
 
-    struct grp_center {
-        int64_t GrNr;
-        double PotMinPos[3];
-    };
     struct grp_center * all_centers = (struct grp_center *)
         mymalloc2("SecFOF_ac", sizeof(struct grp_center) * (total_groups > 0 ? total_groups : 1));
     struct grp_center * local_centers = (struct grp_center *)
@@ -162,6 +219,9 @@ secondfof_compute_sizes(FOFGroups * fof, struct SecondGroupExtra * extra, MPI_Co
     myfree(gc_bytes);
     myfree(local_centers);
 
+    /* Sort centers by GrNr for binary search during per-particle distance computation */
+    qsort(all_centers, total_groups, sizeof(struct grp_center), cmp_grp_center_by_grnr);
+
     /* Step 2: Each rank computes (dist, mass, GrNr) for its local particles. */
     int64_t nlocal = 0;
     for(i = 0; i < PartManager->NumPart; i++) {
@@ -180,14 +240,19 @@ secondfof_compute_sizes(FOFGroups * fof, struct SecondGroupExtra * extra, MPI_Co
 
         int64_t grNr = P[i].SecGrNr;
         double center[3] = {0, 0, 0};
-        int64_t j;
-        for(j = 0; j < total_groups; j++) {
-            if(all_centers[j].GrNr == grNr) {
-                int d;
-                for(d = 0; d < 3; d++)
-                    center[d] = all_centers[j].PotMinPos[d];
-                break;
-            }
+        /* Binary search for the group center in the sorted all_centers array */
+        int64_t lo = 0, hi = total_groups;
+        while(lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            if(all_centers[mid].GrNr < grNr)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        if(lo < total_groups && all_centers[lo].GrNr == grNr) {
+            int d;
+            for(d = 0; d < 3; d++)
+                center[d] = all_centers[lo].PotMinPos[d];
         }
 
         double r2 = 0;
@@ -237,53 +302,53 @@ secondfof_compute_sizes(FOFGroups * fof, struct SecondGroupExtra * extra, MPI_Co
     myfree(pd_bytes);
     myfree(pc_bytes);
 
-    /* Step 4: Each rank computes R50/R90/Rmax for its own groups
-     * using the complete global particle data. No more MPI needed. */
+    /* Step 4: Sort dm_global by (GrNr, dist) so each group's particles
+     * form a contiguous, distance-sorted block. Then binary search per group. */
+    qsort(dm_global, total_parts, sizeof(struct dist_mass_grp), cmp_dist_mass_grp_by_grp_dist);
+
     for(g = 0; g < fof->Ngroups; g++) {
         int64_t grNr = fof->Group[g].base.GrNr;
 
-        /* Count particles belonging to this group */
-        int count = 0;
-        int64_t k;
-        for(k = 0; k < total_parts; k++) {
-            if(dm_global[k].GrNr == grNr)
-                count++;
+        /* Binary search for the first particle with this GrNr */
+        int64_t lo = 0, hi = total_parts;
+        while(lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            if(dm_global[mid].GrNr < grNr)
+                lo = mid + 1;
+            else
+                hi = mid;
         }
+        int64_t start = lo;
+        while(lo < total_parts && dm_global[lo].GrNr == grNr)
+            lo++;
+        int64_t end = lo;
+        int64_t count = end - start;
 
         if(count > 0) {
-            /* Extract and sort by distance */
-            struct dist_mass_grp * grp_dm = (struct dist_mass_grp *)
-                mymalloc2("SecFOF_gdm", sizeof(struct dist_mass_grp) * count);
-            int idx = 0;
-            for(k = 0; k < total_parts; k++) {
-                if(dm_global[k].GrNr == grNr)
-                    grp_dm[idx++] = dm_global[k];
-            }
-            qsort(grp_dm, count, sizeof(struct dist_mass_grp), cmp_dist_mass_grp_by_dist);
-
+            /* Particles in [start, end) are already sorted by distance */
             double total_mass = 0;
-            for(idx = 0; idx < count; idx++)
-                total_mass += grp_dm[idx].mass;
+            int64_t k;
+            for(k = start; k < end; k++)
+                total_mass += dm_global[k].mass;
 
             double cumul_mass = 0;
             float r50 = 0, r90 = 0, rmax = 0;
             int found50 = 0, found90 = 0;
-            for(idx = 0; idx < count; idx++) {
-                cumul_mass += grp_dm[idx].mass;
+            for(k = start; k < end; k++) {
+                cumul_mass += dm_global[k].mass;
                 if(!found50 && cumul_mass >= 0.5 * total_mass) {
-                    r50 = grp_dm[idx].dist;
+                    r50 = dm_global[k].dist;
                     found50 = 1;
                 }
                 if(!found90 && cumul_mass >= 0.9 * total_mass) {
-                    r90 = grp_dm[idx].dist;
+                    r90 = dm_global[k].dist;
                     found90 = 1;
                 }
-                rmax = grp_dm[idx].dist;
+                rmax = dm_global[k].dist;
             }
             extra[g].R50 = r50;
             extra[g].R90 = r90;
             extra[g].Rmax = rmax;
-            myfree(grp_dm);
         } else {
             extra[g].R50 = 0;
             extra[g].R90 = 0;
@@ -303,11 +368,19 @@ secondfof_compute_sizes(FOFGroups * fof, struct SecondGroupExtra * extra, MPI_Co
     myfree(grp_counts);
 }
 
-static int cmp_int64(const void * a, const void * b)
+/* Comparator for sec_prim_pair: sort by SecGrNr first, then by GrNr */
+struct sec_prim_pair {
+    int64_t SecGrNr;
+    int64_t GrNr;
+};
+
+static int cmp_sec_prim_pair(const void * a, const void * b)
 {
-    const int64_t va = *(const int64_t *)a;
-    const int64_t vb = *(const int64_t *)b;
-    return (va > vb) - (va < vb);
+    const struct sec_prim_pair * pa = (const struct sec_prim_pair *) a;
+    const struct sec_prim_pair * pb = (const struct sec_prim_pair *) b;
+    if(pa->SecGrNr != pb->SecGrNr)
+        return (pa->SecGrNr > pb->SecGrNr) - (pa->SecGrNr < pb->SecGrNr);
+    return (pa->GrNr > pb->GrNr) - (pa->GrNr < pb->GrNr);
 }
 
 /*
@@ -328,11 +401,6 @@ secondfof_compute_primary_fof_info(FOFGroups * fof, struct SecondGroupExtra * ex
     MPI_Comm_size(Comm, &NTask);
 
     /* Step 1: Each rank builds (SecGrNr, GrNr) tuples for local primary-linked particles */
-    struct sec_prim_pair {
-        int64_t SecGrNr;
-        int64_t GrNr;
-    };
-
     int64_t nlocal = 0;
     for(i = 0; i < PartManager->NumPart; i++) {
         if(P[i].SecGrNr < 0) continue;
@@ -378,18 +446,30 @@ secondfof_compute_primary_fof_info(FOFGroups * fof, struct SecondGroupExtra * ex
     myfree(pd_bytes);
     myfree(pc_bytes);
 
-    /* Step 3: For each owned group, count distinct primary FOF IDs
-     * and find the one with the most particles. */
+    /* Step 3: Sort all_pairs by SecGrNr (primary key) then GrNr (secondary key)
+     * so each group's particles form a contiguous, GrNr-sorted block.
+     * This reduces the per-group lookup from O(Npairs) to O(log(Npairs) + group_size). */
+    qsort(all_pairs, total_pairs, sizeof(struct sec_prim_pair), cmp_sec_prim_pair);
+
     for(g = 0; g < fof->Ngroups; g++) {
         int64_t secGrNr = fof->Group[g].base.GrNr;
 
-        /* Count particles in this sec FOF group */
-        int count = 0;
-        int64_t k;
-        for(k = 0; k < total_pairs; k++) {
-            if(all_pairs[k].SecGrNr == secGrNr)
-                count++;
+        /* Binary search for the first pair with this SecGrNr */
+        int64_t lo = 0, hi = total_pairs;
+        while(lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            if(all_pairs[mid].SecGrNr < secGrNr)
+                lo = mid + 1;
+            else
+                hi = mid;
         }
+        /* lo is now the index of the first pair with SecGrNr >= secGrNr.
+         * Scan forward to find the end of the block. */
+        int64_t start = lo;
+        while(lo < total_pairs && all_pairs[lo].SecGrNr == secGrNr)
+            lo++;
+        int64_t end = lo;
+        int64_t count = end - start;
 
         if(count == 0) {
             extra[g].PrimaryFOFNum = 0;
@@ -397,30 +477,19 @@ secondfof_compute_primary_fof_info(FOFGroups * fof, struct SecondGroupExtra * ex
             continue;
         }
 
-        /* Collect the primary GrNr values for this group */
-        int64_t * prim_ids = (int64_t *)
-            mymalloc2("SecFOF_pid", sizeof(int64_t) * count);
-        int idx = 0;
-        for(k = 0; k < total_pairs; k++) {
-            if(all_pairs[k].SecGrNr == secGrNr)
-                prim_ids[idx++] = all_pairs[k].GrNr;
-        }
-
-        /* Count distinct primary FOF IDs and find the dominant one.
-         * Sort the array, then scan for unique values and track counts. */
-        qsort(prim_ids, count, sizeof(int64_t), cmp_int64);
-
+        /* Pairs in [start, end) are already sorted by GrNr (secondary sort key),
+         * so we can count distinct primary FOF IDs in a single pass. */
         int num_distinct = 0;
         int64_t best_id = -1;
         int best_count = 0;
         int cur_count = 1;
-        int64_t cur_id = prim_ids[0];
+        int64_t cur_id = all_pairs[start].GrNr;
+        int64_t k;
 
-        for(idx = 1; idx < count; idx++) {
-            if(prim_ids[idx] == cur_id) {
+        for(k = start + 1; k < end; k++) {
+            if(all_pairs[k].GrNr == cur_id) {
                 cur_count++;
             } else {
-                /* Finished a run of cur_id */
                 if(cur_id >= 0) {
                     num_distinct++;
                     if(cur_count > best_count) {
@@ -428,7 +497,7 @@ secondfof_compute_primary_fof_info(FOFGroups * fof, struct SecondGroupExtra * ex
                         best_id = cur_id;
                     }
                 }
-                cur_id = prim_ids[idx];
+                cur_id = all_pairs[k].GrNr;
                 cur_count = 1;
             }
         }
@@ -442,9 +511,7 @@ secondfof_compute_primary_fof_info(FOFGroups * fof, struct SecondGroupExtra * ex
         }
 
         extra[g].PrimaryFOFNum = num_distinct;
-        extra[g].PrimaryFOFID = (int32_t) best_id;
-
-        myfree(prim_ids);
+        extra[g].PrimaryFOFID = best_id;
     }
 
     /* Free in LIFO order: all_pairs, pair_displs, pair_counts, local_pairs */
@@ -489,7 +556,11 @@ SIMPLE_PROPERTY_SECFOF(R50, ext.R50, float, 1)
 SIMPLE_PROPERTY_SECFOF(R90, ext.R90, float, 1)
 SIMPLE_PROPERTY_SECFOF(Rmax, ext.Rmax, float, 1)
 SIMPLE_PROPERTY_SECFOF(PrimaryFOFNum, ext.PrimaryFOFNum, int32_t, 1)
-SIMPLE_PROPERTY_SECFOF(PrimaryFOFID, ext.PrimaryFOFID, int32_t, 1)
+SIMPLE_PROPERTY_SECFOF(PrimaryFOFID, ext.PrimaryFOFID, int64_t, 1)
+
+SIMPLE_PROPERTY_SECFOF(SCMass, grp.StarClusterMass, float, 1)
+SIMPLE_PROPERTY_SECFOF(SCMetallicity, grp.StarClusterMetallicity, float, 1)
+SIMPLE_PROPERTY_SECFOF(SCMetalElemMass, grp.StarClusterMetalElemMass[0], float, NMETALS)
 
 static void GTSecFirstPos(int i, float * out, void * baseptr, void * smanptr, const struct conversions * params) {
     struct SecondGroupOutput * grp = (struct SecondGroupOutput *) baseptr;
@@ -560,7 +631,7 @@ static void STSecPotMinPos(int i, double * out, void * baseptr, void * smanptr, 
 }
 
 static void
-secondfof_register_io_blocks(int MetalReturnOn, int ComputeSize, struct IOTable * IOTable)
+secondfof_register_io_blocks(int MetalReturnOn, int ComputeSize, int SecFOFStarCluster, struct IOTable * IOTable)
 {
     IOTable->used = 0;
     IOTable->allocated = 100;
@@ -596,7 +667,12 @@ secondfof_register_io_blocks(int MetalReturnOn, int ComputeSize, struct IOTable 
         IO_REG(SecRmax, "f4", 1, PTYPE_FOF_GROUP, IOTable);
     }
     IO_REG(SecPrimaryFOFNum, "i4", 1, PTYPE_FOF_GROUP, IOTable);
-    IO_REG(SecPrimaryFOFID, "i4", 1, PTYPE_FOF_GROUP, IOTable);
+    IO_REG(SecPrimaryFOFID, "i8", 1, PTYPE_FOF_GROUP, IOTable);
+    if(SecFOFStarCluster) {
+        IO_REG(SecSCMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+        IO_REG(SecSCMetallicity, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+        IO_REG(SecSCMetalElemMass, "f4", NMETALS, PTYPE_FOF_GROUP, IOTable);
+    }
 }
 
 static void build_buffer_secondfof(struct SecondGroupOutput * output, int64_t Ngroups,
@@ -682,7 +758,7 @@ struct SecondFOFResult {
 void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
                     double atime, const RandTable * rnd, MPI_Comm Comm)
 {
-    message(0, "Seeding black holes using secondary FOF catalog.\n");
+    message(0, "Seeding black holes using secondary FOF catalog (StarCluster criteria).\n");
 
     /* Save current FOF parameters */
     int save_PrimaryLT, save_SecondaryLT, save_MinLen, save_PotMin;
@@ -690,21 +766,26 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
     fof_get_params(&save_PrimaryLT, &save_SecondaryLT,
                    &save_LinkLen, &save_MinLen, &save_PotMin);
 
-    /* Override with secondary FOF parameters */
-    fof_set_params(sfof_params.PrimaryLinkTypes, sfof_params.SecondaryLinkTypes,
-                   sfof_params.LinkingLength, sfof_params.MinLength, 0);
+    int save_SeedSC, save_SeedHalo, save_SeedGas;
+    fof_get_seed_params(&save_SeedSC, &save_SeedHalo, &save_SeedGas);
 
-    /* Run FOF with secondary params and seed from the result.
-     * Do NOT call fof_finish() here because fof_fof() overwrites the static
-     * MPI_TYPE_GROUP, and fof_finish() would free it -- the outer primary
-     * fof_finish() would then double-free. Free only the Group array. */
+    /* Override with secondary FOF linking parameters.
+     * Enable FOFPotentialMin so add_particle_to_group tracks the
+     * star at minimum potential (needed for seed_index_star). */
+    fof_set_params(sfof_params.PrimaryLinkTypes, sfof_params.SecondaryLinkTypes,
+                   sfof_params.LinkingLength, sfof_params.MinLength, 1);
+
+    /* Override seeding params: only StarCluster-based seeding in sec FOF */
+    fof_set_seed_params(1, 0, 0);
+
     FOFGroups secfof = fof_fof(ddecomp, 0, Comm);
     fof_seed(&secfof, act, atime, rnd, Comm);
-    myfree(secfof.Group);
+    fof_finish(&secfof);
 
     /* Restore original FOF parameters */
     fof_set_params(save_PrimaryLT, save_SecondaryLT,
                    save_LinkLen, save_MinLen, save_PotMin);
+    fof_set_seed_params(save_SeedSC, save_SeedHalo, save_SeedGas);
 }
 
 SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential, MPI_Comm Comm)
@@ -821,7 +902,7 @@ void secondfof_write(SecondFOFResult * result, const char * OutputDir, int snapn
     char * fname = fastpm_strdup_printf("%s/%s_%03d", OutputDir, sfof_params.SecondFOFFileBase, snapnum);
 
     struct IOTable SecFOFIOTable = {0};
-    secondfof_register_io_blocks(MetalReturnOn, sfof_params.ComputeSize, &SecFOFIOTable);
+    secondfof_register_io_blocks(MetalReturnOn, sfof_params.ComputeSize, sfof_params.SecFOFStarCluster, &SecFOFIOTable);
 
     BigFile bf = {0};
     if(0 != big_file_mpi_create(&bf, fname, Comm)) {
@@ -904,8 +985,7 @@ void secondfof_finish(SecondFOFResult * result)
     message(0, "Finished computing second FoF groups.  (presently allocated=%g MB)\n",
             mymalloc_usedbytes() / (1024.0 * 1024.0));
 
-    /* Do NOT call fof_finish() here. fof_finish() frees the static
-     * MPI_TYPE_GROUP datatype, but fof_fof() (called by secondfof_run)
-     * overwrites that same static variable. The outer fof_finish() for
-     * the primary FOF will free it; calling it here would double-free. */
+    /* We free Group manually (not via fof_finish) because of LIFO order:
+     * result must be freed before Group.  MPI_TYPE_GROUP is handled by
+     * the guard in fof_fof (free-before-create) and fof_finish. */
 }

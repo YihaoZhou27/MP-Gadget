@@ -53,7 +53,7 @@ struct FOFParams
     int BlackHoleSeedGasBased;
 
     int BlackHoleSeedHaloBased;
-    int StarClusterOn;
+    int BlackHoleSeedStarCluster;
     int BHseedMassScaleMsc;
     double MinMscForBHseed;
     int FOFPotentialMin;
@@ -77,12 +77,12 @@ void set_fof_params(ParameterSet * ps)
         fof_params.ExcursionSetReionOn = param_get_int(ps, "ExcursionSetReionOn");
         fof_params.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
         fof_params.BlackHoleSeedHaloBased = param_get_int(ps, "BlackHoleSeedHaloBased");
-        fof_params.StarClusterOn = param_get_int(ps, "StarClusterOn");
+        fof_params.BlackHoleSeedStarCluster = param_get_int(ps, "BlackHoleSeedStarCluster");
         fof_params.BHseedMassScaleMsc = param_get_int(ps, "BHseedMassScaleMsc");
         fof_params.MinMscForBHseed = param_get_double(ps, "MinMscForBHseed");
 
-        if(fof_params.StarClusterOn && fof_params.BHseedMassScaleMsc && fof_params.MinMscForBHseed <= 0)
-            endrun(1, "MinMscForBHseed must be > 0 when StarClusterOn and BHseedMassScaleMsc are enabled.\n");
+        if(fof_params.BlackHoleSeedStarCluster && fof_params.BHseedMassScaleMsc && fof_params.MinMscForBHseed <= 0)
+            endrun(1, "MinMscForBHseed must be > 0 when BlackHoleSeedStarCluster and BHseedMassScaleMsc are enabled.\n");
         fof_params.FOFPotentialMin = param_get_int(ps, "FOFPotentialMin");
     }
     MPI_Bcast(&fof_params, sizeof(struct FOFParams), MPI_BYTE, 0, MPI_COMM_WORLD);
@@ -132,6 +132,22 @@ void fof_set_params(int PrimaryLinkTypes, int SecondaryLinkTypes,
     fof_params.FOFHaloComovingLinkingLength = ComovingLinkingLength;
     fof_params.FOFHaloMinLength = MinLength;
     fof_params.FOFPotentialMin = PotentialMin;
+}
+
+void fof_get_seed_params(int *BlackHoleSeedStarCluster, int *BlackHoleSeedHaloBased,
+                         int *BlackHoleSeedGasBased)
+{
+    *BlackHoleSeedStarCluster = fof_params.BlackHoleSeedStarCluster;
+    *BlackHoleSeedHaloBased = fof_params.BlackHoleSeedHaloBased;
+    *BlackHoleSeedGasBased = fof_params.BlackHoleSeedGasBased;
+}
+
+void fof_set_seed_params(int BlackHoleSeedStarCluster, int BlackHoleSeedHaloBased,
+                         int BlackHoleSeedGasBased)
+{
+    fof_params.BlackHoleSeedStarCluster = BlackHoleSeedStarCluster;
+    fof_params.BlackHoleSeedHaloBased = BlackHoleSeedHaloBased;
+    fof_params.BlackHoleSeedGasBased = BlackHoleSeedGasBased;
 }
 
 static double fof_periodic_wrap(double x, double BoxSize)
@@ -195,7 +211,7 @@ typedef struct {
 } TreeWalkNgbIterFOF;
 
 
-static MPI_Datatype MPI_TYPE_GROUP;
+static MPI_Datatype MPI_TYPE_GROUP = MPI_DATATYPE_NULL;
 
 /*
  * The FOF finder will produce Group[], which is allocated to the top side of the
@@ -281,6 +297,10 @@ fof_fof(DomainDecomp * ddecomp, const int StoreGrNr, MPI_Comm Comm)
 
     /*Initialise the Group object from the BaseGroup*/
     FOFGroups fof;
+    /* Free any previous MPI_TYPE_GROUP to avoid handle leak when
+     * fof_fof() is called multiple times (e.g. primary + secondary FOF). */
+    if(MPI_TYPE_GROUP != MPI_DATATYPE_NULL)
+        MPI_Type_free(&MPI_TYPE_GROUP);
     MPI_Type_contiguous(sizeof(fof.Group[0]), MPI_BYTE, &MPI_TYPE_GROUP);
     MPI_Type_commit(&MPI_TYPE_GROUP);
 
@@ -309,7 +329,10 @@ fof_finish(FOFGroups * fof)
     message(0, "Finished computing FoF groups.  (presently allocated=%g MB)\n",
             mymalloc_usedbytes() / (1024.0 * 1024.0));
 
-    MPI_Type_free(&MPI_TYPE_GROUP);
+    if(MPI_TYPE_GROUP != MPI_DATATYPE_NULL) {
+        MPI_Type_free(&MPI_TYPE_GROUP);
+        MPI_TYPE_GROUP = MPI_DATATYPE_NULL;
+    }
 }
 
 struct FOFPrimaryPriv {
@@ -674,6 +697,8 @@ static void fof_reduce_group(void * pdst, void * psrc) {
         int d;
         for(d = 0; d < 3; d++)
             gdst->PotMinPos[d] = gsrc->PotMinPos[d];
+        gdst->seed_index_star = gsrc->seed_index_star;
+        gdst->seed_task_star = gsrc->seed_task_star;
     }
 
     int d1, d2;
@@ -698,6 +723,7 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
         memset(gdst, 0, sizeof(gdst[0]));
         gdst->base = base;
         gdst->seed_index = gdst->seed_task = -1;
+        gdst->seed_index_star = gdst->seed_task_star = -1;
         gdst->PotMin = 1e30;
     }
 
@@ -754,6 +780,11 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
             int d;
             for(d = 0; d < 3; d++)
                 gdst->PotMinPos[d] = P[index].Pos[d];
+            /* Also track the star particle at PotMin for star-cluster BH seeding */
+            if(P[index].Type == 4) {
+                gdst->seed_index_star = index;
+                gdst->seed_task_star = ThisTask;
+            }
         }
     }
 
@@ -1420,7 +1451,9 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
         endrun(7771, "Seed does not belong to the right task");
     }
     int index = g->seed_index;
-    /* Random generator for the initial mass*/
+    /* Determine whether this group qualifies for star-cluster seeding */
+    int seeded_by_starcluster = fof_params.BlackHoleSeedStarCluster
+        && (g->StarClusterMass >= fof_params.MinMscForBHseed);
     /* Compute mass-weighted average metallicity for star cluster */
     MyFloat sc_metallicity = 0;
     float sc_metals[NMETALS] = {0};
@@ -1430,7 +1463,7 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
         for(j = 0; j < NMETALS; j++)
             sc_metals[j] = g->StarClusterMetalElemMass[j] / g->StarClusterMass;
     }
-    blackhole_make_one(index, atime, rnd, g->StarClusterMass, sc_metallicity, sc_metals);
+    blackhole_make_one(index, atime, rnd, seeded_by_starcluster, g->StarClusterMass, sc_metallicity, sc_metals);
 }
 
 void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTable * const rnd, MPI_Comm Comm)
@@ -1449,11 +1482,11 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
         int SC_Mask = 0;
         int Gas_Mask = 0;
         int Halo_Mask = 0;
-        if(fof_params.StarClusterOn){
+        if(fof_params.BlackHoleSeedStarCluster){
             SC_Mask =
                 (fof->Group[i].StarClusterMass >= fof_params.MinMscForBHseed)
             &&  (fof->Group[i].LenType[5] == 0)
-            &&  (fof->Group[i].seed_index >= 0);
+            &&  (fof->Group[i].seed_index >= 0 || fof->Group[i].seed_index_star >= 0);
         }
         else{
             SC_Mask = 0;
@@ -1470,7 +1503,7 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
         else{
             Gas_Mask = 0;
         }
-        
+
         if(fof_params.BlackHoleSeedHaloBased){
             Halo_Mask =
                 (fof->Group[i].Mass >= fof_params.MinFoFMassForNewSeed)
@@ -1487,6 +1520,13 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
         }
         else{
             Marked[i] = 0;
+        }
+
+        /* For star-cluster seeding in secondary FOF (no gas particles),
+         * fall back to the star at PotMin as the seed particle. */
+        if(SC_Mask && fof->Group[i].seed_index < 0 && fof->Group[i].seed_index_star >= 0) {
+            fof->Group[i].seed_index = fof->Group[i].seed_index_star;
+            fof->Group[i].seed_task = fof->Group[i].seed_task_star;
         }
 
         if(Marked[i]) Nexport ++;
@@ -1565,6 +1605,21 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
 
     int ThisTask;
     MPI_Comm_rank(Comm, &ThisTask);
+
+    /* When seeding from star particles (secondary FOF), each seed spawns
+     * a new base particle.  Count how many will be spawned and verify
+     * that PartManager has room.  MaxPart cannot be grown at runtime, so
+     * abort early with a clear message instead of crashing mid-loop. */
+    int Nspawn = 0;
+    for(n = 0; n < Nimport; n++) {
+        int index = ImportGroups[n].seed_index;
+        if(fof_params.BlackHoleSeedStarCluster && P[index].Type == 4)
+            Nspawn++;
+    }
+    if(PartManager->NumPart + Nspawn > PartManager->MaxPart)
+        endrun(8888, "Not enough base particle capacity for BH seeding from stars: "
+               "NumPart=%ld + Nspawn=%d > MaxPart=%ld. Increase PartAllocFactor.",
+               PartManager->NumPart, Nspawn, PartManager->MaxPart);
 
     for(n = 0; n < Nimport; n++)
     {

@@ -67,7 +67,12 @@ void set_blackhole_params(ParameterSet * ps);
  */
 void blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree * tree, DomainDecomp * ddecomp, DriftKickTimes * times, RandTable * rnd, const struct UnitSystem units, FILE * FdBlackHoles, FILE * FdBlackholeDetails, size_t *bhdetailswritten);
 
-/* Make a black hole from the particle at index. Random number generator used for the initial mass drawn from a power law.*/
-void blackhole_make_one(int index, const double atime, const RandTable * const rnd, MyFloat StarClusterMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals);
+/* Make a black hole from the particle at index. Random number generator used
+ * for the initial mass drawn from a power law.
+ * seeded_by_starcluster: 1 if seeded by star-cluster criteria, 0 otherwise.
+ * When seeded_by_starcluster && P[index].Type==4, a new particle is spawned
+ * next to the star (secondary FOF path); otherwise the gas particle at
+ * index is converted in-place (primary FOF / halo / gas-based path). */
+void blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals);
 
 #endif

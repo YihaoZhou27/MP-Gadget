@@ -197,13 +197,24 @@ int fof_save_particles_to_bigfile(BigFile * bf, int MetalReturnOn, Cosmology * C
 
     struct part_manager_type npartman = {0};
     struct slots_manager_type nslotman = {0};
-    if(NpigGlobal > 0.25 * NumPartGlobal) {
+    if(NpigGlobal > 0.25 * NumPartGlobal && !swap_group_ids) {
         halo_pman = PartManager;
         halo_sman = SlotsManager;
         message(0, "Re-using partmanager for particle catalog: total pig %ld, global %ld\n", NpigGlobal, NumPartGlobal);
         domain_needed = 1;
     }
     else {
+        /* When swap_group_ids is set (SecPIG particle catalog), we must NOT
+         * reuse PartManager even if NpigGlobal > 25%.  Reusing rearranges
+         * particles in-place (via fof_distribute_particles), which invalidates
+         * the saved GrNr/SecGrNr arrays that the caller uses to restore
+         * particle state after writing.  Force a separate copy instead.
+         * TODO: implement proper PartManager-reuse support for SecPIG if this
+         * becomes a memory bottleneck at low redshift with large star fractions. */
+        if(swap_group_ids && NpigGlobal > 0.25 * NumPartGlobal)
+            message(0, "SecPIG particle catalog: pig %ld > 25%% of global %ld, "
+                       "but forcing separate partmanager to avoid GrNr corruption.\n",
+                       NpigGlobal, NumPartGlobal);
         message(0, "Using new partmanager for particle catalog: total pig %ld, global %ld\n", NpigGlobal, NumPartGlobal);
         halo_pman = &npartman;
         halo_sman = &nslotman;

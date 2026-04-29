@@ -78,6 +78,7 @@ static struct run_params
     int SCgasVDisp; /* if gas/stellar velocity dispersion calculation is enabled */
     int BlackHoleSeedHaloBased; /* if the bh seeding is halo-based */
     int BlackHoleSeedGasBased; /* if the bh seeding is gas-based */
+    int BlackHoleSeedStarCluster; /* if the bh seeding is star-cluster-based */
 
     int StarformationOn;  /* if star formation is enabled */
     int MetalReturnOn; /* If late return of metals from AGB stars is enabled*/
@@ -174,6 +175,7 @@ set_all_global_params(ParameterSet * ps)
         All.SCgasVDisp = param_get_int(ps, "SCgasVDisp");
         All.BlackHoleSeedHaloBased = param_get_int(ps, "BlackHoleSeedHaloBased");
         All.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
+        All.BlackHoleSeedStarCluster = param_get_int(ps, "BlackHoleSeedStarCluster");
 
         All.StarformationOn = param_get_int(ps, "StarformationOn");
         All.MetalReturnOn = param_get_int(ps, "MetalReturnOn");
@@ -196,10 +198,29 @@ set_all_global_params(ParameterSet * ps)
                 endrun(1, "You try to use the code with star formation enabled,\n"
                           "but you did not switch on cooling.\nThis mode is not supported.\n");
         }
-        if (All.BlackHoleOn && !(All.StarClusterOn || All.BlackHoleSeedHaloBased || All.BlackHoleSeedGasBased))
         {
-            endrun(1, "You try to use the code with black holes enabled,\n"
-                          "but you did not switch on star cluster bh seeding or halo-based or gas-based black hole seeding.\nThis mode is not supported.\n");
+            int SeedInSecFOFasStarCluster = param_get_int(ps, "SeedInSecFOFasStarCluster");
+            int SecondFOFOn = param_get_int(ps, "SecondFOFOn");
+            int SecFOFStarCluster = param_get_int(ps, "SecFOFStarCluster");
+            if(SeedInSecFOFasStarCluster && (!SecondFOFOn || !All.StarClusterOn || !SecFOFStarCluster)) {
+                message(0, "SeedInSecFOFasStarCluster requires SecondFOFOn=1, StarClusterOn=1, and SecFOFStarCluster=1; disabling.\n");
+                SeedInSecFOFasStarCluster = 0;
+            }
+            /* Temporary: seeding in secondary FOF and primary FOF cannot
+             * both be active in the same run. When SeedInSecFOFasStarCluster
+             * is on, disable all primary FOF seeding methods. */
+            if(SeedInSecFOFasStarCluster) {
+                if(All.BlackHoleSeedStarCluster || All.BlackHoleSeedHaloBased || All.BlackHoleSeedGasBased)
+                    message(0, "SeedInSecFOFasStarCluster is on; disabling BlackHoleSeedStarCluster, BlackHoleSeedHaloBased, and BlackHoleSeedGasBased.\n");
+                All.BlackHoleSeedStarCluster = 0;
+                All.BlackHoleSeedHaloBased = 0;
+                All.BlackHoleSeedGasBased = 0;
+            }
+            if (All.BlackHoleOn && !(SeedInSecFOFasStarCluster || All.BlackHoleSeedHaloBased || All.BlackHoleSeedStarCluster || All.BlackHoleSeedGasBased))
+            {
+                endrun(1, "You try to use the code with black holes enabled,\n"
+                              "but you did not switch on any BH seeding method (SeedInSecFOFasStarCluster, BlackHoleSeedHaloBased, BlackHoleSeedStarCluster, or BlackHoleSeedGasBased).\nThis mode is not supported.\n");
+            }
         }
         All.ExcursionSetReionOn = param_get_int(ps,"ExcursionSetReionOn");
         All.UVBGdim = param_get_int(ps, "UVBGdim");
@@ -644,10 +665,25 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                 (during_helium_reionization(1/atime - 1) && need_change_helium_ionization_fraction(atime)) ||
                  (CalcUVBG && All.ExcursionSetReionOn))) {
 
-                /* Seeding: builds its own tree.*/
-                FOFGroups fof = fof_fof(ddecomp, 0, MPI_COMM_WORLD);
+                /* Determine whether we need the primary FOF catalog.
+                 * Skip it when BH seeding uses secondary FOF exclusively and
+                 * neither helium reionization nor excursion set needs the catalog. */
+                int need_primary_fof = 1;
+                int seed_in_secfof = get_seed_in_secfof() && get_secondfof_on();
+                if(seed_in_secfof
+                    && !(during_helium_reionization(1/atime - 1) && need_change_helium_ionization_fraction(atime))
+#ifdef EXCUR_REION
+                    && !(CalcUVBG && All.ExcursionSetReionOn)
+#endif
+                  )
+                    need_primary_fof = 0;
+
+                FOFGroups fof = {0};
+                if(need_primary_fof)
+                    fof = fof_fof(ddecomp, 0, MPI_COMM_WORLD);
+
                 if(All.BlackHoleOn && atime >= TimeNextSeedingCheck) {
-                    if(get_seed_in_secfof() && get_secondfof_on()) {
+                    if(seed_in_secfof) {
                         /* Seed BH using secondary FOF catalog */
                         secondfof_seed(ddecomp, &Act, atime, &rnd, MPI_COMM_WORLD);
                     } else {
@@ -667,7 +703,8 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                     message(0,"uvbg calculated\n");
                 }
 #endif // ifdef EXCUR_REION
-                fof_finish(&fof);
+                if(need_primary_fof)
+                    fof_finish(&fof);
             }
 
             if(is_PM && All.CoolingOn)
@@ -747,7 +784,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
             int domain_needed = 0;
             /* Skip saving the primary FOF catalog if SecFOFonly is set */
             if(!get_secondfof_only())
-                domain_needed = fof_save_groups(&fof, All.OutputDir, All.FOFFileBase, SnapshotFileCount, &All.CP, atime, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
+                domain_needed = fof_save_groups(&fof, All.OutputDir, All.FOFFileBase, SnapshotFileCount, &All.CP, atime, header->MassTable, All.MetalReturnOn, All.OutputDebugFields, MPI_COMM_WORLD);
 
             /* Write second FOF catalog after checkpoint and halo PIG, for I/O safety.
              * Must finish second FOF before primary FOF to respect stack allocator (LIFO) order:
@@ -909,7 +946,7 @@ runfof(const int RestartSnapNum, const inttime_t Ti_Current, const struct header
 
     /* Skip saving the primary FOF catalog if SecFOFonly is set */
     if(!get_secondfof_only())
-        fof_save_groups(&fof, All.OutputDir, All.FOFFileBase, RestartSnapNum, &All.CP, header->TimeSnapshot, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
+        fof_save_groups(&fof, All.OutputDir, All.FOFFileBase, RestartSnapNum, &All.CP, header->TimeSnapshot, header->MassTable, All.MetalReturnOn, All.OutputDebugFields, MPI_COMM_WORLD);
 
     /* Must finish second FOF before primary FOF to respect stack allocator (LIFO) order */
     if(secfof) {
