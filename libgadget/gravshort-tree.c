@@ -110,6 +110,17 @@ grav_short_tree(const ActiveParticles * act, PetaPM * pm, ForceTree * tree, MyFl
         accelstorealloc = 1;
     }
 
+    /* Allocate tidal tensor storage if tidal field is enabled.
+     * Only compute on full-particle trees (PM steps) where all source particles
+     * are present — hierarchical sub-step trees contain only active particles
+     * and would produce incomplete tidal tensors. */
+    if(get_tidalfield_on() && tree->full_particle_tree_flag) {
+        priv.TidalTensorStore = (MyFloat (*)[6]) mymalloc2("TidalTensor", PartManager->NumPart * sizeof(priv.TidalTensorStore[0]));
+        memset(priv.TidalTensorStore, 0, PartManager->NumPart * sizeof(priv.TidalTensorStore[0]));
+    } else {
+        priv.TidalTensorStore = NULL;
+    }
+
     if(!tree->moments_computed_flag)
         endrun(2, "Gravtree called before tree moments computed!\n");
 
@@ -145,12 +156,73 @@ grav_short_tree(const ActiveParticles * act, PetaPM * pm, ForceTree * tree, MyFl
 
     treewalk_print_stats(tw);
 
+    /* Tidal field diagnostics and cleanup */
+    if(priv.TidalTensorStore) {
+        // tidal_field_diagnostics(priv.TidalTensorStore, priv.G);
+        myfree(priv.TidalTensorStore);
+    }
+
     /* TreeUseBH > 1 means use the BH criterion on the initial timestep only,
      * avoiding the fully open O(N^2) case.*/
     if(TreeParams.TreeUseBH > 1)
         TreeParams.TreeUseBH = 0;
     if(accelstorealloc)
         myfree(priv.Accel);
+}
+
+/* Accumulate the tidal tensor T_ij = d^2 Phi / (dx_i dx_j) contribution
+ * from a source mass at displacement dx with distance squared r2.
+ * Uses the PM short-range window function for consistency with TreePM force split.
+ * The tidal tensor is: T_ij = m * [(fac*W) delta_ij + d_i d_j (fac'*W + fac*W') / r] */
+static void
+apply_tidal_to_output(TreeWalkResultGravShort * output, const double dx[3], const double r2, const double mass, const double cellsize)
+{
+    const double r = sqrt(r2);
+    if(r == 0)
+        return;
+
+    const double h = FORCE_SOFTENING();
+    double fac;       /* 1/r^3 or softened equivalent */
+    double dfac_dr;   /* d(fac)/dr */
+
+    if(r2 >= h * h) {
+        fac = 1.0 / (r2 * r);
+        dfac_dr = -3.0 / (r2 * r2);
+    } else {
+        const double h_inv = 1.0 / h;
+        const double h3_inv = h_inv * h_inv * h_inv;
+        const double u = r * h_inv;
+        if(u < 0.5) {
+            fac = h3_inv * (10.666666666667 + u * u * (32.0 * u - 38.4));
+            if(u > 0) {
+                double dfac_du = h3_inv * (96.0 * u * u - 76.8 * u);
+                dfac_dr = dfac_du * h_inv;
+            } else {
+                dfac_dr = 0;
+            }
+        } else {
+            fac = h3_inv * (21.333333333333 - 48.0 * u +
+                    38.4 * u * u - 10.666666666667 * u * u * u - 0.066666666667 / (u * u * u));
+            double dfac_du = h3_inv * (-48.0 + 76.8 * u - 32.0 * u * u + 0.2 / (u * u * u * u));
+            dfac_dr = dfac_du * h_inv;
+        }
+    }
+
+    double W, dW_dr;
+    if(grav_short_range_window_tidal(r, &W, &dW_dr, cellsize))
+        return;
+
+    double fac_W = fac * W;
+    double dfacW_dr_over_r = (dfac_dr * W + fac * dW_dr) / r;
+
+    /* Accumulate T_ij = m * [fac_W * delta_ij + d_i * d_j * dfacW_dr_over_r]
+     * Indices: 0=xx, 1=yy, 2=zz, 3=xy, 4=xz, 5=yz */
+    output->TidalTensor[0] += mass * (fac_W + dx[0] * dx[0] * dfacW_dr_over_r);
+    output->TidalTensor[1] += mass * (fac_W + dx[1] * dx[1] * dfacW_dr_over_r);
+    output->TidalTensor[2] += mass * (fac_W + dx[2] * dx[2] * dfacW_dr_over_r);
+    output->TidalTensor[3] += mass * (dx[0] * dx[1] * dfacW_dr_over_r);
+    output->TidalTensor[4] += mass * (dx[0] * dx[2] * dfacW_dr_over_r);
+    output->TidalTensor[5] += mass * (dx[1] * dx[2] * dfacW_dr_over_r);
 }
 
 /* Add the acceleration from a node or particle to the output structure,
@@ -264,6 +336,8 @@ int force_treeev_shortrange(TreeWalkQueryGravShort * input,
     const double aold = TreeParams.ErrTolForceAcc * input->OldAcc;
     const int TreeUseBH = TreeParams.TreeUseBH;
     double BHOpeningAngle2 = TreeParams.BHOpeningAngle * TreeParams.BHOpeningAngle;
+    /* Whether to accumulate tidal tensor for this particle */
+    const int do_tidal = (GRAV_GET_PRIV(lv->tw)->TidalTensorStore != NULL) && (input->Type == 0);
     /* Enforce a maximum opening angle even for relative acceleration criterion, to avoid
      * pathological cases. Default value is 0.9, from Volker Springel.*/
     if(TreeUseBH == 0)
@@ -318,6 +392,8 @@ int force_treeev_shortrange(TreeWalkQueryGravShort * input,
                 if(lv->mode != TREEWALK_TOPTREE) {
                     /* Compute the acceleration and apply it to the output structure*/
                     apply_accn_to_output(output, dx, r2, nop->mom.mass, cellsize);
+                    if(do_tidal)
+                        apply_tidal_to_output(output, dx, r2, nop->mom.mass, cellsize);
                 }
                 continue;
             }
@@ -371,6 +447,8 @@ int force_treeev_shortrange(TreeWalkQueryGravShort * input,
             const double r2 = dx[0] * dx[0] + dx[1] * dx[1] + dx[2] * dx[2];
             /* Compute the acceleration and apply it to the output structure*/
             apply_accn_to_output(output, dx, r2, P[pp].Mass, cellsize);
+            if(do_tidal)
+                apply_tidal_to_output(output, dx, r2, P[pp].Mass, cellsize);
         }
         ninteractions = numcand;
     }

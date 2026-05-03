@@ -74,7 +74,7 @@ static struct run_params
 
     int BlackHoleOn;  /* if black holes are enabled */
     int StarClusterOn; /* if star cluster bh seeding formation is enabled */
-    int StarClusterEvolution; /* if star cluster stellar evolution is enabled */
+    int StarClusterEvolution; /* if stellar evolution for star clusters is enabled */
     int SCgasVDisp; /* if gas/stellar velocity dispersion calculation is enabled */
     int BlackHoleSeedHaloBased; /* if the bh seeding is halo-based */
     int BlackHoleSeedGasBased; /* if the bh seeding is gas-based */
@@ -173,7 +173,6 @@ set_all_global_params(ParameterSet * ps)
         All.StarClusterOn = param_get_int(ps, "StarClusterOn");
         All.StarClusterEvolution = param_get_int(ps, "StarClusterEvolution");
         All.SCgasVDisp = param_get_int(ps, "SCgasVDisp");
-        All.BlackHoleSeedHaloBased = param_get_int(ps, "BlackHoleSeedHaloBased");
         All.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
         All.BlackHoleSeedStarCluster = param_get_int(ps, "BlackHoleSeedStarCluster");
 

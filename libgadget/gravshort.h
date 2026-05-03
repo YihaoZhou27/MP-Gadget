@@ -4,6 +4,7 @@
 #include "partmanager.h"
 #include "treewalk.h"
 #include "gravity.h"
+#include "tidalfield.h"
 #include <math.h>
 
 typedef struct {
@@ -14,12 +15,14 @@ typedef struct
 {
     TreeWalkQueryBase base;
     MyFloat OldAcc;
+    int Type;           /* Particle type: used to skip tidal for non-gas */
 } TreeWalkQueryGravShort;
 
 typedef struct {
     TreeWalkResultBase base;
     MyFloat Acc[3];
     MyFloat Potential;
+    MyFloat TidalTensor[6]; /* Tidal tensor: xx, yy, zz, xy, xz, yz (only used when tidal enabled) */
 } TreeWalkResultGravShort;
 
 struct GravShortPriv {
@@ -40,6 +43,9 @@ struct GravShortPriv {
     double cbrtrho0;
     /* Pointer to the place to store accelerations*/
     MyFloat (*Accel)[3];
+    /* Tidal tensor storage, NULL if tidal field not computed.
+     * Indexed by particle index, 6 components per particle. */
+    MyFloat (*TidalTensorStore)[6];
 };
 
 #define GRAV_GET_PRIV(tw) ((struct GravShortPriv *) ((tw)->priv))
@@ -64,6 +70,19 @@ grav_short_postprocess(int i, TreeWalk * tw)
         P[i].Potential -= 2.8372975 * pow(P[i].Mass, 2.0 / 3) * GRAV_GET_PRIV(tw)->cbrtrho0;
         P[i].Potential *= G;
     }
+
+    /* Compute tidal field eigenvalues for gas particles.
+     * Combine PM (long-range) and tree (short-range) contributions.
+     * TidalTensorStore is in units without G (G applied in store_eigenvalues).
+     * TidalTensorPM is in physical units (includes G from PM potential),
+     * so divide by G to match. */
+    if(GRAV_GET_PRIV(tw)->TidalTensorStore && P[i].Type == 0) {
+        int PI = P[i].PI;
+        int k;
+        for(k = 0; k < 6; k++)
+            GRAV_GET_PRIV(tw)->TidalTensorStore[i][k] += SphP[PI].TidalTensorPM[k] / G;
+        tidal_field_store_eigenvalues(i, GRAV_GET_PRIV(tw)->TidalTensorStore[i], G);
+    }
 }
 
 /*Compute the absolute magnitude of the acceleration for a particle.*/
@@ -83,6 +102,7 @@ static void
 grav_short_copy(int place, TreeWalkQueryGravShort * input, TreeWalk * tw)
 {
     input->OldAcc = grav_get_abs_accel(&P[place], GRAV_GET_PRIV(tw)->G);
+    input->Type = P[place].Type;
 }
 
 static void
@@ -93,6 +113,13 @@ grav_short_reduce(int place, TreeWalkResultGravShort * result, enum TreeWalkRedu
     TREEWALK_REDUCE(GRAV_GET_PRIV(tw)->Accel[place][2], result->Acc[2]);
     if(tw->tree->full_particle_tree_flag)
         TREEWALK_REDUCE(P[place].Potential, result->Potential);
+
+    MyFloat (*TidalStore)[6] = GRAV_GET_PRIV(tw)->TidalTensorStore;
+    if(TidalStore && P[place].Type == 0) {
+        int k;
+        for(k = 0; k < 6; k++)
+            TREEWALK_REDUCE(TidalStore[place][k], result->TidalTensor[k]);
+    }
 }
 
 #endif

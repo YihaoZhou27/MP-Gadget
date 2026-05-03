@@ -54,6 +54,8 @@ struct FOFParams
 
     int BlackHoleSeedHaloBased;
     int BlackHoleSeedStarCluster;
+    int StarClusterOn;
+    int StarClusterSampling;
     int BHseedMassScaleMsc;
     double MinMscForBHseed;
     int FOFPotentialMin;
@@ -78,6 +80,8 @@ void set_fof_params(ParameterSet * ps)
         fof_params.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
         fof_params.BlackHoleSeedHaloBased = param_get_int(ps, "BlackHoleSeedHaloBased");
         fof_params.BlackHoleSeedStarCluster = param_get_int(ps, "BlackHoleSeedStarCluster");
+        fof_params.StarClusterOn = param_get_int(ps, "StarClusterOn");
+        fof_params.StarClusterSampling = param_get_int(ps, "StarClusterSampling");
         fof_params.BHseedMassScaleMsc = param_get_int(ps, "BHseedMassScaleMsc");
         fof_params.MinMscForBHseed = param_get_double(ps, "MinMscForBHseed");
 
@@ -676,6 +680,8 @@ static void fof_reduce_group(void * pdst, void * psrc) {
     gdst->StarClusterMetallicity += gsrc->StarClusterMetallicity;
     for(j = 0; j < NMETALS; j++)
         gdst->StarClusterMetalElemMass[j] += gsrc->StarClusterMetalElemMass[j];
+    gdst->StarClusterMassSample += gsrc->StarClusterMassSample;
+    gdst->NscSample += gsrc->NscSample;
     gdst->GasMetalMass += gsrc->GasMetalMass;
     gdst->StellarMetalMass += gsrc->StellarMetalMass;
     gdst->MassHeIonized += gsrc->MassHeIonized;
@@ -754,6 +760,8 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
         gdst->StarClusterMetallicity += STARP(index).Metallicity * STARP(index).ClusterMass;
         for(j = 0; j < NMETALS; j++)
             gdst->StarClusterMetalElemMass[j] += STARP(index).Metals[j] * STARP(index).ClusterMass;
+        gdst->StarClusterMassSample += STARP(index).StarClusterMass_sample;
+        gdst->NscSample += STARP(index).Nsc_sample;
     }
 
     if(P[index].Type == 5)
@@ -1454,6 +1462,8 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
     /* Determine whether this group qualifies for star-cluster seeding */
     int seeded_by_starcluster = fof_params.BlackHoleSeedStarCluster
         && (g->StarClusterMass >= fof_params.MinMscForBHseed);
+    /* Select which star cluster mass to use based on StarClusterSampling */
+    MyFloat sc_mass = fof_params.StarClusterSampling ? g->StarClusterMassSample : g->StarClusterMass;
     /* Compute mass-weighted average metallicity for star cluster */
     MyFloat sc_metallicity = 0;
     float sc_metals[NMETALS] = {0};
@@ -1483,8 +1493,10 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
         int Gas_Mask = 0;
         int Halo_Mask = 0;
         if(fof_params.BlackHoleSeedStarCluster){
+            double sc_mass_for_seed = fof_params.StarClusterSampling ?
+                fof->Group[i].StarClusterMassSample : fof->Group[i].StarClusterMass;
             SC_Mask =
-                (fof->Group[i].StarClusterMass >= fof_params.MinMscForBHseed)
+                (sc_mass_for_seed >= fof_params.MinMscForBHseed)
             &&  (fof->Group[i].LenType[5] == 0)
             &&  (fof->Group[i].seed_index >= 0 || fof->Group[i].seed_index_star >= 0);
         }

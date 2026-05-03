@@ -96,7 +96,12 @@ struct star_particle_data
     MyFloat BirthInternalEnergy; /*!< Internal energy of gas particle at star formation. */
     float FormationTime;      /*!< formation time of star particle */
     MyFloat ClusterFormationEfficiency; /*!< Cluster formation efficiency of star particle */
-    MyFloat ClusterMass; /*!< Mass of the cluster formed from this star particle */  
+    MyFloat ClusterMass; /*!< Mass of the cluster formed from this star particle */
+    MyFloat Mcstar; /*!< Star cluster mass from Toomre mass model: 0.1 * CFE * f_coll * M_T */
+    MyFloat Msc_ave; /*!< Average mass of cluster MF n(m) ~ m^-2 exp(-m/Mcstar) over [1e2, 1e8] Msun */
+    float NumStarCluster; /*!< Number of star clusters: ClusterMass / Msc_ave */
+    int Nsc_sample; /*!< Poisson-sampled integer number of star clusters from NumStarCluster */
+    MyFloat StarClusterMass_sample; /*!< Sum of Nsc_sample masses sampled from n(m)~m^-2 exp(-m/Mcstar) */
 };
 
 /* the following structure holds data that is stored for each SPH particle in addition to the collisionless
@@ -144,11 +149,14 @@ struct sph_particle_data
     MyFloat zreion; /* redshift when a particle is first ionised */
     MyFloat EscapeFraction; /* Escape fraction for SFR -> J21 calculation */
 #endif
+    MyFloat TidalFieldEigenvalues[3]; /* Tidal tensor eigenvalues, sorted descending: lambda1 >= lambda2 >= lambda3 */
+    MyFloat TidalTensorPM[6]; /* PM long-range tidal tensor: xx, yy, zz, xy, xz, yz */
+    /*******************************************************/
     MyFloat ClusterFormationEfficiency; /*!< Cluster formation efficiency based on current gas pressure */
     MyFloat SumSFRdt;       /*!< Cumulative SFR * dt over the particle history, using dM = M*(1-exp(-p)) [internal mass units] */
     MyFloat SumSFRdt_v2;    /*!< Cumulative SFR * dt over the particle history, using sm = smr*dtime [internal mass units] */
     MyFloat SumSpawnedMass;  /*!< Cumulative mass of star particles spawned from this gas [internal mass units] */
-    MyFloat SumSFRdtCFE;    /*!< Cumulative SFR * dt * ClusterFormationEfficiency over the particle history [internal mass units] */
+    MyFloat SumSFRdtCFE;    /*!< Cumulative SFR * dt * ClusterFormationEfficiency over the particle history [internal mass units] */    
 };
 
 extern struct slots_manager_type {

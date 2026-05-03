@@ -88,6 +88,8 @@ struct Group
     /* Position of the primary particle with minimum potential
      * (in the translated frame, subtract CurrentParticleOffset for physical). */
     double PotMinPos[3];
+    MyFloat StarClusterMassSample; /*!< Sum of StarClusterMass_sample for all hosted stars */
+    int NscSample; /*!< Sum of Nsc_sample for all hosted stars */
 };
 
 /* Structure to hold all allocated FOF groups*/

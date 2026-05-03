@@ -21,6 +21,7 @@
 #include <libgadget/uvbg.h>
 #include <libgadget/stats.h>
 #include <libgadget/plane.h>
+#include <libgadget/tidalfield.h>
 
 static int
 BlackHoleFeedbackMethodAction (ParameterSet * ps, const char * name, void * data)
@@ -191,6 +192,8 @@ create_gadget_parameter_set()
     param_declare_double(ps, "GravitySoftening", OPTIONAL, 1./30., "Gravitational Softening. Units of mean separation of DM. ForceSoftening is 2.8 times this.");
     param_declare_int(ps, "GravitySofteningGas", OPTIONAL, 1, "Unused. Previously was for adaptive softening.");
 
+    param_declare_int(ps, "GasTidalField", OPTIONAL, 0, "If 1, compute local tidal field eigenvalues for gas particles before each snapshot.");
+
     param_declare_double(ps, "ImportBufferBoost", OPTIONAL, 2., "Memory factor to allow for there being more particles imported during treewlk than exported. Increase this if code crashes during treewalk with out of memory.");
     param_declare_double(ps, "PartAllocFactor", OPTIONAL, 1.5, "Over-allocation factor of particles. The load can be imbalanced to allow for the work to be more balanced.");
     param_declare_double(ps, "TopNodeAllocFactor", OPTIONAL, 0.5, "Initial TopNode allocation as a fraction of maximum particle number.");
@@ -271,6 +274,7 @@ create_gadget_parameter_set()
 
     /*Star cluster parameters*/
     param_declare_int(ps, "StarClusterOn", OPTIONAL, 0, "Enable star-cluster bh seeding formation.");
+    param_declare_int(ps, "StarClusterSampling", OPTIONAL, 0, "Enable sampling of individual star cluster masses from the mass function. Only used when StarClusterOn = 1. If on, Msc_ave, Nsc_sample, NumStarCluster, StarClusterMass_sample are computed per star particle, and StarClusterMassSample is used for BH seeding. If off, these are skipped and StarClusterMass is used instead.");
     param_declare_int(ps, "SCgasVDisp", OPTIONAL, 0, "Enable gas and stellar velocity dispersion calculation for gas particles at every PM step.");
     param_declare_int(ps, "BHseedMassScaleMsc", OPTIONAL, 0, "When star-cluster bh seeding formation is enabled, whether the seed mass is scaled by the star cluster mass. If so, parameter SeedBlackHoleMass is in unit of Msc. If not, it is in mass unit.");
     param_declare_double(ps, "MinMscForBHseed", OPTIONAL, 0.0001, "When star-cluster bh seeding formation is enabled, the minimum star cluster mass for seeding black hole. Only used when BHseedMassScaleMsc = 1.");
@@ -457,6 +461,7 @@ void read_parameter_file(char *fname, int * ShowBacktrace, double * MaxMemSizePe
     set_qso_lightup_params(ps);
     set_treewalk_params(ps);
     set_gravshort_tree_params(ps);
+    set_tidalfield_params(ps);
     set_domain_params(ps);
     set_sfr_params(ps);
     set_sync_params(ps);
