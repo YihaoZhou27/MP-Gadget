@@ -28,7 +28,7 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential, MPI
 /* Write the SecPIG catalog to disk. Call after checkpoint for I/O safety. */
 void secondfof_write(SecondFOFResult * result, const char * OutputDir, int snapnum,
                      double atime, Cosmology * CP, const double * MassTable,
-                     int MetalReturnOn, MPI_Comm Comm);
+                     int MetalReturnOn, int OutputDebugFields, MPI_Comm Comm);
 
 /* Free all second FOF data. */
 void secondfof_finish(SecondFOFResult * result);

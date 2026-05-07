@@ -126,7 +126,7 @@ int fof_save_particles(FOFGroups * fof, char * fname, int SaveParticles, Cosmolo
  * particles before writing IO blocks, so that GroupID gets the original primary
  * FOF value and SecGroupID gets the secondary FOF value.
  * Returns 1 if a domain_maintain is needed afterwards (when PartManager was reused). */
-int fof_save_particles_to_bigfile(BigFile * bf, int MetalReturnOn, Cosmology * CP, double atime, int swap_group_ids, MPI_Comm Comm);
+int fof_save_particles_to_bigfile(BigFile * bf, int MetalReturnOn, int OutputDebugFields, Cosmology * CP, double atime, int swap_group_ids, MPI_Comm Comm);
 
 /* Selection function: returns true for particles that belong to a FOF group. */
 int fof_select_func(int i, const struct particle_data * Parts);

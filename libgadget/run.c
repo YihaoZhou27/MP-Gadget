@@ -790,7 +790,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
              * primary Group was allocated first, then second FOF's Group/Result/Output on top. */
             if(secfof) {
                 secondfof_write(secfof, All.OutputDir, SnapshotFileCount, atime,
-                                &All.CP, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
+                                &All.CP, header->MassTable, All.MetalReturnOn, All.OutputDebugFields, MPI_COMM_WORLD);
                 secondfof_finish(secfof);
             }
 
@@ -950,7 +950,7 @@ runfof(const int RestartSnapNum, const inttime_t Ti_Current, const struct header
     /* Must finish second FOF before primary FOF to respect stack allocator (LIFO) order */
     if(secfof) {
         secondfof_write(secfof, All.OutputDir, RestartSnapNum, header->TimeSnapshot,
-                        &All.CP, header->MassTable, All.MetalReturnOn, MPI_COMM_WORLD);
+                        &All.CP, header->MassTable, All.MetalReturnOn, All.OutputDebugFields, MPI_COMM_WORLD);
         secondfof_finish(secfof);
     }
     fof_finish(&fof);

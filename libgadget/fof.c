@@ -1459,11 +1459,13 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
         endrun(7771, "Seed does not belong to the right task");
     }
     int index = g->seed_index;
-    /* Determine whether this group qualifies for star-cluster seeding */
-    int seeded_by_starcluster = fof_params.BlackHoleSeedStarCluster
-        && (g->StarClusterMass >= fof_params.MinMscForBHseed);
     /* Select which star cluster mass to use based on StarClusterSampling */
     MyFloat sc_mass = fof_params.StarClusterSampling ? g->StarClusterMassSample : g->StarClusterMass;
+    /* Determine whether this group qualifies for star-cluster seeding.
+     * Must use the same mass variable (sc_mass) as the marking code in
+     * fof_seed, otherwise StarClusterSampling can cause a mismatch. */
+    int seeded_by_starcluster = fof_params.BlackHoleSeedStarCluster
+        && (sc_mass >= fof_params.MinMscForBHseed);
     /* Compute mass-weighted average metallicity for star cluster */
     MyFloat sc_metallicity = 0;
     float sc_metals[NMETALS] = {0};
@@ -1473,7 +1475,7 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
         for(j = 0; j < NMETALS; j++)
             sc_metals[j] = g->StarClusterMetalElemMass[j] / g->StarClusterMass;
     }
-    blackhole_make_one(index, atime, rnd, seeded_by_starcluster, g->StarClusterMass, sc_metallicity, sc_metals);
+    blackhole_make_one(index, atime, rnd, seeded_by_starcluster, sc_mass, sc_metallicity, sc_metals);
 }
 
 void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTable * const rnd, MPI_Comm Comm)

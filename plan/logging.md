@@ -137,6 +137,40 @@ Merged `blackhole_make_one` and `blackhole_make_one_from_star` into a single uni
 
 **Files modified:** `libgadget/fof.c`, `libgadget/blackhole.c`, `libgadget/blackhole.h`
 
+## 2026-05-03 — Fix StarClusterSampling mismatch in BH seeding
+
+**Branch:** StarCluster
+
+Fixed two mismatches in `fof_seed_make_one` when `StarClusterSampling=1`:
+
+1. The `seeded_by_starcluster` flag always checked `StarClusterMass` against `MinMscForBHseed`, while the marking code used `StarClusterMassSample`. This caused groups to be marked for seeding but then fall into the gas-conversion path (crash: "Only Gas turns into blackholes"). Now uses `sc_mass` (sampling-aware) for the threshold.
+
+2. The star cluster mass passed to `blackhole_make_one` was always `g->StarClusterMass` (CFE-based total), not `sc_mass`. When `BHseedMassScaleMsc=1`, this caused the seed mass to scale by the raw (smaller) mass instead of the sampled mass, producing BHs below the intended minimum mass. Now passes `sc_mass` to `blackhole_make_one`, which is also stored as the BH's `StarClusterMass`.
+
+**Files modified:** `libgadget/fof.c`
+
+## 2026-05-05 — Fix BH-from-star ID collision in star cluster seeding
+
+**Branch:** StarCluster
+
+Fixed a particle ID uniqueness collision in `blackhole_make_one` when spawning a BH from a star particle (star cluster seeding). The old code incremented the star's Generation counter and used it as the generation byte in the child BH's ID, but sibling stars from the same gas parent already occupied those generation numbers (1..Generations). Now uses the star's own generation (from its ID top byte) plus a fixed offset of 128, guaranteeing no collision with star-formation generations (max 14).
+
+**Files modified:** `libgadget/blackhole.c`
+
+Fixed SecPIG particle catalog to include secondary-linked particles (e.g., BH type 5). Previously only primary-linked particle types were saved and counted in the header, so BH blocks in SecPIG were always empty despite BHs being assigned to secondary FOF groups.
+
+**Files modified:** `libgadget/secondfof.c`
+
+## 2026-05-07 — Add Missing SecPIG Group and Particle Blocks
+
+**Branch:** StarCluster
+
+Added three missing FOF group output blocks to the SecPIG catalog: `SecGasSfmpMass`, `SecStarClusterMassSample`, and `SecNscSample`. These fields were already accumulated in the Group struct during secondary FOF compilation but were not being written to the SecPIG output.
+
+Added `OutputDebugFields` support to the SecPIG particle catalog. Previously `fof_save_particles_to_bigfile` (used by SecPIG) did not register debug IO blocks, so particle-level fields like `NumStarCluster`, `Nsc_sample`, and `Mcstar` were missing from SecPIG even when `OutputDebugFields=1`. Threaded the `OutputDebugFields` parameter through `secondfof_write` and `fof_save_particles_to_bigfile`.
+
+**Files modified:** `libgadget/secondfof.c`, `libgadget/secondfof.h`, `libgadget/fofpetaio.c`, `libgadget/fof.h`, `libgadget/run.c`
+
 ---
 
 ## TODO

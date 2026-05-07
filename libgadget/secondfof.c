@@ -62,8 +62,8 @@ void set_secondfof_params(ParameterSet * ps)
             sfof_params.SeedInSecFOFasStarCluster = 0;
         }
         if(sfof_params.SecondFOFOn && StarClusterOn) {
-            if(sfof_params.SecFOFStarCluster && sfof_params.PrimaryLinkTypes != (1 << 4))
-                endrun(1, "SecFOFStarCluster requires SecondFOFPrimaryLinkTypes = 16 (type 4, star particles).\n");
+            if(sfof_params.SecFOFStarCluster && sfof_params.PrimaryLinkTypes != (1 << 4) && sfof_params.PrimaryLinkTypes != ((1 << 4) | (1 << 0)))
+                endrun(1, "SecFOFStarCluster requires SecondFOFPrimaryLinkTypes = 16 (star) or 17 (star+gas).\n");
         }
         /* Validate MinMscForBHseed for secondary seeding: secondfof_seed
          * forcibly enables BlackHoleSeedStarCluster at runtime, so the
@@ -550,6 +550,9 @@ SIMPLE_PROPERTY_SECFOF(StellarMetalElemMass, grp.StellarMetalElemMass[0], float,
 SIMPLE_PROPERTY_SECFOF(MassHeIonized, grp.MassHeIonized, float, 1)
 SIMPLE_PROPERTY_SECFOF(BlackholeMass, grp.BH_Mass, float, 1)
 SIMPLE_PROPERTY_SECFOF(BlackholeAccretionRate, grp.BH_Mdot, float, 1)
+SIMPLE_PROPERTY_SECFOF(GasSfmpMass, grp.sfmp_mass, float, 1)
+SIMPLE_PROPERTY_SECFOF(StarClusterMassSample, grp.StarClusterMassSample, float, 1)
+SIMPLE_PROPERTY_SECFOF(NscSample, grp.NscSample, int, 1)
 
 SIMPLE_PROPERTY_SECFOF(PotMin, grp.PotMin, float, 1)
 SIMPLE_PROPERTY_SECFOF(R50, ext.R50, float, 1)
@@ -657,6 +660,9 @@ secondfof_register_io_blocks(int MetalReturnOn, int ComputeSize, int SecFOFStarC
     }
     IO_REG(SecBlackholeMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
     IO_REG(SecBlackholeAccretionRate, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+    IO_REG(SecGasSfmpMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+    IO_REG(SecStarClusterMassSample, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+    IO_REG(SecNscSample, "i4", 1, PTYPE_FOF_GROUP, IOTable);
 
     /* Second FOF specific properties */
     IO_REG(SecPotMinPos, "f8", 3, PTYPE_FOF_GROUP, IOTable);
@@ -702,8 +708,9 @@ static void secondfof_write_header(BigFile * bf, int64_t TotNgroups, const doubl
     #pragma omp parallel for reduction(+: npartLocal[:6])
     for(int i = 0; i < PartManager->NumPart; i++) {
         if(P[i].SecGrNr < 0) continue;
-        /* Only count primary-linked particles */
-        if(!((1 << P[i].Type) & sfof_params.PrimaryLinkTypes)) continue;
+        /* Count primary- and secondary-linked particles */
+        int type_mask = sfof_params.PrimaryLinkTypes | sfof_params.SecondaryLinkTypes;
+        if(!((1 << P[i].Type) & type_mask)) continue;
         npartLocal[P[i].Type]++;
     }
 
@@ -887,7 +894,7 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential, MPI
 
 void secondfof_write(SecondFOFResult * result, const char * OutputDir, int snapnum,
                      double atime, Cosmology * CP, const double * MassTable,
-                     int MetalReturnOn, MPI_Comm Comm)
+                     int MetalReturnOn, int OutputDebugFields, MPI_Comm Comm)
 {
     int i;
 
@@ -944,8 +951,9 @@ void secondfof_write(SecondFOFResult * result, const char * OutputDir, int snapn
     for(i = 0; i < PartManager->NumPart; i++) {
         saved_GrNr[i] = P[i].GrNr;
         saved_SecGrNr[i] = P[i].SecGrNr;
-        /* Only include primary-linked particles in the second FOF catalog */
-        if(P[i].SecGrNr >= 0 && ((1 << P[i].Type) & sfof_params.PrimaryLinkTypes)) {
+        /* Include primary- and secondary-linked particles in the second FOF catalog */
+        int type_mask = sfof_params.PrimaryLinkTypes | sfof_params.SecondaryLinkTypes;
+        if(P[i].SecGrNr >= 0 && ((1 << P[i].Type) & type_mask)) {
             P[i].GrNr = P[i].SecGrNr;
             P[i].SecGrNr = saved_GrNr[i];
         }
@@ -953,7 +961,7 @@ void secondfof_write(SecondFOFResult * result, const char * OutputDir, int snapn
             P[i].GrNr = -1;
     }
 
-    fof_save_particles_to_bigfile(&bf, MetalReturnOn, CP, atime, 1, Comm);
+    fof_save_particles_to_bigfile(&bf, MetalReturnOn, OutputDebugFields, CP, atime, 1, Comm);
 
     /* Restore original GrNr and SecGrNr */
     #pragma omp parallel for

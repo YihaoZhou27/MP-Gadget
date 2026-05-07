@@ -164,12 +164,14 @@ int fof_save_particles(FOFGroups * fof, char * fname, int SaveParticles, Cosmolo
  * Selects particles with GrNr >= 0, sorts by (Type, GrNr).
  * Caller is responsible for setting GrNr appropriately before calling.
  * Returns 1 if domain_maintain is needed (when PartManager was reused). */
-int fof_save_particles_to_bigfile(BigFile * bf, int MetalReturnOn, Cosmology * CP, double atime, int swap_group_ids, MPI_Comm Comm)
+int fof_save_particles_to_bigfile(BigFile * bf, int MetalReturnOn, int OutputDebugFields, Cosmology * CP, double atime, int swap_group_ids, MPI_Comm Comm)
 {
     int i;
     int domain_needed = 0;
     struct IOTable IOTable = {0};
     register_io_blocks(&IOTable, 1, MetalReturnOn);
+    if(OutputDebugFields)
+        register_debug_io_blocks(&IOTable);
     struct part_manager_type * halo_pman = NULL;
     struct slots_manager_type * halo_sman = NULL;
     int64_t NpigLocal = 0;

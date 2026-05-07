@@ -1138,11 +1138,16 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
 
         PartManager->Base[new_child] = PartManager->Base[index];
         PartManager->Base[index].Generation++;
-        uint64_t g = PartManager->Base[index].Generation;
-        PartManager->Base[new_child].ID = (PartManager->Base[index].ID & 0x00ffffffffffffffL) + (g << 56L);
-        if(g >= (1 << (64 - 56L)))
-            endrun(1, "Particle %ld (ID: %ld) generation %ld wrapped.\n",
-                   (long)index, (long)PartManager->Base[index].ID, (long)g);
+        /* Use the star's own generation (encoded in its ID top byte) plus
+         * a fixed offset of 128 to derive the BH child ID.  This avoids
+         * collision with sibling stars from the same gas parent, whose
+         * generations occupy the range 1..Generations (max 14). */
+        uint64_t star_gen = (PartManager->Base[index].ID >> 56L) & 0xFFL;
+        uint64_t bh_gen = star_gen + 128;
+        PartManager->Base[new_child].ID = (PartManager->Base[index].ID & 0x00ffffffffffffffL) + (bh_gen << 56L);
+        if(bh_gen >= (1 << (64 - 56L)))
+            endrun(1, "Particle %ld (ID: %ld) BH generation %ld (from star gen %ld) wrapped.\n",
+                   (long)index, (long)PartManager->Base[index].ID, (long)bh_gen, (long)star_gen);
         PartManager->Base[new_child].PI = -1;
         if(blackhole_params.SeedBHDynMass > 0)
             P[new_child].Mass = blackhole_params.SeedBHDynMass;
