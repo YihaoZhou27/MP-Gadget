@@ -686,7 +686,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                         /* Seed BH using secondary FOF catalog */
                         secondfof_seed(ddecomp, &Act, atime, &rnd, MPI_COMM_WORLD);
                     } else {
-                        fof_seed(&fof, &Act, atime, &rnd, MPI_COMM_WORLD);
+                        fof_seed(&fof, &Act, atime, &rnd, NULL, NULL, MPI_COMM_WORLD);
                     }
                     TimeNextSeedingCheck = atime * All.TimeBetweenSeedingSearch;
                 }

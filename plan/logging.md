@@ -169,7 +169,17 @@ Added three missing FOF group output blocks to the SecPIG catalog: `SecGasSfmpMa
 
 Added `OutputDebugFields` support to the SecPIG particle catalog. Previously `fof_save_particles_to_bigfile` (used by SecPIG) did not register debug IO blocks, so particle-level fields like `NumStarCluster`, `Nsc_sample`, and `Mcstar` were missing from SecPIG even when `OutputDebugFields=1`. Threaded the `OutputDebugFields` parameter through `secondfof_write` and `fof_save_particles_to_bigfile`.
 
-**Files modified:** `libgadget/secondfof.c`, `libgadget/secondfof.h`, `libgadget/fofpetaio.c`, `libgadget/fof.h`, `libgadget/run.c`
+Changed star-cluster BH seeding (`SeedInSecFOFasStarCluster`) to spawn the BH from the star particle with the largest `ClusterMass` (or `StarClusterMass_sample` when `StarClusterSampling=1`) instead of the star at the potential minimum. Added `MaxStarClusterMass` field to `struct Group` to track this across particles and MPI ranks. `seed_index_star`/`seed_task_star` are now decoupled from PotMin tracking.
+
+After a BH is seeded by star-cluster criteria in secondary FOF, `ClusterMass` and `StarClusterMass_sample` are zeroed for all star particles in the seeded group (since the star cluster mass has been transferred to `BHP.StarClusterMass` on the new BH). Uses Allgatherv to broadcast seeded group numbers across MPI ranks.
+
+Added two new star particle fields: `initClusterMass` and `initStarClusterMass_sample`. These are set at star formation to the same values as `ClusterMass`/`StarClusterMass_sample` and are never modified afterwards, preserving the original birth values. Written as snapshot output blocks. Pre-zeroed for all type-4 particles before snapshot reading so that restarts from older snapshots (lacking these blocks) default to 0 instead of uninitialised memory.
+
+Removed the `LenType[5] == 0` check from the `SC_Mask` star-cluster BH seeding condition. A secondary FOF group can now seed multiple BHs across timesteps: after each seeding the star cluster mass is zeroed, so subsequent seedings require new accumulation and no star particle is double-counted.
+
+Refactored seeded-group marking: `fof_seed` now optionally returns the GrNr of each locally-seeded group via output parameters (`seeded_grnr_out`, `n_seeded_out`). `secondfof_seed` uses these directly instead of inferring seeded groups from new particle indices. Primary FOF callers pass NULL to skip collection. Replaced the `saved_GrNr` heap allocation (8 bytes/particle) in `secondfof_seed` with `P[i].SecGrNr` as temporary storage for primary GrNr. `SecGrNr` is reset to -1 after restore; `secondfof_run` recomputes it before any snapshot output.
+
+**Files modified:** `libgadget/secondfof.c`, `libgadget/secondfof.h`, `libgadget/fofpetaio.c`, `libgadget/fof.h`, `libgadget/fof.c`, `libgadget/run.c`, `libgadget/slotsmanager.h`, `libgadget/sfr_eff.c`, `libgadget/petaio.c`
 
 ---
 

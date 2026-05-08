@@ -304,6 +304,17 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
      * Note the metal fields are non-fatal so this does not break resuming without metals.*/
     register_io_blocks(IOTable, 0, 1);
 
+    /* Pre-zero nonfatal star particle fields that may be absent in older snapshots.
+     * If the snapshot has these blocks, the setter overwrites with real values;
+     * if not, they remain zero instead of containing uninitialised memory. */
+    #pragma omp parallel for
+    for(i = 0; i < PartManager->NumPart; i++) {
+        if(P[i].Type == 4) {
+            STARP(i).initClusterMass = 0;
+            STARP(i).initStarClusterMass_sample = 0;
+        }
+    }
+
     for(i = 0; i < IOTable->used; i ++) {
         /* only process the particle blocks */
         char blockname[128];
@@ -830,6 +841,8 @@ SIMPLE_PROPERTY_PI(Msc_ave, Msc_ave, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(NumStarCluster, NumStarCluster, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(Nsc_sample, Nsc_sample, int, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(StarClusterMass_sample, StarClusterMass_sample, float, 1, struct star_particle_data)
+SIMPLE_PROPERTY_PI(initClusterMass, initClusterMass, float, 1, struct star_particle_data)
+SIMPLE_PROPERTY_PI(initStarClusterMass_sample, initStarClusterMass_sample, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_TYPE_PI(ClusterFormationEfficiency, 0, ClusterFormationEfficiency, float, 1, struct sph_particle_data)
 SIMPLE_PROPERTY_PI(SumSFRdt, SumSFRdt, float, 1, struct sph_particle_data)
 SIMPLE_PROPERTY_PI(SumSpawnedMass, SumSpawnedMass, float, 1, struct sph_particle_data)
@@ -1046,8 +1059,10 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
     IO_REG_NONFATAL(BirthInternalEnergy, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(ClusterFormationEfficiency, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(ClusterMass, "f4", 1, 4, IOTable);
+    IO_REG_NONFATAL(initClusterMass, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(Msc_ave, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(StarClusterMass_sample, "f4", 1, 4, IOTable);
+    IO_REG_NONFATAL(initStarClusterMass_sample, "f4", 1, 4, IOTable);
     IO_REG_TYPE(ClusterFormationEfficiency, "f4", 1, 0, IOTable);
     IO_REG_NONFATAL(SumSFRdt,       "f4", 1, 0, IOTable);
     IO_REG_NONFATAL(SumSpawnedMass, "f4", 1, 0, IOTable);

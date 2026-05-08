@@ -96,12 +96,14 @@ struct star_particle_data
     MyFloat BirthInternalEnergy; /*!< Internal energy of gas particle at star formation. */
     float FormationTime;      /*!< formation time of star particle */
     MyFloat ClusterFormationEfficiency; /*!< Cluster formation efficiency of star particle */
-    MyFloat ClusterMass; /*!< Mass of the cluster formed from this star particle */
+    MyFloat ClusterMass; /*!< Mass of the cluster formed from this star particle (zeroed after BH seeding in secFOF) */
+    MyFloat initClusterMass; /*!< Original ClusterMass at star formation (never modified) */
     MyFloat Mcstar; /*!< Star cluster mass from Toomre mass model: 0.1 * CFE * f_coll * M_T */
     MyFloat Msc_ave; /*!< Average mass of cluster MF n(m) ~ m^-2 exp(-m/Mcstar) over [1e2, 1e8] Msun */
     float NumStarCluster; /*!< Number of star clusters: ClusterMass / Msc_ave */
     int Nsc_sample; /*!< Poisson-sampled integer number of star clusters from NumStarCluster */
-    MyFloat StarClusterMass_sample; /*!< Sum of Nsc_sample masses sampled from n(m)~m^-2 exp(-m/Mcstar) */
+    MyFloat StarClusterMass_sample; /*!< Sum of Nsc_sample masses sampled from n(m)~m^-2 exp(-m/Mcstar) (zeroed after BH seeding in secFOF) */
+    MyFloat initStarClusterMass_sample; /*!< Original StarClusterMass_sample at star formation (never modified) */
 };
 
 /* the following structure holds data that is stored for each SPH particle in addition to the collisionless

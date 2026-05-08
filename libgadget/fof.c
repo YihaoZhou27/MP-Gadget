@@ -703,6 +703,10 @@ static void fof_reduce_group(void * pdst, void * psrc) {
         int d;
         for(d = 0; d < 3; d++)
             gdst->PotMinPos[d] = gsrc->PotMinPos[d];
+    }
+    if(gsrc->MaxStarClusterMass > gdst->MaxStarClusterMass)
+    {
+        gdst->MaxStarClusterMass = gsrc->MaxStarClusterMass;
         gdst->seed_index_star = gsrc->seed_index_star;
         gdst->seed_task_star = gsrc->seed_task_star;
     }
@@ -730,6 +734,7 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
         gdst->base = base;
         gdst->seed_index = gdst->seed_task = -1;
         gdst->seed_index_star = gdst->seed_task_star = -1;
+        gdst->MaxStarClusterMass = 0;
         gdst->PotMin = 1e30;
     }
 
@@ -762,6 +767,17 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
             gdst->StarClusterMetalElemMass[j] += STARP(index).Metals[j] * STARP(index).ClusterMass;
         gdst->StarClusterMassSample += STARP(index).StarClusterMass_sample;
         gdst->NscSample += STARP(index).Nsc_sample;
+
+        /* Track the star particle with the largest ClusterMass (or
+         * StarClusterMass_sample when StarClusterSampling=1) for
+         * star-cluster BH seeding in secondary FOF. */
+        MyFloat scm = fof_params.StarClusterSampling ?
+            STARP(index).StarClusterMass_sample : STARP(index).ClusterMass;
+        if(scm > gdst->MaxStarClusterMass) {
+            gdst->MaxStarClusterMass = scm;
+            gdst->seed_index_star = index;
+            gdst->seed_task_star = ThisTask;
+        }
     }
 
     if(P[index].Type == 5)
@@ -788,11 +804,6 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
             int d;
             for(d = 0; d < 3; d++)
                 gdst->PotMinPos[d] = P[index].Pos[d];
-            /* Also track the star particle at PotMin for star-cluster BH seeding */
-            if(P[index].Type == 4) {
-                gdst->seed_index_star = index;
-                gdst->seed_task_star = ThisTask;
-            }
         }
     }
 
@@ -1478,7 +1489,8 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
     blackhole_make_one(index, atime, rnd, seeded_by_starcluster, sc_mass, sc_metallicity, sc_metals);
 }
 
-void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTable * const rnd, MPI_Comm Comm)
+void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTable * const rnd,
+              int64_t ** seeded_grnr_out, int * n_seeded_out, MPI_Comm Comm)
 {
     int i, j, n, ntot;
 
@@ -1499,7 +1511,6 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
                 fof->Group[i].StarClusterMassSample : fof->Group[i].StarClusterMass;
             SC_Mask =
                 (sc_mass_for_seed >= fof_params.MinMscForBHseed)
-            &&  (fof->Group[i].LenType[5] == 0)
             &&  (fof->Group[i].seed_index >= 0 || fof->Group[i].seed_index_star >= 0);
         }
         else{
@@ -1537,7 +1548,7 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
         }
 
         /* For star-cluster seeding in secondary FOF (no gas particles),
-         * fall back to the star at PotMin as the seed particle. */
+         * fall back to the star with the largest ClusterMass as the seed particle. */
         if(SC_Mask && fof->Group[i].seed_index < 0 && fof->Group[i].seed_index_star >= 0) {
             fof->Group[i].seed_index = fof->Group[i].seed_index_star;
             fof->Group[i].seed_task = fof->Group[i].seed_task_star;
@@ -1640,7 +1651,32 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
         fof_seed_make_one(&ImportGroups[n], ThisTask, atime, rnd);
     }
 
+    /* Optionally return the GrNr of each locally-seeded group.
+     * Use ta_malloc for the temporary copy so it lives on the thread-local
+     * allocator, then free ImportGroups (mymalloc2), then copy into a
+     * mymalloc2 buffer that the caller will own and free. */
+    int64_t * seeded_grnr_tmp = NULL;
+    int n_seeded_local = 0;
+    if(seeded_grnr_out && n_seeded_out && Nimport > 0) {
+        seeded_grnr_tmp = ta_malloc("SeededGrNrTmp", int64_t, Nimport);
+        for(n = 0; n < Nimport; n++)
+            seeded_grnr_tmp[n] = ImportGroups[n].base.GrNr;
+        n_seeded_local = Nimport;
+    }
+
     myfree(ImportGroups);
+
+    /* Now that ImportGroups is freed, copy the temporary into persistent storage */
+    if(seeded_grnr_out && n_seeded_out) {
+        *n_seeded_out = n_seeded_local;
+        if(n_seeded_local > 0) {
+            *seeded_grnr_out = (int64_t *) mymalloc2("SeededGrNr", n_seeded_local * sizeof(int64_t));
+            memcpy(*seeded_grnr_out, seeded_grnr_tmp, n_seeded_local * sizeof(int64_t));
+            ta_free(seeded_grnr_tmp);
+        } else {
+            *seeded_grnr_out = NULL;
+        }
+    }
 
     walltime_measure("/FOF/Seeding");
 }

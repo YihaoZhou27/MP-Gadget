@@ -135,6 +135,13 @@ struct dist_mass_grp {
     int64_t GrNr;
 };
 
+static int cmp_int64(const void * a, const void * b)
+{
+    int64_t va = *(const int64_t *)a;
+    int64_t vb = *(const int64_t *)b;
+    return (va > vb) - (va < vb);
+}
+
 static int cmp_dist_mass_grp_by_dist(const void * a, const void * b)
 {
     const struct dist_mass_grp * da = (const struct dist_mass_grp *)a;
@@ -765,6 +772,7 @@ struct SecondFOFResult {
 void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
                     double atime, const RandTable * rnd, MPI_Comm Comm)
 {
+    int i;
     message(0, "Seeding black holes using secondary FOF catalog (StarCluster criteria).\n");
 
     /* Save current FOF parameters */
@@ -777,17 +785,110 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
     fof_get_seed_params(&save_SeedSC, &save_SeedHalo, &save_SeedGas);
 
     /* Override with secondary FOF linking parameters.
-     * Enable FOFPotentialMin so add_particle_to_group tracks the
-     * star at minimum potential (needed for seed_index_star). */
+     * Enable FOFPotentialMin so that PotMin/PotMinPos are tracked for group centers. */
     fof_set_params(sfof_params.PrimaryLinkTypes, sfof_params.SecondaryLinkTypes,
                    sfof_params.LinkingLength, sfof_params.MinLength, 1);
 
     /* Override seeding params: only StarCluster-based seeding in sec FOF */
     fof_set_seed_params(1, 0, 0);
 
-    FOFGroups secfof = fof_fof(ddecomp, 0, Comm);
-    fof_seed(&secfof, act, atime, rnd, Comm);
+    /* Save primary FOF GrNr into SecGrNr before the secondary FOF overwrites GrNr.
+     * SecGrNr is not touched by fof_fof or fof_seed, so it is safe as temporary storage.
+     * We need StoreGrNr = 1 so that particles get the secondary FOF
+     * group number written into GrNr — the zeroing code below uses
+     * GrNr to identify which stars belong to the seeded group. */
+    int64_t NumPart_before = PartManager->NumPart;
+    #pragma omp parallel for
+    for(i = 0; i < PartManager->NumPart; i++)
+        P[i].SecGrNr = P[i].GrNr;
+
+    FOFGroups secfof = fof_fof(ddecomp, 1, Comm);
+
+    /* fof_seed returns the GrNr of each locally-seeded group directly,
+     * rather than us inferring them from new particle indices. */
+    int64_t * local_seeded_grnr = NULL;
+    int n_local_seeded = 0;
+    fof_seed(&secfof, act, atime, rnd, &local_seeded_grnr, &n_local_seeded, Comm);
+
+    /* Zero ClusterMass and StarClusterMass_sample for all type-4 stars in
+     * secondary FOF groups that just had a BH seeded.  The star cluster mass
+     * has been transferred to BHP.StarClusterMass on the new BH.
+     * Since groups may span MPI ranks, we Allgather the seeded GrNr set. */
+    int NTask;
+    MPI_Comm_size(Comm, &NTask);
+
+    int * recv_counts = (int *) mymalloc2("RecvCounts", NTask * sizeof(int));
+    MPI_Allgather(&n_local_seeded, 1, MPI_INT, recv_counts, 1, MPI_INT, Comm);
+
+    int n_total_seeded = 0;
+    int * displs = (int *) mymalloc2("Displs", NTask * sizeof(int));
+    for(i = 0; i < NTask; i++) {
+        displs[i] = n_total_seeded;
+        n_total_seeded += recv_counts[i];
+    }
+
+    if(n_total_seeded > 0) {
+        int64_t * all_seeded_grnr = (int64_t *) mymalloc2("AllSeededGrNr",
+                                        n_total_seeded * sizeof(int64_t));
+
+        MPI_Allgatherv(local_seeded_grnr, n_local_seeded, MPI_INT64_T,
+                        all_seeded_grnr, recv_counts, displs, MPI_INT64_T, Comm);
+
+        /* Sort for binary search */
+        qsort(all_seeded_grnr, n_total_seeded, sizeof(int64_t), cmp_int64);
+
+        /* Zero ClusterMass/StarClusterMass_sample for type-4 stars in seeded groups */
+        int64_t n_zeroed = 0;
+        #pragma omp parallel for reduction(+:n_zeroed)
+        for(i = 0; i < PartManager->NumPart; i++) {
+            if(P[i].Type != 4 || P[i].GrNr < 0)
+                continue;
+            /* Binary search for GrNr in seeded list */
+            int64_t key = P[i].GrNr;
+            int lo = 0, hi = n_total_seeded;
+            int found = 0;
+            while(lo < hi) {
+                int mid = lo + (hi - lo) / 2;
+                if(all_seeded_grnr[mid] == key) { found = 1; break; }
+                else if(all_seeded_grnr[mid] < key) lo = mid + 1;
+                else hi = mid;
+            }
+            if(found) {
+                STARP(i).ClusterMass = 0;
+                STARP(i).StarClusterMass_sample = 0;
+                n_zeroed++;
+            }
+        }
+
+        int64_t n_zeroed_total;
+        MPI_Allreduce(&n_zeroed, &n_zeroed_total, 1, MPI_INT64, MPI_SUM, Comm);
+        message(0, "SecondFOF seed: zeroed ClusterMass/StarClusterMass_sample for %ld stars "
+                   "in %d seeded groups.\n", n_zeroed_total, n_total_seeded);
+
+        myfree(all_seeded_grnr);
+    }
+
+    myfree(displs);
+    myfree(recv_counts);
+    if(local_seeded_grnr)
+        myfree(local_seeded_grnr);
+
     fof_finish(&secfof);
+
+    /* Restore primary FOF GrNr from SecGrNr, then reset SecGrNr to -1.
+     * SecGrNr will be recomputed by secondfof_run if a snapshot is written. */
+    #pragma omp parallel for
+    for(i = 0; i < NumPart_before; i++) {
+        P[i].GrNr = P[i].SecGrNr;
+        P[i].SecGrNr = -1;
+    }
+    /* Newly spawned BHs (indices [NumPart_before, NumPart)) are not part
+     * of the primary FOF or any prior secondary FOF. */
+    int64_t NumPart_now = PartManager->NumPart;
+    for(i = NumPart_before; i < NumPart_now; i++) {
+        P[i].GrNr = -1;
+        P[i].SecGrNr = -1;
+    }
 
     /* Restore original FOF parameters */
     fof_set_params(save_PrimaryLT, save_SecondaryLT,

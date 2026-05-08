@@ -697,6 +697,7 @@ static int make_particle_star(int child, int parent, int placement, double Time,
         double CFE = get_cluster_formation_efficiency(Pressure_over_kB);
         STARP(child).ClusterFormationEfficiency = CFE;
         STARP(child).ClusterMass = P[child].Mass * CFE;
+        STARP(child).initClusterMass = STARP(child).ClusterMass;
 
         /* --- M_cstar: star cluster mass from Toomre mass model --- */
 
@@ -855,6 +856,7 @@ static int make_particle_star(int child, int parent, int placement, double Time,
                 }
             }
             STARP(child).StarClusterMass_sample = total_sample_mass;
+            STARP(child).initStarClusterMass_sample = total_sample_mass;
         }
         else {
             /* StarClusterSampling off: skip sampling, set to initial values */
@@ -862,16 +864,19 @@ static int make_particle_star(int child, int parent, int placement, double Time,
             STARP(child).NumStarCluster = 0;
             STARP(child).Nsc_sample = 0;
             STARP(child).StarClusterMass_sample = 0;
+            STARP(child).initStarClusterMass_sample = 0;
         }
     }
     else {
         STARP(child).ClusterFormationEfficiency = 0;
         STARP(child).ClusterMass = 0;
+        STARP(child).initClusterMass = 0;
         STARP(child).Mcstar = 0;
         STARP(child).Msc_ave = 0;
         STARP(child).NumStarCluster = 0;
         STARP(child).Nsc_sample = 0;
         STARP(child).StarClusterMass_sample = 0;
+        STARP(child).initStarClusterMass_sample = 0;
     }
 
     STARP(child).VDisp = oldslot.VDisp;
