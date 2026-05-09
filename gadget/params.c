@@ -241,6 +241,7 @@ create_gadget_parameter_set()
     param_declare_int(ps, "BlackHoleSeedHaloBased", OPTIONAL, 1, "Used halo-based black hole seeding prescriptions");
     param_declare_int(ps, "BlackHoleSeedStarCluster", OPTIONAL, 0, "Enable StarCluster-based black hole seeding.");
     param_declare_int(ps, "BlackHoleSeedGasBased", OPTIONAL, 0, "Used gas-based black hole seeding prescriptions");
+    param_declare_int(ps, "BlackholeSeedSCparticle", OPTIONAL, 0, "If 1, seed black holes from individual star particles whose star cluster mass exceeds MinMscForBHseed. Requires StarClusterOn=1.");
     param_declare_double(ps, "BlackHoleSeedsfmpGas", OPTIONAL, 0.001, "The mass of star-forming, metal-poor gas for seeding blackhole. in the unit of 1e10/hh soloarmass. Only used when BlackHoleSeedGasBased = 1");
     param_declare_double(ps, "BlackHoleseedsMetalThres", OPTIONAL, 0.0001, "The threshold of the metal-poor gas to seed blackhole, in the unit of solar metallicity (0.0127) Only used when BlackHoleSeedGasBased = 1");
 

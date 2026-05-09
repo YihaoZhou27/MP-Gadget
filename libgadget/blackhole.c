@@ -54,6 +54,8 @@ struct BlackholeParams
     int StarClusterOn; /* If 1, enable star-cluster bh seeding formation */
     int StarClusterSampling; /* If 1, use sampled star cluster mass for BH seeding */
     int BHseedMassScaleMsc; /* When star-cluster bh seeding formation is enabled, whether the seed mass is scaled by the star cluster mass. If so, parameter SeedBlackHoleMass is in unit of Msc. If not, it is in mass unit. */
+    double MinMscForBHseed; /* Minimum star cluster mass for BH seeding */
+    int BlackholeSeedSCparticle; /* If 1, seed BH from individual star particles with SC mass >= MinMscForBHseed */
     /************************************************************************/
 } blackhole_params;
 
@@ -124,6 +126,10 @@ void set_blackhole_params(ParameterSet * ps)
         blackhole_params.StarClusterOn = param_get_int(ps, "StarClusterOn");
         blackhole_params.StarClusterSampling = param_get_int(ps, "StarClusterSampling");
         blackhole_params.BHseedMassScaleMsc = param_get_int(ps, "BHseedMassScaleMsc");
+        blackhole_params.MinMscForBHseed = param_get_double(ps, "MinMscForBHseed");
+        blackhole_params.BlackholeSeedSCparticle = param_get_int(ps, "BlackholeSeedSCparticle");
+        if(blackhole_params.BlackholeSeedSCparticle && blackhole_params.BHseedMassScaleMsc && blackhole_params.MinMscForBHseed <= 0)
+            endrun(1, "MinMscForBHseed must be > 0 when BlackholeSeedSCparticle and BHseedMassScaleMsc are enabled.\n");
         /***********************************************************************************/
     }
     MPI_Bcast(&blackhole_params, sizeof(struct BlackholeParams), MPI_BYTE, 0, MPI_COMM_WORLD);
@@ -1242,4 +1248,100 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
 
     BHP(child).KineticFdbkEnergy = 0;
     BHP(child).VDisp = 0;
+}
+
+/* Seed black holes from individual star particles whose star cluster mass
+ * exceeds MinMscForBHseed.  Called every PM step when BlackholeSeedSCparticle
+ * is enabled.  A new BH particle is spawned at the star's position (same
+ * mechanism as SeedInSecFOFasStarCluster) and the star's ClusterMass and
+ * StarClusterMass_sample are zeroed out. */
+void
+blackhole_seed_sc_particle(ActiveParticles * act, double atime,
+                           const RandTable * const rnd, MPI_Comm Comm)
+{
+    if(!blackhole_params.BlackholeSeedSCparticle)
+        return;
+
+    int64_t i;
+    double MinMsc = blackhole_params.MinMscForBHseed;
+
+    /* First pass: count how many stars qualify for seeding on this rank. */
+    int Nseed = 0;
+    for(i = 0; i < PartManager->NumPart; i++) {
+        if(P[i].Type != 4)
+            continue;
+        MyFloat sc_mass = blackhole_params.StarClusterSampling ?
+            STARP(i).StarClusterMass_sample : STARP(i).ClusterMass;
+        if(sc_mass >= MinMsc)
+            Nseed++;
+    }
+
+    int Nseed_total;
+    MPI_Allreduce(&Nseed, &Nseed_total, 1, MPI_INT, MPI_SUM, Comm);
+    message(0, "BlackholeSeedSCparticle: seeding %d new black holes from star particles.\n", Nseed_total);
+
+    if(Nseed_total == 0)
+        return;
+
+    /* Ensure enough BH slots. */
+    if(Nseed + SlotsManager->info[5].size > SlotsManager->info[5].maxsize) {
+        int *ActiveParticle_tmp = NULL;
+        if(act->ActiveParticle) {
+            ActiveParticle_tmp = (int *) mymalloc2("ActiveParticle_tmp",
+                                    act->NumActiveParticle * sizeof(int));
+            memmove(ActiveParticle_tmp, act->ActiveParticle,
+                    act->NumActiveParticle * sizeof(int));
+            myfree(act->ActiveParticle);
+        }
+        int64_t atleast[6];
+        int64_t k;
+        for(k = 0; k < 6; k++)
+            atleast[k] = SlotsManager->info[k].maxsize;
+        atleast[5] += Nseed_total * 1.1;
+        slots_reserve(1, atleast, SlotsManager);
+        if(ActiveParticle_tmp) {
+            act->ActiveParticle = (int *) mymalloc("ActiveParticle",
+                sizeof(int) * (act->NumActiveParticle + PartManager->MaxPart - PartManager->NumPart));
+            memmove(act->ActiveParticle, ActiveParticle_tmp,
+                    act->NumActiveParticle * sizeof(int));
+            myfree(ActiveParticle_tmp);
+        }
+    }
+
+    /* Ensure enough base particle capacity for new BH spawns. */
+    if(PartManager->NumPart + Nseed > PartManager->MaxPart)
+        endrun(8889, "Not enough base particle capacity for BH seeding from SC particles: "
+               "NumPart=%ld + Nseed=%d > MaxPart=%ld. Increase PartAllocFactor.\n",
+               PartManager->NumPart, Nseed, PartManager->MaxPart);
+
+    /* Second pass: seed BHs from qualifying stars.
+     * NumPart grows as we spawn, so iterate only over the original range. */
+    int64_t NumPart_before = PartManager->NumPart;
+    int n_seeded = 0;
+    for(i = 0; i < NumPart_before; i++) {
+        if(P[i].Type != 4)
+            continue;
+        MyFloat sc_mass = blackhole_params.StarClusterSampling ?
+            STARP(i).StarClusterMass_sample : STARP(i).ClusterMass;
+        if(sc_mass < MinMsc)
+            continue;
+
+        /* Compute mass-weighted metallicity from the star particle's own metals. */
+        MyFloat sc_metallicity = STARP(i).Metallicity;
+        float sc_metals[NMETALS];
+        int j;
+        for(j = 0; j < NMETALS; j++)
+            sc_metals[j] = STARP(i).Metals[j];
+
+        blackhole_make_one(i, atime, rnd, 1, sc_mass, sc_metallicity, sc_metals);
+
+        /* Zero the star cluster mass on the parent star. */
+        STARP(i).ClusterMass = 0;
+        STARP(i).StarClusterMass_sample = 0;
+        n_seeded++;
+    }
+
+    int n_seeded_total;
+    MPI_Allreduce(&n_seeded, &n_seeded_total, 1, MPI_INT, MPI_SUM, Comm);
+    message(0, "BlackholeSeedSCparticle: created %d black holes from star particles.\n", n_seeded_total);
 }

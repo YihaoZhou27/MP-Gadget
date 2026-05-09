@@ -79,6 +79,7 @@ static struct run_params
     int BlackHoleSeedHaloBased; /* if the bh seeding is halo-based */
     int BlackHoleSeedGasBased; /* if the bh seeding is gas-based */
     int BlackHoleSeedStarCluster; /* if the bh seeding is star-cluster-based */
+    int BlackholeSeedSCparticle; /* if the bh seeding is based on individual star particles */
 
     int StarformationOn;  /* if star formation is enabled */
     int MetalReturnOn; /* If late return of metals from AGB stars is enabled*/
@@ -175,6 +176,7 @@ set_all_global_params(ParameterSet * ps)
         All.SCgasVDisp = param_get_int(ps, "SCgasVDisp");
         All.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
         All.BlackHoleSeedStarCluster = param_get_int(ps, "BlackHoleSeedStarCluster");
+        All.BlackholeSeedSCparticle = param_get_int(ps, "BlackholeSeedSCparticle");
 
         All.StarformationOn = param_get_int(ps, "StarformationOn");
         All.MetalReturnOn = param_get_int(ps, "MetalReturnOn");
@@ -215,10 +217,13 @@ set_all_global_params(ParameterSet * ps)
                 All.BlackHoleSeedHaloBased = 0;
                 All.BlackHoleSeedGasBased = 0;
             }
-            if (All.BlackHoleOn && !(SeedInSecFOFasStarCluster || All.BlackHoleSeedHaloBased || All.BlackHoleSeedStarCluster || All.BlackHoleSeedGasBased))
+            if(All.BlackholeSeedSCparticle && !All.StarClusterOn) {
+                endrun(1, "BlackholeSeedSCparticle requires StarClusterOn=1.\n");
+            }
+            if (All.BlackHoleOn && !(SeedInSecFOFasStarCluster || All.BlackHoleSeedHaloBased || All.BlackHoleSeedStarCluster || All.BlackHoleSeedGasBased || All.BlackholeSeedSCparticle))
             {
                 endrun(1, "You try to use the code with black holes enabled,\n"
-                              "but you did not switch on any BH seeding method (SeedInSecFOFasStarCluster, BlackHoleSeedHaloBased, BlackHoleSeedStarCluster, or BlackHoleSeedGasBased).\nThis mode is not supported.\n");
+                              "but you did not switch on any BH seeding method (SeedInSecFOFasStarCluster, BlackHoleSeedHaloBased, BlackHoleSeedStarCluster, BlackHoleSeedGasBased, or BlackholeSeedSCparticle).\nThis mode is not supported.\n");
             }
         }
         All.ExcursionSetReionOn = param_get_int(ps,"ExcursionSetReionOn");
@@ -682,12 +687,16 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                     fof = fof_fof(ddecomp, 0, MPI_COMM_WORLD);
 
                 if(All.BlackHoleOn && atime >= TimeNextSeedingCheck) {
+                    int need_fof_seeding = All.BlackHoleSeedHaloBased
+                        || All.BlackHoleSeedStarCluster || All.BlackHoleSeedGasBased;
                     if(seed_in_secfof) {
                         /* Seed BH using secondary FOF catalog */
                         secondfof_seed(ddecomp, &Act, atime, &rnd, MPI_COMM_WORLD);
-                    } else {
+                    } else if(need_fof_seeding) {
                         fof_seed(&fof, &Act, atime, &rnd, NULL, NULL, MPI_COMM_WORLD);
                     }
+                    /* Seed BH from individual star particles with large SC mass */
+                    blackhole_seed_sc_particle(&Act, atime, &rnd, MPI_COMM_WORLD);
                     TimeNextSeedingCheck = atime * All.TimeBetweenSeedingSearch;
                 }
 

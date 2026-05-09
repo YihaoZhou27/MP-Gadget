@@ -75,4 +75,9 @@ void blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceT
  * index is converted in-place (primary FOF / halo / gas-based path). */
 void blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals);
 
+/* Seed black holes from individual star particles whose star cluster mass
+ * exceeds MinMscForBHseed.  Called every PM step when BlackholeSeedSCparticle=1. */
+void blackhole_seed_sc_particle(ActiveParticles * act, double atime,
+                                const RandTable * const rnd, MPI_Comm Comm);
+
 #endif

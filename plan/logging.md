@@ -183,6 +183,14 @@ Refactored seeded-group marking: `fof_seed` now optionally returns the GrNr of e
 
 ---
 
+## 2026-05-08 — Per-particle Star Cluster BH Seeding (BlackholeSeedSCparticle)
+
+**Branch:** SC_ParticleSeeding
+
+Added a new BH seeding method that creates black holes from individual star particles whose star cluster mass exceeds `MinMscForBHseed`, without requiring FOF group finding. New parameter `BlackholeSeedSCparticle` (int, default 0) controls this mode; requires `StarClusterOn=1`. The seeding runs every PM step alongside existing FOF-based seeding. Uses `StarClusterMass_sample` or `ClusterMass` depending on `StarClusterSampling`. The parent star's cluster mass is zeroed after seeding. When this is the only active seeding method, the primary FOF catalog is skipped for efficiency.
+
+---
+
 ## TODO
 
 - Allow seeding in primary FOF and secondary FOF to be on in the same run.
