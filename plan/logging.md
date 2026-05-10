@@ -207,6 +207,26 @@ Added `BHseedEveryTimestep` parameter (int, default 0). When enabled, `blackhole
 
 ---
 
+## 2026-05-10 — Add StarClusterBHDyn parameter to control SC contribution to BH dynamical mass
+
+**Branch:** StarClusterEvolution
+
+Added `StarClusterBHDyn` (int, default 1) parameter. When on (and StarClusterOn=1), star cluster mass is included in BH dynamical mass: `P.Mass = max(BHP.Mass + SC, SeedBHDynMass)`. When off, SC is excluded: `P.Mass = max(BHP.Mass, SeedBHDynMass)`. Affects seeding, accretion postprocess, drag force, and accretion tree walk mass input.
+
+**Files modified:** `blackhole.c`, `params.c`
+
+---
+
+## 2026-05-10 — Add PMstep and StarClusterMass to BH detail output
+
+**Branch:** StarClusterEvolution
+
+Added two new fields to the BH detail binary output: `int PMstep` (whether the current timestep is a PM step) and `double StarClusterMass` (the star cluster mass of the BH). Passed `is_PM` flag from `run.c` through `blackhole()` into `BHPriv`, then into the detail struct.
+
+**Files modified:** `blackhole.h`, `blackhole.c`, `bhinfo.c`, `run.c`
+
+---
+
 ## TODO
 
 - Allow seeding in primary FOF and secondary FOF to be on in the same run.

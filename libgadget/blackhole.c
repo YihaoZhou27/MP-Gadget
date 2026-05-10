@@ -57,6 +57,7 @@ struct BlackholeParams
     double MinMscForBHseed; /* Minimum star cluster mass for BH seeding */
     int BlackholeSeedSCparticle; /* If 1, seed BH from individual star particles with SC mass >= MinMscForBHseed */
     int BHseedEveryTimestep; /* If 1, seed BH from SC particles every timestep (not just PM steps). Requires BlackholeSeedSCparticle=1. */
+    int StarClusterBHDyn; /* If 1, add star cluster mass to BH dynamical mass P[i].Mass */
     /************************************************************************/
 } blackhole_params;
 
@@ -130,6 +131,7 @@ void set_blackhole_params(ParameterSet * ps)
         blackhole_params.MinMscForBHseed = param_get_double(ps, "MinMscForBHseed");
         blackhole_params.BlackholeSeedSCparticle = param_get_int(ps, "BlackholeSeedSCparticle");
         blackhole_params.BHseedEveryTimestep = param_get_int(ps, "BHseedEveryTimestep");
+        blackhole_params.StarClusterBHDyn = param_get_int(ps, "StarClusterBHDyn");
         if(blackhole_params.BHseedEveryTimestep && !blackhole_params.BlackholeSeedSCparticle)
             endrun(1, "BHseedEveryTimestep requires BlackholeSeedSCparticle=1.\n");
         if(blackhole_params.BlackholeSeedSCparticle && blackhole_params.BHseedMassScaleMsc && blackhole_params.MinMscForBHseed <= 0)
@@ -230,7 +232,7 @@ blackholes_active(const ActiveParticles * act, int ** ActiveBlackHoles, int64_t 
 }
 
 void
-blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree * tree, DomainDecomp * ddecomp, DriftKickTimes * times, RandTable * rnd, const struct UnitSystem units, FILE * FdBlackHoles, FILE * FdBlackholeDetails, size_t * bhdetailswritten)
+blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree * tree, DomainDecomp * ddecomp, DriftKickTimes * times, RandTable * rnd, const struct UnitSystem units, FILE * FdBlackHoles, FILE * FdBlackholeDetails, size_t * bhdetailswritten, int is_PM)
 {
     /* Do nothing if no black holes*/
     int64_t totbh;
@@ -277,6 +279,7 @@ blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree *
     struct BHPriv priv[1] = {0};
     priv->units = units;
     priv->rnd = rnd;
+    priv->is_PM = is_PM;
     /*************************************************************************/
     priv->atime = atime;
     priv->a3inv = 1./(atime * atime * atime);
@@ -446,7 +449,9 @@ blackhole_accretion_postprocess(int i, TreeWalk * tw)
         /*c.f.section 3.2,in http://www.tapir.caltech.edu/~phopkins/public/notes_blackholes.pdf */
         double fac = 0;
         if (blackhole_params.BH_DRAG == 1) {
-            double bh_dyn_mass = P[i].Mass - BHP(i).StarClusterMass;
+            double bh_dyn_mass = P[i].Mass;
+            if(blackhole_params.StarClusterBHDyn)
+                bh_dyn_mass -= BHP(i).StarClusterMass;
             if(bh_dyn_mass < BHP(i).Mass)
                 bh_dyn_mass = BHP(i).Mass;
             fac = BHP(i).Mdot / bh_dyn_mass;
@@ -709,7 +714,9 @@ blackhole_accretion_copy(int place, TreeWalkQueryBHAccretion * I, TreeWalk * tw)
         I->Accel[k] = P[place].FullTreeGravAccel[k] + P[place].GravPM[k] + BHP(place).DFAccel[k];
     }
     I->Hsml = P[place].Hsml;
-    I->Mass = P[place].Mass - BHP(place).StarClusterMass;
+    I->Mass = P[place].Mass;
+    if(blackhole_params.StarClusterBHDyn)
+        I->Mass -= BHP(place).StarClusterMass;
     I->BH_Mass = BHP(place).Mass;
     I->Density = BHP(place).Density;
     I->ID = P[place].ID;
@@ -1023,8 +1030,9 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
         }
         BHP(n).StarClusterMass += new_sc_mass;
         /* P.Mass will be set at the end from BHP.Mass + SC when SeedBHDynMass > 0.
-         * For SeedBHDynMass == 0, update P.Mass directly. */
-        if(blackhole_params.SeedBHDynMass <= 0)
+         * For SeedBHDynMass == 0, update P.Mass directly.
+         * Only add SC to P.Mass if StarClusterBHDyn is on. */
+        if(blackhole_params.SeedBHDynMass <= 0 && blackhole_params.StarClusterBHDyn)
             P[n].Mass += new_sc_mass;
         BHP(n).StarClusterTotalMassReturned += BH_GET_PRIV(tw)->BH_accreted_SCTotalMassReturned[PI];
     }
@@ -1050,12 +1058,15 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
             P[n].Mass += dynaccmass;
         }
     }
-    /* When SeedBHDynMass > 0, P.Mass is set directly as
-     * max(BHP.Mass + StarClusterMass, SeedBHDynMass).
+    /* When SeedBHDynMass > 0, P.Mass is set directly.
+     * If StarClusterBHDyn, P.Mass = max(BHP.Mass + StarClusterMass, SeedBHDynMass).
+     * If !StarClusterBHDyn, P.Mass = max(BHP.Mass, SeedBHDynMass).
      * This prevents artificial SeedBHDynMass mass from compounding
      * through BH mergers. */
     if(blackhole_params.SeedBHDynMass > 0) {
-        double target = BHP(n).Mass + BHP(n).StarClusterMass;
+        double target = BHP(n).Mass;
+        if(blackhole_params.StarClusterBHDyn)
+            target += BHP(n).StarClusterMass;
         if(target < blackhole_params.SeedBHDynMass)
             target = blackhole_params.SeedBHDynMass;
         P[n].Mass = target;
@@ -1235,23 +1246,29 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
             BHP(child).Mtrack = BHP(child).Mass;
         else
             BHP(child).Mtrack = P[child].Mass;
-        /* Set P.Mass = max(BHP.Mass + SC, SeedBHDynMass) */
-        double target = BHP(child).Mass + BHP(child).StarClusterMass;
+        /* Set P.Mass depending on StarClusterBHDyn:
+         * If on:  P.Mass = max(BHP.Mass + SC, SeedBHDynMass)
+         * If off: P.Mass = max(BHP.Mass, SeedBHDynMass) */
+        double target = BHP(child).Mass;
+        if(blackhole_params.StarClusterBHDyn)
+            target += BHP(child).StarClusterMass;
         if(target < blackhole_params.SeedBHDynMass)
             target = blackhole_params.SeedBHDynMass;
         P[child].Mass = target;
     } else {
         BHP(child).Mtrack = -1;
-        /* Add star cluster mass to P.Mass so it contributes to gravity. */
-        if(BHP(child).StarClusterMass > 0)
+        /* Add star cluster mass to P.Mass so it contributes to gravity,
+         * only when StarClusterBHDyn is on. */
+        if(blackhole_params.StarClusterBHDyn && BHP(child).StarClusterMass > 0)
             P[child].Mass += BHP(child).StarClusterMass;
     }
 
+    double sc_in_dyn = blackhole_params.StarClusterBHDyn ? BHP(child).StarClusterMass : 0;
     if(!spawn_from_star &&
-       (P[child].Mass - BHP(child).StarClusterMass < BHP(child).Mass ||
-        P[child].Mass - BHP(child).StarClusterMass < BHP(child).Mtrack))
+       (P[child].Mass - sc_in_dyn < BHP(child).Mass ||
+        P[child].Mass - sc_in_dyn < BHP(child).Mtrack))
         message(1, "WARNING: BH Mass (%g) for ID %ld is larger than particle mass (%g) or mtrack (%g)\n",
-                BHP(child).Mass, P[child].ID, P[child].Mass - BHP(child).StarClusterMass, BHP(child).Mtrack);
+                BHP(child).Mass, P[child].ID, P[child].Mass - sc_in_dyn, BHP(child).Mtrack);
 
     BHP(child).KineticFdbkEnergy = 0;
     BHP(child).VDisp = 0;

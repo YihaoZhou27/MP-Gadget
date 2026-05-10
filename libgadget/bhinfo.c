@@ -57,6 +57,8 @@ struct __attribute__((__packed__)) BHinfo{
     double MgasEnc;
     int KEflag;
 
+    double StarClusterMass;
+    int PMstep;
     double a;
     /* See size1 above*/
     int size2;
@@ -145,6 +147,8 @@ collect_BH_info(const int * const ActiveBlackHoles, const int64_t NumActiveBlack
         info->MgasEnc = priv->MgasEnc[PI];
         info->KEflag = priv->KEflag[PI];
 
+        info->StarClusterMass = BHManager[PI].StarClusterMass;
+        info->PMstep = priv->is_PM;
         info->a = priv->atime;
     }
 

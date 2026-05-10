@@ -46,6 +46,7 @@ struct BHPriv {
     int64_t * N_BH_swallowed;
     struct kick_factor_data * kf;
     RandTable * rnd;
+    int is_PM; /* Whether this timestep is a PM step */
 };
 #define BH_GET_PRIV(tw) ((struct BHPriv *) (tw->priv))
 
@@ -65,7 +66,7 @@ void set_blackhole_params(ParameterSet * ps);
  * It will be compared to the current time and updated after seeding takes place.
  * tree is a valid ForceTree.
  */
-void blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree * tree, DomainDecomp * ddecomp, DriftKickTimes * times, RandTable * rnd, const struct UnitSystem units, FILE * FdBlackHoles, FILE * FdBlackholeDetails, size_t *bhdetailswritten);
+void blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree * tree, DomainDecomp * ddecomp, DriftKickTimes * times, RandTable * rnd, const struct UnitSystem units, FILE * FdBlackHoles, FILE * FdBlackholeDetails, size_t *bhdetailswritten, int is_PM);
 
 /* Make a black hole from the particle at index. Random number generator used
  * for the initial mass drawn from a power law.
