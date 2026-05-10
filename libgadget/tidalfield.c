@@ -111,6 +111,21 @@ tidal_field_store_eigenvalues(int i, const MyFloat tensor[6], double G)
     SphP[PI].TidalFieldEigenvalues[2] = eig[2];
 }
 
+/* Compute tidal field strength: Frobenius norm of eigenvalues = sqrt(sum eig_k^2) */
+double
+tidal_field_norm(const MyFloat tensor[6], double G)
+{
+    double T[6];
+    int k;
+    for(k = 0; k < 6; k++)
+        T[k] = tensor[k] * G;
+
+    double eig[3];
+    eigen_symmetric_3x3(T[0], T[1], T[2], T[3], T[4], T[5], eig);
+
+    return sqrt(eig[0] * eig[0] + eig[1] * eig[1] + eig[2] * eig[2]);
+}
+
 /* Print trace diagnostics: Tr(T_total) should equal 4*pi*G*rho (Poisson equation).
  * The total trace is the sum of tree (short-range) and PM (long-range) contributions. */
 void

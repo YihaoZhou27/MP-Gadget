@@ -76,6 +76,8 @@ struct bh_particle_data {
     float StarClusterLastEnrichmentMyr;    /*!< Last enrichment time in Myr since formation */
     MyFloat StarClusterTotalMassReturned;  /*!< Cumulative mass returned to gas from star cluster */
 
+    MyFloat TidalTensorPM[6]; /*!< PM long-range tidal tensor: xx, yy, zz, xy, xz, yz */
+    MyFloat TidalFieldStrength; /*!< Tidal field strength: Frobenius norm of tidal tensor eigenvalues */
 };
 
 /*Data for each star particle*/

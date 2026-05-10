@@ -58,6 +58,7 @@ struct BlackholeParams
     int BlackholeSeedSCparticle; /* If 1, seed BH from individual star particles with SC mass >= MinMscForBHseed */
     int BHseedEveryTimestep; /* If 1, seed BH from SC particles every timestep (not just PM steps). Requires BlackholeSeedSCparticle=1. */
     int StarClusterBHDyn; /* If 1, add star cluster mass to BH dynamical mass P[i].Mass */
+    int BlackholeTidalField; /* If 1, compute tidal field strength for BH particles every timestep */
     /************************************************************************/
 } blackhole_params;
 
@@ -132,6 +133,9 @@ void set_blackhole_params(ParameterSet * ps)
         blackhole_params.BlackholeSeedSCparticle = param_get_int(ps, "BlackholeSeedSCparticle");
         blackhole_params.BHseedEveryTimestep = param_get_int(ps, "BHseedEveryTimestep");
         blackhole_params.StarClusterBHDyn = param_get_int(ps, "StarClusterBHDyn");
+        blackhole_params.BlackholeTidalField = param_get_int(ps, "BlackholeTidalField");
+        if(blackhole_params.BlackholeTidalField && param_get_int(ps, "SplitGravityTimestepsOn"))
+            endrun(1, "BlackholeTidalField requires SplitGravityTimestepsOn=0 because hierarchical gravity trees only contain active particles, producing incomplete tidal tensors.\n");
         if(blackhole_params.BHseedEveryTimestep && !blackhole_params.BlackholeSeedSCparticle)
             endrun(1, "BHseedEveryTimestep requires BlackholeSeedSCparticle=1.\n");
         if(blackhole_params.BlackholeSeedSCparticle && blackhole_params.BHseedMassScaleMsc && blackhole_params.MinMscForBHseed <= 0)
@@ -141,6 +145,12 @@ void set_blackhole_params(ParameterSet * ps)
     MPI_Bcast(&blackhole_params, sizeof(struct BlackholeParams), MPI_BYTE, 0, MPI_COMM_WORLD);
 
     set_blackhole_dynfric_params(ps);
+}
+
+int
+get_bh_tidalfield_on(void)
+{
+    return blackhole_params.BlackholeTidalField;
 }
 
 /* accretion routines */
@@ -1232,6 +1242,8 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
     }
     BHP(child).DF_SurroundingRmsVel = 0;
     BHP(child).DF_SurroundingDensity = 0;
+    memset(BHP(child).TidalTensorPM, 0, sizeof(BHP(child).TidalTensorPM));
+    BHP(child).TidalFieldStrength = 0;
     BHP(child).JumpToMinPot = 0;
     BHP(child).CountProgs = 1;
 

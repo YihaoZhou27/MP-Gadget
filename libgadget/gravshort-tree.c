@@ -15,6 +15,7 @@
 #include "timestep.h"
 #include "gravshort.h"
 #include "walltime.h"
+#include "blackhole.h"
 
 /*! \file gravtree.c
  *  \brief main driver routines for gravitational (short-range) force computation
@@ -114,7 +115,9 @@ grav_short_tree(const ActiveParticles * act, PetaPM * pm, ForceTree * tree, MyFl
      * Only compute on full-particle trees (PM steps) where all source particles
      * are present — hierarchical sub-step trees contain only active particles
      * and would produce incomplete tidal tensors. */
-    if(get_tidalfield_on() && tree->full_particle_tree_flag) {
+    priv.TidalGas = get_tidalfield_on() && tree->full_particle_tree_flag;
+    priv.TidalBH = get_bh_tidalfield_on() && tree->full_particle_tree_flag;
+    if(priv.TidalGas || priv.TidalBH) {
         priv.TidalTensorStore = (MyFloat (*)[6]) mymalloc2("TidalTensor", PartManager->NumPart * sizeof(priv.TidalTensorStore[0]));
         memset(priv.TidalTensorStore, 0, PartManager->NumPart * sizeof(priv.TidalTensorStore[0]));
     } else {
@@ -337,7 +340,9 @@ int force_treeev_shortrange(TreeWalkQueryGravShort * input,
     const int TreeUseBH = TreeParams.TreeUseBH;
     double BHOpeningAngle2 = TreeParams.BHOpeningAngle * TreeParams.BHOpeningAngle;
     /* Whether to accumulate tidal tensor for this particle */
-    const int do_tidal = (GRAV_GET_PRIV(lv->tw)->TidalTensorStore != NULL) && (input->Type == 0);
+    const int do_tidal = (GRAV_GET_PRIV(lv->tw)->TidalTensorStore != NULL) &&
+        ((GRAV_GET_PRIV(lv->tw)->TidalGas && input->Type == 0) ||
+         (GRAV_GET_PRIV(lv->tw)->TidalBH && input->Type == 5));
     /* Enforce a maximum opening angle even for relative acceleration criterion, to avoid
      * pathological cases. Default value is 0.9, from Volker Springel.*/
     if(TreeUseBH == 0)

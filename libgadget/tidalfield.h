@@ -22,6 +22,12 @@ int get_tidalfield_on(void);
  * G: Newton's constant in internal units. */
 void tidal_field_store_eigenvalues(int i, const MyFloat tensor[6], double G);
 
+/* Compute tidal field strength (Frobenius norm of eigenvalues) from a tidal tensor.
+ * tensor: 6-component symmetric tensor (xx, yy, zz, xy, xz, yz) without the G factor.
+ * G: Newton's constant in internal units.
+ * Returns sqrt(sum of eigenvalues^2). */
+double tidal_field_norm(const MyFloat tensor[6], double G);
+
 /* Print trace diagnostics after the combined gravity+tidal treewalk.
  * TensorStore: per-particle 6-component tidal tensor (without G factor).
  * G: Newton's constant in internal units. */

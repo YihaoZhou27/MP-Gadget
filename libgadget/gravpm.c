@@ -17,6 +17,7 @@
 #include "neutrinos_lra.h"
 #include "tidalfield.h"
 #include "slotsmanager.h"
+#include "blackhole.h"
 
 static int pm_mark_region_for_node(int startno, int rid, int * RegionInd, const ForceTree * tt);
 static void convert_node_to_region(PetaPM * pm, PetaPMRegion * r, struct NODE * Nodes);
@@ -72,30 +73,31 @@ static void tidal_yz_transfer(PetaPM * pm, int64_t k2, int kpos[3], pfft_complex
 }
 
 /* --- PM tidal tensor readout functions ---
- * Only accumulate for gas particles (Type == 0). */
+ * Accumulate for gas (Type 0) if GasTidalField on,
+ * and BH (Type 5) if BlackholeTidalField on. */
+static void readout_tidal_component(int i, int comp, double value) {
+    if(P[i].Type == 0 && get_tidalfield_on())
+        SphP[P[i].PI].TidalTensorPM[comp] += value;
+    else if(P[i].Type == 5 && get_bh_tidalfield_on())
+        BhP[P[i].PI].TidalTensorPM[comp] += value;
+}
 static void readout_tidal_xx(PetaPM * pm, int i, double * mesh, double weight) {
-    if(P[i].Type != 0) return;
-    SphP[P[i].PI].TidalTensorPM[0] += weight * mesh[0];
+    readout_tidal_component(i, 0, weight * mesh[0]);
 }
 static void readout_tidal_yy(PetaPM * pm, int i, double * mesh, double weight) {
-    if(P[i].Type != 0) return;
-    SphP[P[i].PI].TidalTensorPM[1] += weight * mesh[0];
+    readout_tidal_component(i, 1, weight * mesh[0]);
 }
 static void readout_tidal_zz(PetaPM * pm, int i, double * mesh, double weight) {
-    if(P[i].Type != 0) return;
-    SphP[P[i].PI].TidalTensorPM[2] += weight * mesh[0];
+    readout_tidal_component(i, 2, weight * mesh[0]);
 }
 static void readout_tidal_xy(PetaPM * pm, int i, double * mesh, double weight) {
-    if(P[i].Type != 0) return;
-    SphP[P[i].PI].TidalTensorPM[3] += weight * mesh[0];
+    readout_tidal_component(i, 3, weight * mesh[0]);
 }
 static void readout_tidal_xz(PetaPM * pm, int i, double * mesh, double weight) {
-    if(P[i].Type != 0) return;
-    SphP[P[i].PI].TidalTensorPM[4] += weight * mesh[0];
+    readout_tidal_component(i, 4, weight * mesh[0]);
 }
 static void readout_tidal_yz(PetaPM * pm, int i, double * mesh, double weight) {
-    if(P[i].Type != 0) return;
-    SphP[P[i].PI].TidalTensorPM[5] += weight * mesh[0];
+    readout_tidal_component(i, 5, weight * mesh[0]);
 }
 
 static PetaPMRegion * _prepare(PetaPM * pm, PetaPMParticleStruct * pstruct, void * userdata, int * Nregions);
@@ -145,7 +147,7 @@ gravpm_force(PetaPM * pm, DomainDecomp * ddecomp, Cosmology * CP, double Time, d
         pstruct.active = &hybrid_nu_gravpm_is_active;
 
     int i;
-    int tidal_on = get_tidalfield_on();
+    int tidal_on = get_tidalfield_on() || get_bh_tidalfield_on();
 
     #pragma omp parallel for
     for(i = 0; i < PartManager->NumPart; i++)
@@ -153,11 +155,18 @@ gravpm_force(PetaPM * pm, DomainDecomp * ddecomp, Cosmology * CP, double Time, d
         P[i].GravPM[0] = P[i].GravPM[1] = P[i].GravPM[2] = 0;
     }
 
-    /* Initialize PM tidal tensor storage for gas particles */
+    /* Initialize PM tidal tensor storage for gas and BH particles */
     if(tidal_on) {
-        #pragma omp parallel for
-        for(i = 0; i < SlotsManager->info[0].size; i++)
-            memset(SphP[i].TidalTensorPM, 0, sizeof(SphP[i].TidalTensorPM));
+        if(get_tidalfield_on()) {
+            #pragma omp parallel for
+            for(i = 0; i < SlotsManager->info[0].size; i++)
+                memset(SphP[i].TidalTensorPM, 0, sizeof(SphP[i].TidalTensorPM));
+        }
+        if(get_bh_tidalfield_on()) {
+            #pragma omp parallel for
+            for(i = 0; i < SlotsManager->info[5].size; i++)
+                memset(BhP[i].TidalTensorPM, 0, sizeof(BhP[i].TidalTensorPM));
+        }
     }
 
     /* Tree freed in PM*/

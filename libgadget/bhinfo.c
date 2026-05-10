@@ -59,6 +59,7 @@ struct __attribute__((__packed__)) BHinfo{
 
     double StarClusterMass;
     int PMstep;
+    float TidalFieldStrength;
     double a;
     /* See size1 above*/
     int size2;
@@ -149,6 +150,7 @@ collect_BH_info(const int * const ActiveBlackHoles, const int64_t NumActiveBlack
 
         info->StarClusterMass = BHManager[PI].StarClusterMass;
         info->PMstep = priv->is_PM;
+        info->TidalFieldStrength = BHManager[PI].TidalFieldStrength;
         info->a = priv->atime;
     }
 
