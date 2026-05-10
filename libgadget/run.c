@@ -80,6 +80,7 @@ static struct run_params
     int BlackHoleSeedGasBased; /* if the bh seeding is gas-based */
     int BlackHoleSeedStarCluster; /* if the bh seeding is star-cluster-based */
     int BlackholeSeedSCparticle; /* if the bh seeding is based on individual star particles */
+    int BHseedEveryTimestep; /* if BH seeding from SC particles runs every timestep */
 
     int StarformationOn;  /* if star formation is enabled */
     int MetalReturnOn; /* If late return of metals from AGB stars is enabled*/
@@ -177,6 +178,7 @@ set_all_global_params(ParameterSet * ps)
         All.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
         All.BlackHoleSeedStarCluster = param_get_int(ps, "BlackHoleSeedStarCluster");
         All.BlackholeSeedSCparticle = param_get_int(ps, "BlackholeSeedSCparticle");
+        All.BHseedEveryTimestep = param_get_int(ps, "BHseedEveryTimestep");
 
         All.StarformationOn = param_get_int(ps, "StarformationOn");
         All.MetalReturnOn = param_get_int(ps, "MetalReturnOn");
@@ -695,8 +697,11 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                     } else if(need_fof_seeding) {
                         fof_seed(&fof, &Act, atime, &rnd, NULL, NULL, MPI_COMM_WORLD);
                     }
-                    /* Seed BH from individual star particles with large SC mass */
-                    blackhole_seed_sc_particle(&Act, atime, &rnd, MPI_COMM_WORLD);
+                    /* Seed BH from individual star particles with large SC mass.
+                     * When BHseedEveryTimestep is on, this is handled after
+                     * star formation instead so it runs every timestep. */
+                    if(!All.BHseedEveryTimestep)
+                        blackhole_seed_sc_particle(&Act, atime, &rnd, MPI_COMM_WORLD);
                     TimeNextSeedingCheck = atime * All.TimeBetweenSeedingSearch;
                 }
 
@@ -734,6 +739,12 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
             /**** radiative cooling and star formation *****/
             if(All.CoolingOn)
                 cooling_and_starformation(&Act, atime, get_dloga_for_bin(times.mintimebin, times.Ti_Current), &gasTree, GravAccel, ddecomp, &All.CP, GradRho_mag, &rnd, fds.FdSfr);
+
+            /* When BHseedEveryTimestep is on, seed BH from SC particles every
+             * timestep right after star formation.  This replaces the PM-step
+             * call above so that newly formed stars are caught immediately. */
+            if(All.BlackHoleOn && All.BHseedEveryTimestep)
+                blackhole_seed_sc_particle(&Act, atime, &rnd, MPI_COMM_WORLD);
         }
         /* Gas+Star velocity dispersion: runs every PM step when SCgasVDisp is enabled.
          * Reuses the existing gasTree for gas neighbors; builds a small star-only tree internally. */

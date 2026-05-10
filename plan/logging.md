@@ -191,6 +191,14 @@ Added a new BH seeding method that creates black holes from individual star part
 
 ---
 
+## 2026-05-09 — Every-timestep BH Seeding from SC Particles (BHseedEveryTimestep)
+
+**Branch:** SC_ParticleSeeding
+
+Added `BHseedEveryTimestep` parameter (int, default 0). When enabled, `blackhole_seed_sc_particle` is moved from the PM-step seeding block to after star formation, so it runs every timestep. This catches newly formed stars whose cluster mass exceeds `MinMscForBHseed` immediately. Requires `BlackholeSeedSCparticle=1`. All other seeding methods (FOF-based, gas-based, etc.) remain PM-only.
+
+---
+
 ## TODO
 
 - Allow seeding in primary FOF and secondary FOF to be on in the same run.

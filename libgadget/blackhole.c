@@ -56,6 +56,7 @@ struct BlackholeParams
     int BHseedMassScaleMsc; /* When star-cluster bh seeding formation is enabled, whether the seed mass is scaled by the star cluster mass. If so, parameter SeedBlackHoleMass is in unit of Msc. If not, it is in mass unit. */
     double MinMscForBHseed; /* Minimum star cluster mass for BH seeding */
     int BlackholeSeedSCparticle; /* If 1, seed BH from individual star particles with SC mass >= MinMscForBHseed */
+    int BHseedEveryTimestep; /* If 1, seed BH from SC particles every timestep (not just PM steps). Requires BlackholeSeedSCparticle=1. */
     /************************************************************************/
 } blackhole_params;
 
@@ -128,6 +129,9 @@ void set_blackhole_params(ParameterSet * ps)
         blackhole_params.BHseedMassScaleMsc = param_get_int(ps, "BHseedMassScaleMsc");
         blackhole_params.MinMscForBHseed = param_get_double(ps, "MinMscForBHseed");
         blackhole_params.BlackholeSeedSCparticle = param_get_int(ps, "BlackholeSeedSCparticle");
+        blackhole_params.BHseedEveryTimestep = param_get_int(ps, "BHseedEveryTimestep");
+        if(blackhole_params.BHseedEveryTimestep && !blackhole_params.BlackholeSeedSCparticle)
+            endrun(1, "BHseedEveryTimestep requires BlackholeSeedSCparticle=1.\n");
         if(blackhole_params.BlackholeSeedSCparticle && blackhole_params.BHseedMassScaleMsc && blackhole_params.MinMscForBHseed <= 0)
             endrun(1, "MinMscForBHseed must be > 0 when BlackholeSeedSCparticle and BHseedMassScaleMsc are enabled.\n");
         /***********************************************************************************/
@@ -1252,7 +1256,7 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
 
 /* Seed black holes from individual star particles whose star cluster mass
  * exceeds MinMscForBHseed.  Called every PM step when BlackholeSeedSCparticle
- * is enabled.  A new BH particle is spawned at the star's position (same
+ * is enabled, or every timestep (after star formation) when BHseedEveryTimestep=1.  A new BH particle is spawned at the star's position (same
  * mechanism as SeedInSecFOFasStarCluster) and the star's ClusterMass and
  * StarClusterMass_sample are zeroed out. */
 void
