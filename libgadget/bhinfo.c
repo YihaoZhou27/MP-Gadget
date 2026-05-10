@@ -130,10 +130,9 @@ collect_BH_info(const int * const ActiveBlackHoles, const int64_t NumActiveBlack
         info->CountProgs = BHManager[PI].CountProgs;
         info->Swallowed =  pp[p_i].Swallowed;
         /************************************************************************************************/
-        /* When SeedBHDynMass is larger than gas particle mass, we have three mass tracer of blackhole. */
+        /* When SeedBHDynMass > 0, P[p_i].Mass = max(BHP.Mass + StarClusterMass, SeedBHDynMass).       */
         /* BHP(p_i).Mass : intrinsic mass of BH, accreted every (active) time step.                     */
         /* P[p_i].Mass :  Dynamic mass of BH, used for gravitational interaction.                       */
-        /*                Starts to accrete gas particle when BHP(p_i).Mass > SeedBHDynMass             */
         /* BHP(p_i).Mtrack: Initialized as gas particle mass, and is capped at SeedBHDynMass,           */
         /*                 it traces BHP(p_i).Mass by swallowing gas when BHP(p_i).Mass < SeedBHDynMass */
         /************************************************************************************************/

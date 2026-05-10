@@ -1,5 +1,13 @@
 # MP-Gadget Development Log
 
+## 2026-05-10 — Fix BH dynamical mass (P.Mass) to track BHP.Mass + StarClusterMass
+
+**Branch:** SC_ParticleSeeding
+
+Changed P.Mass for blackholes to be a derived quantity: `P.Mass = max(BHP.Mass + StarClusterMass, SeedBHDynMass)`. Previously, P.Mass was tracked independently through stochastic gas swallowing and accumulated artificial SeedBHDynMass mass through BH mergers (each merged post-seed-regime BH contributed ~SeedBHDynMass to the survivor's P.Mass while only adding tiny BHP.Mass). With the new approach, P.Mass is set directly at the end of each accretion postprocess step, preventing the compounding. Also removed the `max(I->Mass, BHP.Mass)` clamp in `blackhole_accretion_copy` that was preventing gas swallowing after seed regime.
+
+**Files modified:** `blackhole.c`, `bhinfo.c`
+
 ## 2026-04-21 — Gas and Stellar Velocity Dispersion Module
 
 **Branch:** StarCluster
