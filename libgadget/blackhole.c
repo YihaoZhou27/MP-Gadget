@@ -1259,28 +1259,45 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
 
 /* Seed black holes from individual star particles whose star cluster mass
  * exceeds MinMscForBHseed.  Called every PM step when BlackholeSeedSCparticle
- * is enabled, or every timestep (after star formation) when BHseedEveryTimestep=1.  A new BH particle is spawned at the star's position (same
- * mechanism as SeedInSecFOFasStarCluster) and the star's ClusterMass and
- * StarClusterMass_sample are zeroed out. */
+ * is enabled, or every timestep (after star formation) when BHseedEveryTimestep=1.
+ * If NewStars/NumNewStar are provided (non-NULL, > 0), only those particle
+ * indices are checked (newly formed stars from this timestep).  Otherwise
+ * falls back to a full scan of all type-4 particles (PM-step path). */
 void
 blackhole_seed_sc_particle(ActiveParticles * act, double atime,
-                           const RandTable * const rnd, MPI_Comm Comm)
+                           const RandTable * const rnd, MPI_Comm Comm,
+                           int * NewStars, int64_t NumNewStar)
 {
     if(!blackhole_params.BlackholeSeedSCparticle)
         return;
 
     int64_t i;
     double MinMsc = blackhole_params.MinMscForBHseed;
+    const int use_newstars = (NewStars != NULL && NumNewStar > 0);
 
     /* First pass: count how many stars qualify for seeding on this rank. */
     int Nseed = 0;
-    for(i = 0; i < PartManager->NumPart; i++) {
-        if(P[i].Type != 4)
-            continue;
-        MyFloat sc_mass = blackhole_params.StarClusterSampling ?
-            STARP(i).StarClusterMass_sample : STARP(i).ClusterMass;
-        if(sc_mass >= MinMsc)
-            Nseed++;
+    if(use_newstars) {
+        /* Fast path: only check newly formed stars. */
+        for(i = 0; i < NumNewStar; i++) {
+            int pi = NewStars[i];
+            if(P[pi].Type != 4)
+                continue;
+            MyFloat sc_mass = blackhole_params.StarClusterSampling ?
+                STARP(pi).StarClusterMass_sample : STARP(pi).ClusterMass;
+            if(sc_mass >= MinMsc)
+                Nseed++;
+        }
+    } else {
+        /* Fallback: full scan over all particles. */
+        for(i = 0; i < PartManager->NumPart; i++) {
+            if(P[i].Type != 4)
+                continue;
+            MyFloat sc_mass = blackhole_params.StarClusterSampling ?
+                STARP(i).StarClusterMass_sample : STARP(i).ClusterMass;
+            if(sc_mass >= MinMsc)
+                Nseed++;
+        }
     }
 
     int Nseed_total;
@@ -1325,26 +1342,30 @@ blackhole_seed_sc_particle(ActiveParticles * act, double atime,
      * NumPart grows as we spawn, so iterate only over the original range. */
     int64_t NumPart_before = PartManager->NumPart;
     int n_seeded = 0;
-    for(i = 0; i < NumPart_before; i++) {
-        if(P[i].Type != 4)
+
+    /* Determine iteration range: NewStars list or full particle array. */
+    const int64_t niter = use_newstars ? NumNewStar : NumPart_before;
+    for(i = 0; i < niter; i++) {
+        int pi = use_newstars ? NewStars[i] : (int) i;
+        if(P[pi].Type != 4)
             continue;
         MyFloat sc_mass = blackhole_params.StarClusterSampling ?
-            STARP(i).StarClusterMass_sample : STARP(i).ClusterMass;
+            STARP(pi).StarClusterMass_sample : STARP(pi).ClusterMass;
         if(sc_mass < MinMsc)
             continue;
 
         /* Compute mass-weighted metallicity from the star particle's own metals. */
-        MyFloat sc_metallicity = STARP(i).Metallicity;
+        MyFloat sc_metallicity = STARP(pi).Metallicity;
         float sc_metals[NMETALS];
         int j;
         for(j = 0; j < NMETALS; j++)
-            sc_metals[j] = STARP(i).Metals[j];
+            sc_metals[j] = STARP(pi).Metals[j];
 
-        blackhole_make_one(i, atime, rnd, 1, sc_mass, sc_metallicity, sc_metals);
+        blackhole_make_one(pi, atime, rnd, 1, sc_mass, sc_metallicity, sc_metals);
 
         /* Zero the star cluster mass on the parent star. */
-        STARP(i).ClusterMass = 0;
-        STARP(i).StarClusterMass_sample = 0;
+        STARP(pi).ClusterMass = 0;
+        STARP(pi).StarClusterMass_sample = 0;
         n_seeded++;
     }
 

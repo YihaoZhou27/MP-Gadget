@@ -207,6 +207,14 @@ Added `BHseedEveryTimestep` parameter (int, default 0). When enabled, `blackhole
 
 ---
 
+## 2026-05-10 — Optimize BH seeding from SC particles: use NewStars list
+
+**Branch:** SC_ParticleSeeding
+
+When `BHseedEveryTimestep` is enabled, `blackhole_seed_sc_particle` now receives the `NewStars` list from `cooling_and_starformation` and only checks newly formed stars, instead of scanning all particles every timestep. Since star cluster mass is fixed at formation, only newly formed stars can qualify for seeding. The PM-step fallback path (when `BHseedEveryTimestep=0`) retains the full scan.
+
+---
+
 ## TODO
 
 - Allow seeding in primary FOF and secondary FOF to be on in the same run.

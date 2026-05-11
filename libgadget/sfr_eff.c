@@ -206,7 +206,7 @@ void set_sfr_params(ParameterSet * ps)
 
 /* cooling and star formation routine.*/
 void
-cooling_and_starformation(ActiveParticles * act, double Time, double dloga, ForceTree * tree, struct grav_accel_store GravAccel, DomainDecomp * ddecomp, Cosmology *CP, MyFloat * GradRho, RandTable * rnd, FILE * FdSfr)
+cooling_and_starformation(ActiveParticles * act, double Time, double dloga, ForceTree * tree, struct grav_accel_store GravAccel, DomainDecomp * ddecomp, Cosmology *CP, MyFloat * GradRho, RandTable * rnd, FILE * FdSfr, int **NewStars_out, int64_t *NumNewStar_out)
 {
     /*This is a queue for the new stars and their parents, so we can reallocate the slots after the main cooling loop.*/
     gadget_thread_arrays NewStarThread = {0}, NewParentThread = {0}, MaybeWindThread = {0};
@@ -414,7 +414,15 @@ cooling_and_starformation(ActiveParticles * act, double Time, double dloga, Forc
     /* Now apply the wind model using the list of new stars.*/
     if(sfr_params.WindOn && !winds_are_subgrid())
         winds_and_feedback(NewStars, NumNewStar, Time, rnd, tree, ddecomp);
-    myfree(NewStars);
+
+    /* Return the NewStars list to the caller if requested (e.g. for BH
+     * seeding from newly formed SC particles), otherwise free it here. */
+    if(NewStars_out && NumNewStar_out) {
+        *NewStars_out = NewStars;
+        *NumNewStar_out = NumNewStar;
+    } else {
+        myfree(NewStars);
+    }
 }
 
 /* Get enough memory for new star slots. This may be excessively slow! Don't do it too often.
