@@ -81,8 +81,12 @@ void blackhole_make_one(int index, const double atime, const RandTable * const r
 
 /* Seed black holes from individual star particles whose star cluster mass
  * exceeds MinMscForBHseed.  Called every PM step when BlackholeSeedSCparticle=1,
- * or every timestep (after star formation) when BHseedEveryTimestep=1. */
+ * or every timestep (after star formation) when BHseedEveryTimestep=1.
+ * If NewStars/NumNewStar are provided (non-NULL, > 0), only those particle
+ * indices are checked (newly formed stars).  Otherwise falls back to a full
+ * scan of all type-4 particles. */
 void blackhole_seed_sc_particle(ActiveParticles * act, double atime,
-                                const RandTable * const rnd, MPI_Comm Comm);
+                                const RandTable * const rnd, MPI_Comm Comm,
+                                int * NewStars, int64_t NumNewStar);
 
 #endif

@@ -234,6 +234,11 @@ Added two new fields to the BH detail binary output: `int PMstep` (whether the c
 Added `BlackholeTidalField` parameter (int, default 0). When enabled, computes the gravitational tidal tensor for active BH particles every timestep by reusing the existing gravity tree walk infrastructure. The PM (long-range) tidal tensor is stored on `bh_particle_data.TidalTensorPM[6]` and updated every PM step; the tree (short-range) part is accumulated during `grav_short_tree()` and combined with PM in postprocessing. Tidal field strength is the Frobenius norm of eigenvalues, stored as `BhP.TidalFieldStrength` and recorded in BH detail files. Requires `SplitGravityTimestepsOn=0` (hierarchical gravity trees only contain active particles, producing incomplete tidal tensors). Independent of `GasTidalField`.
 
 **Files modified:** `params.c`, `blackhole.h`, `blackhole.c`, `slotsmanager.h`, `gravpm.c`, `gravshort.h`, `gravshort-tree.c`, `tidalfield.h`, `tidalfield.c`, `bhinfo.c`
+## 2026-05-10 — Optimize BH seeding from SC particles: use NewStars list
+
+**Branch:** SC_ParticleSeeding
+
+When `BHseedEveryTimestep` is enabled, `blackhole_seed_sc_particle` now receives the `NewStars` list from `cooling_and_starformation` and only checks newly formed stars, instead of scanning all particles every timestep. Since star cluster mass is fixed at formation, only newly formed stars can qualify for seeding. The PM-step fallback path (when `BHseedEveryTimestep=0`) retains the full scan.
 
 ---
 

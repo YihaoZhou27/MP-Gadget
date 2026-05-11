@@ -701,7 +701,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                      * When BHseedEveryTimestep is on, this is handled after
                      * star formation instead so it runs every timestep. */
                     if(!All.BHseedEveryTimestep)
-                        blackhole_seed_sc_particle(&Act, atime, &rnd, MPI_COMM_WORLD);
+                        blackhole_seed_sc_particle(&Act, atime, &rnd, MPI_COMM_WORLD, NULL, 0);
                     TimeNextSeedingCheck = atime * All.TimeBetweenSeedingSearch;
                 }
 
@@ -737,14 +737,24 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                 blackhole(&Act, atime, &All.CP, &gasTree, ddecomp, &times, &rnd, units, fds.FdBlackHoles, fds.FdBlackholeDetails, &fds.TotalBHDetailsBytesWritten, is_PM);
             }
             /**** radiative cooling and star formation *****/
-            if(All.CoolingOn)
-                cooling_and_starformation(&Act, atime, get_dloga_for_bin(times.mintimebin, times.Ti_Current), &gasTree, GravAccel, ddecomp, &All.CP, GradRho_mag, &rnd, fds.FdSfr);
+            int *SFR_NewStars = NULL;
+            int64_t SFR_NumNewStar = 0;
+            if(All.CoolingOn) {
+                /* When BHseedEveryTimestep is on, retrieve the NewStars list
+                 * so we can seed BHs from newly formed stars without scanning
+                 * all particles. */
+                int **ns_out = (All.BlackHoleOn && All.BHseedEveryTimestep) ? &SFR_NewStars : NULL;
+                int64_t *nns_out = (All.BlackHoleOn && All.BHseedEveryTimestep) ? &SFR_NumNewStar : NULL;
+                cooling_and_starformation(&Act, atime, get_dloga_for_bin(times.mintimebin, times.Ti_Current), &gasTree, GravAccel, ddecomp, &All.CP, GradRho_mag, &rnd, fds.FdSfr, ns_out, nns_out);
+            }
 
             /* When BHseedEveryTimestep is on, seed BH from SC particles every
-             * timestep right after star formation.  This replaces the PM-step
-             * call above so that newly formed stars are caught immediately. */
+             * timestep right after star formation, using only the newly formed
+             * stars instead of scanning all particles. */
             if(All.BlackHoleOn && All.BHseedEveryTimestep)
-                blackhole_seed_sc_particle(&Act, atime, &rnd, MPI_COMM_WORLD);
+                blackhole_seed_sc_particle(&Act, atime, &rnd, MPI_COMM_WORLD, SFR_NewStars, SFR_NumNewStar);
+            if(SFR_NewStars)
+                myfree(SFR_NewStars);
         }
         /* Gas+Star velocity dispersion: runs every PM step when SCgasVDisp is enabled.
          * Reuses the existing gasTree for gas neighbors; builds a small star-only tree internally. */
@@ -949,7 +959,7 @@ runfof(const int RestartSnapNum, const inttime_t Ti_Current, const struct header
         struct grav_accel_store gg = {0};
         /* Cooling is just for the star formation rate, so does not actually use the random table*/
         RandTable rnd = set_random_numbers(All.RandomSeed, RNDTABLE);
-        cooling_and_starformation(&Act, header->TimeSnapshot, 0, &Tree, gg, ddecomp, &All.CP, GradRho, &rnd, NULL);
+        cooling_and_starformation(&Act, header->TimeSnapshot, 0, &Tree, gg, ddecomp, &All.CP, GradRho, &rnd, NULL, NULL, NULL);
         free_random_numbers(&rnd);
 
         if(GradRho)
