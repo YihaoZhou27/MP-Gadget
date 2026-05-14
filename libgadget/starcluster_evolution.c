@@ -21,6 +21,7 @@
 #include "treewalk.h"
 #include "metal_return.h"
 #include "starcluster_evolution.h"
+#include "blackhole.h"
 #include "densitykernel.h"
 #include "density.h"
 #include "cosmology.h"
@@ -371,9 +372,16 @@ sc_metal_postprocess(int place, TreeWalk * tw)
     int pi = P[place].PI;
     MyFloat returned = SC_GET_PRIV(tw)->SC_MassReturn[pi];
 
-    /* Decrease star cluster mass and particle mass */
+    /* Decrease star cluster mass. Recompute P.Mass only when
+     * StarClusterBHDyn=1 (SC mass is part of the dynamical mass). */
     BHP(place).StarClusterMass -= returned;
-    P[place].Mass -= returned;
+    if(get_starcluster_bhdyn_on()) {
+        double target = BHP(place).Mtrack + BHP(place).StarClusterMass;
+        double SeedBHDynMass = get_bh_seed_dyn_mass();
+        if(target < SeedBHDynMass)
+            target = SeedBHDynMass;
+        P[place].Mass = target;
+    }
     BHP(place).StarClusterTotalMassReturned += returned;
 
     /* Update last enrichment time */

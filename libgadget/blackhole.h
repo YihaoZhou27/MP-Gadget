@@ -64,6 +64,12 @@ void set_blackhole_params(ParameterSet * ps);
 /* Returns 1 if tidal field computation is enabled for BH particles */
 int get_bh_tidalfield_on(void);
 
+/* Returns the SeedBHDynMass parameter value */
+double get_bh_seed_dyn_mass(void);
+
+/* Returns 1 if StarClusterBHDyn is enabled (SC mass included in P.Mass) */
+int get_starcluster_bhdyn_on(void);
+
 /* Does the black hole feedback and accretion.
  * TimeNextSeedingCheck is the time of the BH next seeding check.
  * It will be compared to the current time and updated after seeding takes place.

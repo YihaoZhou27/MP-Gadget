@@ -57,7 +57,7 @@ struct BlackholeParams
     double MinMscForBHseed; /* Minimum star cluster mass for BH seeding */
     int BlackholeSeedSCparticle; /* If 1, seed BH from individual star particles with SC mass >= MinMscForBHseed */
     int BHseedEveryTimestep; /* If 1, seed BH from SC particles every timestep (not just PM steps). Requires BlackholeSeedSCparticle=1. */
-    int StarClusterBHDyn; /* If 1, add star cluster mass to BH dynamical mass P[i].Mass */
+    int StarClusterBHDyn; /* If 1, include star cluster mass in BH dynamical mass P[i].Mass; BH+SC treated as one body for dynamics */
     int BlackholeTidalField; /* If 1, compute tidal field strength for BH particles every timestep */
     /************************************************************************/
 } blackhole_params;
@@ -133,6 +133,10 @@ void set_blackhole_params(ParameterSet * ps)
         blackhole_params.BlackholeSeedSCparticle = param_get_int(ps, "BlackholeSeedSCparticle");
         blackhole_params.BHseedEveryTimestep = param_get_int(ps, "BHseedEveryTimestep");
         blackhole_params.StarClusterBHDyn = param_get_int(ps, "StarClusterBHDyn");
+        if(!blackhole_params.StarClusterOn && blackhole_params.StarClusterBHDyn) {
+            message(0, "StarClusterBHDyn=1 requires StarClusterOn=1. Forcing StarClusterBHDyn=0.\n");
+            blackhole_params.StarClusterBHDyn = 0;
+        }
         blackhole_params.BlackholeTidalField = param_get_int(ps, "BlackholeTidalField");
         if(blackhole_params.BlackholeTidalField && param_get_int(ps, "SplitGravityTimestepsOn"))
             endrun(1, "BlackholeTidalField requires SplitGravityTimestepsOn=0 because hierarchical gravity trees only contain active particles, producing incomplete tidal tensors.\n");
@@ -151,6 +155,18 @@ int
 get_bh_tidalfield_on(void)
 {
     return blackhole_params.BlackholeTidalField;
+}
+
+double
+get_bh_seed_dyn_mass(void)
+{
+    return blackhole_params.SeedBHDynMass;
+}
+
+int
+get_starcluster_bhdyn_on(void)
+{
+    return blackhole_params.StarClusterBHDyn;
 }
 
 /* accretion routines */
@@ -459,12 +475,7 @@ blackhole_accretion_postprocess(int i, TreeWalk * tw)
         /*c.f.section 3.2,in http://www.tapir.caltech.edu/~phopkins/public/notes_blackholes.pdf */
         double fac = 0;
         if (blackhole_params.BH_DRAG == 1) {
-            double bh_dyn_mass = P[i].Mass;
-            if(blackhole_params.StarClusterBHDyn)
-                bh_dyn_mass -= BHP(i).StarClusterMass;
-            if(bh_dyn_mass < BHP(i).Mass)
-                bh_dyn_mass = BHP(i).Mass;
-            fac = BHP(i).Mdot / bh_dyn_mass;
+            fac = BHP(i).Mdot / P[i].Mass;
         }
         if (blackhole_params.BH_DRAG == 2) fac = blackhole_params.BlackHoleEddingtonFactor * meddington/BHP(i).Mass;
         fac *= BH_GET_PRIV(tw)->atime; /* dv = acc * kick_fac = acc * a^{-1}dt, therefore acc = a*dv/dt  */
@@ -624,13 +635,9 @@ blackhole_accretion_ngbiter(TreeWalkQueryBHAccretion * I,
             /* compute accretion probability */
             double p = 0;
 
-            MyFloat BHPartMass = I->Mass;
-            /* If SeedBHDynMass is larger than gas paricle mass, we use Mtrack to do the gas accretion
-             * when BHP.Mass < SeedBHDynMass. Mtrack is initialized as gas particle mass and is capped
-             * at SeedBHDynMass. Mtrack traces the BHP.Mass by stochastically swallowing gas and
-             * therefore ensures mass conservation.*/
-            if(blackhole_params.SeedBHDynMass > 0 && I->Mtrack < blackhole_params.SeedBHDynMass)
-                BHPartMass = I->Mtrack;
+            /* Mtrack traces mass conservation via stochastic gas swallowing.
+             * Compare Mtrack with BH_Mass to determine swallowing probability. */
+            MyFloat BHPartMass = I->Mtrack;
 
             /* This is an averaged Mdot, because Mdot increases BH_Mass but not Mass.
              * So if the total accretion is significantly above the dynamical mass,
@@ -725,8 +732,6 @@ blackhole_accretion_copy(int place, TreeWalkQueryBHAccretion * I, TreeWalk * tw)
     }
     I->Hsml = P[place].Hsml;
     I->Mass = P[place].Mass;
-    if(blackhole_params.StarClusterBHDyn)
-        I->Mass -= BHP(place).StarClusterMass;
     I->BH_Mass = BHP(place).Mass;
     I->Density = BHP(place).Density;
     I->ID = P[place].ID;
@@ -849,14 +854,11 @@ blackhole_feedback_ngbiter(TreeWalkQueryBHFeedback * I,
         }
         O->StarClusterTotalMassReturned += BHP(other).StarClusterTotalMassReturned;
 
-        /* Active mass tracer for the other BH: include StarClusterMass
-         * for momentum conservation. */
-        double othermass = P[other].Mass;
-        if (blackhole_params.SeedBHDynMass>0 && I->Mtrack>0){
-            /* If the other BH has not yet reached the dynamical mass, we should accrete the Mtrack*/
-            if(BHP(other).Mtrack < blackhole_params.SeedBHDynMass)
-                othermass = BHP(other).Mtrack;
-        }
+        /* Use the true physical mass (Mtrack + SC) for merger bookkeeping,
+         * not the possibly inflated SeedBHDynMass stored in P.Mass.
+         * This ensures dynaccmass = othermass - SC = Mtrack_other in
+         * postprocess, so the remnant Mtrack = sum of Mtracks. */
+        double othermass = BHP(other).Mtrack + BHP(other).StarClusterMass;
         /* Add the accreted mass tracer to the total accreted Mass.
          * We will decide in postprocess if it goes into Mtrack or Mass*/
         O->Mass += othermass;
@@ -1039,11 +1041,7 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
                     + BH_GET_PRIV(tw)->BH_accreted_SCMetalsWeighted[PI][k]) / total_sc_mass;
         }
         BHP(n).StarClusterMass += new_sc_mass;
-        /* P.Mass will be set at the end from BHP.Mass + SC when SeedBHDynMass > 0.
-         * For SeedBHDynMass == 0, update P.Mass directly.
-         * Only add SC to P.Mass if StarClusterBHDyn is on. */
-        if(blackhole_params.SeedBHDynMass <= 0 && blackhole_params.StarClusterBHDyn)
-            P[n].Mass += new_sc_mass;
+        /* P.Mass is always recomputed from Mtrack [+ SC] below. */
         BHP(n).StarClusterTotalMassReturned += BH_GET_PRIV(tw)->BH_accreted_SCTotalMassReturned[PI];
     }
     if(BH_GET_PRIV(tw)->BH_accreted_Mass[PI] > 0)
@@ -1053,28 +1051,16 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
         int k;
         for(k = 0; k < 3; k++)
             P[n].Vel[k] = (P[n].Vel[k] * P[n].Mass + BH_GET_PRIV(tw)->BH_accreted_momentum[PI][k]) / (P[n].Mass + accmass);
+        /* Mtrack accumulates the non-SC portion of swallowed mass for
+         * mass conservation. P.Mass is derived from Mtrack below. */
         const MyFloat dynaccmass = accmass - BH_GET_PRIV(tw)->BH_accreted_StarClusterMass[PI];
-        /* Update Mtrack for seed regime gas swallowing. */
-        const double SeedBHDynMass = blackhole_params.SeedBHDynMass;
-        if(SeedBHDynMass > 0 && BHP(n).Mtrack + dynaccmass < SeedBHDynMass) {
-            /* Still seed mass regime*/
-            BHP(n).Mtrack += dynaccmass;
-        } else if(BHP(n).Mtrack < SeedBHDynMass) {
-            /* Transitioning out of seed regime */
-            BHP(n).Mtrack = SeedBHDynMass;
-        }
-        /* For SeedBHDynMass == 0, use original P.Mass tracking */
-        if(SeedBHDynMass <= 0) {
-            P[n].Mass += dynaccmass;
-        }
+        BHP(n).Mtrack += dynaccmass;
     }
-    /* When SeedBHDynMass > 0, P.Mass is set directly.
-     * If StarClusterBHDyn, P.Mass = max(BHP.Mass + StarClusterMass, SeedBHDynMass).
-     * If !StarClusterBHDyn, P.Mass = max(BHP.Mass, SeedBHDynMass).
-     * This prevents artificial SeedBHDynMass mass from compounding
-     * through BH mergers. */
-    if(blackhole_params.SeedBHDynMass > 0) {
-        double target = BHP(n).Mass;
+    /* P.Mass = max(Mtrack [+ StarClusterMass], SeedBHDynMass).
+     * StarClusterMass is included only when StarClusterBHDyn is on.
+     * When SeedBHDynMass == 0, the max just returns Mtrack [+ SC]. */
+    {
+        double target = BHP(n).Mtrack;
         if(blackhole_params.StarClusterBHDyn)
             target += BHP(n).StarClusterMass;
         if(target < blackhole_params.SeedBHDynMass)
@@ -1210,7 +1196,7 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
     BHP(child).Density = 0;
     BHP(child).TimeBinDynFric = P[child].TimeBinHydro;
 
-    if(blackhole_params.StarClusterOn) {
+    if(blackhole_params.StarClusterOn && seeded_by_starcluster) {
         BHP(child).StarClusterMass = StarClusterMass;
     } else {
         BHP(child).StarClusterMass = 0;
@@ -1247,32 +1233,20 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
     BHP(child).JumpToMinPot = 0;
     BHP(child).CountProgs = 1;
 
-    if(blackhole_params.SeedBHDynMass > 0) {
-        /* For BH seeding from gas particle, Mtrack starts at the original gas particle
-         * mass and grows via gas swallowing until it reaches SeedBHDynMass
-         * (the "seed regime").  For BH seeding from star cluster there is no original gas
-         * particle, so initialize Mtrack to BHP.Mass (the intrinsic BH seed
-         * mass) so the BH enters the seed regime and must swallow gas to
-         * reach SeedBHDynMass, same as gas-seeded BHs. */
-        if(spawn_from_star)
-            BHP(child).Mtrack = BHP(child).Mass;
-        else
-            BHP(child).Mtrack = P[child].Mass;
-        /* Set P.Mass depending on StarClusterBHDyn:
-         * If on:  P.Mass = max(BHP.Mass + SC, SeedBHDynMass)
-         * If off: P.Mass = max(BHP.Mass, SeedBHDynMass) */
-        double target = BHP(child).Mass;
+    /* Mtrack always tracks mass conservation. For gas-seeded BHs it starts
+     * at the gas particle mass; for star-seeded BHs it starts at BHP.Mass. */
+    if(spawn_from_star)
+        BHP(child).Mtrack = BHP(child).Mass;
+    else
+        BHP(child).Mtrack = P[child].Mass;
+    /* P.Mass = max(Mtrack [+ SC if StarClusterBHDyn], SeedBHDynMass). */
+    {
+        double target = BHP(child).Mtrack;
         if(blackhole_params.StarClusterBHDyn)
             target += BHP(child).StarClusterMass;
         if(target < blackhole_params.SeedBHDynMass)
             target = blackhole_params.SeedBHDynMass;
         P[child].Mass = target;
-    } else {
-        BHP(child).Mtrack = -1;
-        /* Add star cluster mass to P.Mass so it contributes to gravity,
-         * only when StarClusterBHDyn is on. */
-        if(blackhole_params.StarClusterBHDyn && BHP(child).StarClusterMass > 0)
-            P[child].Mass += BHP(child).StarClusterMass;
     }
 
     double sc_in_dyn = blackhole_params.StarClusterBHDyn ? BHP(child).StarClusterMass : 0;

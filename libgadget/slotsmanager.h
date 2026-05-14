@@ -43,7 +43,7 @@ struct bh_particle_data {
     MyFloat Mdot;
     MyFloat Density;
     MyFloat DivVel;   /*!< local velocity divergence */
-    MyFloat Mtrack; /*Swallow gas particle when BHP.Mass accretes from SeedBHMass to SeedDynMass for mass conservation */
+    MyFloat Mtrack; /* Mass conservation tracker: accumulates actual swallowed gas mass. P.Mass is derived from Mtrack. */
     /*******************************************************/
     double KineticFdbkEnergy; /* accumulated KineticFdbk Energy */
     MyFloat VDisp; /* 1D DM Velocity dispersion, for the kinetic winds*/

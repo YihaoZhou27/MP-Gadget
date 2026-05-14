@@ -242,6 +242,30 @@ When `BHseedEveryTimestep` is enabled, `blackhole_seed_sc_particle` now receives
 
 ---
 
+## 2026-05-11 — Mtrack-based dynamical mass and StarClusterOn seeding regime
+
+**Branch:** StarClusterEvolution
+
+Two separate P.Mass/Mtrack regimes depending on StarClusterOn:
+
+When `StarClusterOn=1`: Mtrack always accumulates swallowed mass (gas + BH mergers). Seeding regime defined by `Mtrack + StarClusterMass < SeedBHDynMass`. `P.Mass = max(Mtrack + SC, SeedBHDynMass)`, enforced at all update points: gas swallowing, BH mergers, seeding initialization, and star cluster evolution (SC decrease). BH merger othermass for seed-regime secondaries includes StarClusterMass (`Mtrack + SC`).
+
+When `StarClusterOn=0`: master-branch mass-conservation behavior. `P.Mass` starts at `SeedBHDynMass`, `Mtrack` grows via swallowing. At transition (`Mtrack` reaches `SeedBHDynMass`), `P.Mass` is set to accumulated mass. In regular regime, both `P.Mass` and `Mtrack` grow by swallowed mass. `SeedBHDynMass` serves as floor.
+
+**Files modified:** `blackhole.c`, `blackhole.h`, `starcluster_evolution.c`
+
+---
+
+## 2026-05-12 — Unified Mtrack and StarClusterBHDyn cleanup
+
+**Branch:** StarClusterEvolution
+
+Unified the Mtrack mass-conservation tracker: Mtrack is now always active regardless of SeedBHDynMass. P.Mass is always derived from `max(Mtrack [+ SC if StarClusterBHDyn], SeedBHDynMass)`. Removed the three-branch accretion logic (StarClusterOn/seed-regime/SeedBHDynMass==0) in favor of a single path: `Mtrack += dynaccmass`, then recompute P.Mass. Gas swallowing now always compares BHP.Mass vs Mtrack directly. BH merger othermass always uses `Mtrack + SC` (true physical mass). StarClusterBHDyn now cleanly controls whether SC mass is in P.Mass; BH drag and dynamical friction use P.Mass directly (no SC subtraction). StarClusterEvolution (SC mass return) simplified since it requires StarClusterBHDyn=1.
+
+**Files modified:** `blackhole.c`, `blackhole.h`, `slotsmanager.h`, `starcluster_evolution.c`
+
+---
+
 ## TODO
 
 - Allow seeding in primary FOF and secondary FOF to be on in the same run.
