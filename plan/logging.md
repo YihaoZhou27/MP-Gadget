@@ -266,6 +266,48 @@ Unified the Mtrack mass-conservation tracker: Mtrack is now always active regard
 
 ---
 
+## 2026-05-14 — GW recoil kick for BH mergers (GWRecoilKickOn)
+
+**Branch:** StarClusterEvolution
+
+Added `GWRecoilKickOn` parameter (int, default 0). When enabled, BH merger remnants receive a gravitational wave recoil kick velocity assuming non-spinning BHs. The kick magnitude follows the Fitchett/Gonzalez+ fitting formula as a function of mass ratio. The kick direction is random within the orbital plane (perpendicular to the angular momentum vector of the merging pair). Applied after momentum-conserving velocity update in feedback postprocess. When `StarClusterOn=1`, the kick is compared against the escape velocity of the combined star cluster (MK12 half-mass radius model); if the kick exceeds v_esc, the BH is ejected from the star cluster by zeroing all SC state (mass, metallicity, metals, mass returned) with sentinels `StarClusterFormationTime=1e6`, `StarClusterLastEnrichmentMyr=-1`.
+
+Also added SC property merging during BH mergers: `StarClusterFormationTime` is set to the min of swallower and swallowed (oldest component), and `StarClusterLastEnrichmentMyr` is set to the max (most advanced enrichment). These are propagated via min/max reduce through two new priv arrays.
+
+**Files modified:** `blackhole.c`, `blackhole.h`, `params.c`
+
+---
+
+## 2026-05-15 — Switch GW recoil escape velocity model from MK12 to BG21
+
+**Branch:** StarClusterEvolution
+
+Changed the star cluster half-mass radius model used for escape velocity in the GW recoil kick from MK12 (Marks & Kroupa 2012) to BG21 (Brown & Gnedin 2021) with the full LEGUS sample (age="all"). The BG21 model uses `Reff = 2.55 * (M/1e4)^0.242` projected to 3D half-mass radius via `rh = (4/3) * Reff`.
+
+**Files modified:** `blackhole.c`
+
+---
+
+## 2026-05-16 — Split GWRecoilKickOn into two independent parameters
+
+**Branch:** StarClusterEvolution
+
+Replaced `GWRecoilKickOn` with two independent parameters: `GWRecoilVelocityKick` (applies the velocity kick to the merger remnant) and `GWRecoilSCKick` (checks if kick exceeds escape velocity and zeros star cluster mass). Both default to 0. The kick velocity is calculated if either is enabled. `GWRecoilSCKick=1` requires `StarClusterOn=1` (endrun if not).
+
+**Files modified:** `blackhole.c`, `params.c`
+
+---
+
+## 2026-05-20 — Fix GSL underflow crash in star cluster mass sampling
+
+**Branch:** StarClusterEvolution
+
+Fixed a crash caused by `gsl_sf_expint_E1` triggering a fatal GSL underflow error when `Mcstar` is very small (making the argument `msc_max_code / Mcstar` very large). Replaced all `gsl_sf_expint_E1()` calls in `sfr_eff.c` with a `safe_expint_E1()` wrapper that uses the error-returning variant `gsl_sf_expint_E1_e()` and treats underflow as zero (mathematically correct since E1 decays exponentially for large arguments).
+
+**Files modified:** `sfr_eff.c`
+
+---
+
 ## TODO
 
 - Allow seeding in primary FOF and secondary FOF to be on in the same run.

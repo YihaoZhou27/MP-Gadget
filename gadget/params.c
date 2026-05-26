@@ -274,6 +274,8 @@ create_gadget_parameter_set()
     param_declare_int(ps,"MergeGravBound",OPTIONAL, 1, "If set to 1, apply gravitational bound criteria for merging event. This criteria would be automatically turned off if reposition is enabled.");
     param_declare_double(ps, "SeedBHDynMass", OPTIONAL, -1, "The initial dynamic mass of BH, default -1 will use the mass of gas particle. Larger Mdyn would help to stablize the BH in the early phase if turning off reposition.");
     param_declare_int(ps, "BlackholeTidalField", OPTIONAL, 0, "If 1, compute tidal field strength for BH particles every timestep and record in BH detail files. Requires SplitGravityTimestepsOn=0.");
+    param_declare_int(ps, "GWRecoilVelocityKick", OPTIONAL, 0, "If 1, apply gravitational wave recoil kick velocity to BH merger remnants assuming non-spinning BHs.");
+    param_declare_int(ps, "GWRecoilSCKick", OPTIONAL, 0, "If 1, check if GW recoil kick ejects BH from its host star cluster (zero SC mass if v_kick > v_esc). Requires StarClusterOn=1.");
 
     /*Star cluster parameters*/
     param_declare_int(ps, "StarClusterOn", OPTIONAL, 0, "Enable star-cluster bh seeding formation.");

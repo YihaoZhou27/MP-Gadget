@@ -59,6 +59,8 @@ struct BlackholeParams
     int BHseedEveryTimestep; /* If 1, seed BH from SC particles every timestep (not just PM steps). Requires BlackholeSeedSCparticle=1. */
     int StarClusterBHDyn; /* If 1, include star cluster mass in BH dynamical mass P[i].Mass; BH+SC treated as one body for dynamics */
     int BlackholeTidalField; /* If 1, compute tidal field strength for BH particles every timestep */
+    int GWRecoilVelocityKick; /* If 1, apply GW recoil velocity kick to BH merger remnants */
+    int GWRecoilSCKick; /* If 1, check if GW kick ejects BH from star cluster and zero SC mass */
     /************************************************************************/
 } blackhole_params;
 
@@ -138,6 +140,10 @@ void set_blackhole_params(ParameterSet * ps)
             blackhole_params.StarClusterBHDyn = 0;
         }
         blackhole_params.BlackholeTidalField = param_get_int(ps, "BlackholeTidalField");
+        blackhole_params.GWRecoilVelocityKick = param_get_int(ps, "GWRecoilVelocityKick");
+        blackhole_params.GWRecoilSCKick = param_get_int(ps, "GWRecoilSCKick");
+        if(blackhole_params.GWRecoilSCKick && !blackhole_params.StarClusterOn)
+            endrun(1, "GWRecoilSCKick=1 requires StarClusterOn=1.\n");
         if(blackhole_params.BlackholeTidalField && param_get_int(ps, "SplitGravityTimestepsOn"))
             endrun(1, "BlackholeTidalField requires SplitGravityTimestepsOn=0 because hierarchical gravity trees only contain active particles, producing incomplete tidal tensors.\n");
         if(blackhole_params.BHseedEveryTimestep && !blackhole_params.BlackholeSeedSCparticle)
@@ -372,6 +378,10 @@ blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree *
     priv->BH_accreted_SCMetallicityWeighted = (MyFloat *) mymalloc("BH_accreted_SCMetW", SlotsManager->info[5].size * sizeof(MyFloat));
     priv->BH_accreted_SCMetalsWeighted = (MyFloat (*) [NMETALS]) mymalloc("BH_accreted_SCMetalsW", NMETALS * SlotsManager->info[5].size * sizeof(MyFloat));
     priv->BH_accreted_SCTotalMassReturned = (MyFloat *) mymalloc("BH_accreted_SCTMR", SlotsManager->info[5].size * sizeof(MyFloat));
+    priv->BH_GWRecoilKick = (MyFloat (*) [3]) mymalloc("BH_GWRecoilKick", 3 * SlotsManager->info[5].size * sizeof(MyFloat));
+    memset(priv->BH_GWRecoilKick, 0, 3 * SlotsManager->info[5].size * sizeof(MyFloat));
+    priv->BH_accreted_SCFormTimeMin = (MyFloat *) mymalloc("BH_SCFormTimeMin", SlotsManager->info[5].size * sizeof(MyFloat));
+    priv->BH_accreted_SCLastEnrichMax = (float *) mymalloc("BH_SCLastEnrichMax", SlotsManager->info[5].size * sizeof(float));
 
     /* Now do the swallowing of particles and dump feedback energy */
     /* We also merge BHs here. Only BHs which are not themselves
@@ -397,6 +407,9 @@ blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree *
         *bhdetailswritten += collect_BH_info(ActiveBlackHoles, NumActiveBlackHoles, priv, PartManager, (struct bh_particle_data*) SlotsManager->info[5].ptr, FdBlackholeDetails);
     }
 
+    myfree(priv->BH_accreted_SCLastEnrichMax);
+    myfree(priv->BH_accreted_SCFormTimeMin);
+    myfree(priv->BH_GWRecoilKick);
     myfree(priv->BH_accreted_SCTotalMassReturned);
     myfree(priv->BH_accreted_SCMetalsWeighted);
     myfree(priv->BH_accreted_SCMetallicityWeighted);
@@ -750,6 +763,7 @@ typedef struct {
     MyFloat KEFeedbackEnergy;
     int FdbkChannel; /* 0 thermal, 1 kinetic */
     int alignment; /* Ensure alignment*/
+    MyFloat Vel[3]; /* Velocity of the swallower BH, for GW recoil kick direction */
 } TreeWalkQueryBHFeedback;
 
 typedef struct {
@@ -761,8 +775,11 @@ typedef struct {
     MyFloat StarClusterMetallicityWeighted; /* mass-weighted metallicity from merged BHs */
     float StarClusterMetalsWeighted[NMETALS]; /* mass-weighted species metals from merged BHs */
     MyFloat StarClusterTotalMassReturned; /* sum of total mass returned from merged BHs */
+    MyFloat StarClusterFormationTimeMin; /* min formation time across swallowed BHs */
+    float StarClusterLastEnrichmentMyrMax; /* max last enrichment time across swallowed BHs */
     int BH_CountProgs;
     int BH_minTimeBin;
+    MyFloat GWRecoilKick[3]; /* Accumulated GW recoil kick velocity from BH mergers */
 } TreeWalkResultBHFeedback;
 
 typedef struct {
@@ -807,6 +824,8 @@ blackhole_feedback_ngbiter(TreeWalkQueryBHFeedback * I,
 
     if(iter->base.other == -1) {
         O->BH_minTimeBin = TIMEBINS;
+        O->StarClusterFormationTimeMin = 1.0e30;
+        O->StarClusterLastEnrichmentMyrMax = -1;
         iter->base.mask = GASMASK + BHMASK;
         iter->base.Hsml = I->Hsml;
         /* Needs to be symmetric because the BH mergers should be symmetric*/
@@ -853,6 +872,12 @@ blackhole_feedback_ngbiter(TreeWalkQueryBHFeedback * I,
                 O->StarClusterMetalsWeighted[k] += BHP(other).StarClusterMetals[k] * BHP(other).StarClusterMass;
         }
         O->StarClusterTotalMassReturned += BHP(other).StarClusterTotalMassReturned;
+        /* Track min formation time and max last enrichment across swallowed BHs */
+        if(BHP(other).StarClusterFormationTime > 0
+           && BHP(other).StarClusterFormationTime < O->StarClusterFormationTimeMin)
+            O->StarClusterFormationTimeMin = BHP(other).StarClusterFormationTime;
+        if(BHP(other).StarClusterLastEnrichmentMyr > O->StarClusterLastEnrichmentMyrMax)
+            O->StarClusterLastEnrichmentMyrMax = BHP(other).StarClusterLastEnrichmentMyr;
 
         /* Use the true physical mass (Mtrack + SC) for merger bookkeeping,
          * not the possibly inflated SeedBHDynMass stored in P.Mass.
@@ -869,6 +894,89 @@ blackhole_feedback_ngbiter(TreeWalkQueryBHFeedback * I,
         int d;
         for(d = 0; d < 3; d++)
             O->AccretedMomentum[d] += (othermass * VelPred[d]);
+
+        /* GW recoil kick for non-spinning BH mergers.
+         * When multiple BHs are swallowed in one step, each kick is computed
+         * against the original swallower mass (I->BH_Mass is fixed in the
+         * query and not updated during the neighbor loop).  This is equivalent
+         * to assuming the swallowed progenitors first merge among themselves,
+         * then the combined remnant merges with the swallower — the individual
+         * kicks are vector-summed into GWRecoilKick and applied once in
+         * postprocess. */
+        if(blackhole_params.GWRecoilVelocityKick || blackhole_params.GWRecoilSCKick) {
+            /* Mass ratio q = m_small / m_large, with q <= 1 */
+            double m1 = I->BH_Mass;  /* swallower BH mass */
+            double m2 = BHP(other).Mass;  /* swallowed BH mass */
+            double q = (m1 < m2) ? m1 / m2 : m2 / m1;
+
+            /* Kick magnitude from Fitchett 1983 / Gonzalez+ 2007 fit */
+            const double A_gw = 1.2e4;   /* km/s */
+            const double B_gw = -0.93;
+            double eta = q / ((1.0 + q) * (1.0 + q));
+            double v_kick = A_gw * eta * eta * (1.0 - q) / (1.0 + q) * (1.0 + B_gw * eta);
+
+            /* Kick direction: random in orbital plane (perpendicular to L).
+             * L = (r1 - r2) x (v1 - v2) */
+            double dx[3], dv[3];
+            for(d = 0; d < 3; d++) {
+                dx[d] = NEAREST(I->base.Pos[d] - P[other].Pos[d], PartManager->BoxSize);
+                dv[d] = I->Vel[d] - VelPred[d];
+            }
+            double Lx = dx[1]*dv[2] - dx[2]*dv[1];
+            double Ly = dx[2]*dv[0] - dx[0]*dv[2];
+            double Lz = dx[0]*dv[1] - dx[1]*dv[0];
+            double Lmag = sqrt(Lx*Lx + Ly*Ly + Lz*Lz);
+
+            double nx, ny, nz;
+            if(Lmag > 0) {
+                /* Normalize L */
+                Lx /= Lmag; Ly /= Lmag; Lz /= Lmag;
+
+                /* Find a vector not parallel to L to construct orthonormal basis */
+                double ax, ay, az;
+                if(fabs(Lx) <= fabs(Ly) && fabs(Lx) <= fabs(Lz)) {
+                    ax = 1; ay = 0; az = 0;
+                } else if(fabs(Ly) <= fabs(Lz)) {
+                    ax = 0; ay = 1; az = 0;
+                } else {
+                    ax = 0; ay = 0; az = 1;
+                }
+                /* e1 = a x L (normalized) */
+                double e1x = ay*Lz - az*Ly;
+                double e1y = az*Lx - ax*Lz;
+                double e1z = ax*Ly - ay*Lx;
+                double e1mag = sqrt(e1x*e1x + e1y*e1y + e1z*e1z);
+                e1x /= e1mag; e1y /= e1mag; e1z /= e1mag;
+                /* e2 = L x e1 */
+                double e2x = Ly*e1z - Lz*e1y;
+                double e2y = Lz*e1x - Lx*e1z;
+                double e2z = Lx*e1y - Ly*e1x;
+
+                /* Random angle in the orbital plane */
+                double phi = 2 * M_PI * get_random_number(P[other].ID + 7, BH_GET_PRIV(lv->tw)->rnd);
+                nx = cos(phi)*e1x + sin(phi)*e2x;
+                ny = cos(phi)*e1y + sin(phi)*e2y;
+                nz = cos(phi)*e1z + sin(phi)*e2z;
+            } else {
+                /* Head-on merger (L = 0): pick isotropic random direction */
+                double theta = acos(2 * get_random_number(P[other].ID + 5, BH_GET_PRIV(lv->tw)->rnd) - 1);
+                double phi = 2 * M_PI * get_random_number(P[other].ID + 7, BH_GET_PRIV(lv->tw)->rnd);
+                nx = sin(theta) * cos(phi);
+                ny = sin(theta) * sin(phi);
+                nz = cos(theta);
+            }
+
+            /* Convert v_kick from km/s to internal velocity units.
+             * Internal velocity = physical velocity * atime (scale factor).
+             * 1 km/s = 1e5 cm/s; divide by UnitVelocity_in_cm_per_s to get
+             * code velocity units, then multiply by atime. */
+            double atime = BH_GET_PRIV(lv->tw)->atime;
+            double v_kick_internal = v_kick * (1.0e5 / BH_GET_PRIV(lv->tw)->units.UnitVelocity_in_cm_per_s) * atime;
+
+            O->GWRecoilKick[0] += v_kick_internal * nx;
+            O->GWRecoilKick[1] += v_kick_internal * ny;
+            O->GWRecoilKick[2] += v_kick_internal * nz;
+        }
 
         if(BHP(other).SwallowTime < BH_GET_PRIV(lv->tw)->atime)
             endrun(2, "Encountered BH %i swallowed at earlier time %g\n", other, BHP(other).SwallowTime);
@@ -978,6 +1086,9 @@ blackhole_feedback_copy(int i, TreeWalkQueryBHFeedback * I, TreeWalk * tw)
     I->ID = P[i].ID;
     I->Density = BHP(i).Density;
     int PI = P[i].PI;
+    int k;
+    for(k = 0; k < 3; k++)
+        I->Vel[k] = P[i].Vel[k];
 
     I->FeedbackWeightSum = BH_GET_PRIV(tw)->BH_FeedbackWeightSum[PI];
     I->FdbkChannel = 0; /* thermal feedback mode */
@@ -1012,6 +1123,14 @@ blackhole_feedback_reduce(int place, TreeWalkResultBHFeedback * remote, enum Tre
     TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_SCTotalMassReturned[PI], remote->StarClusterTotalMassReturned);
     for(k = 0; k < 3; k++) {
         TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_momentum[PI][k], remote->AccretedMomentum[k]);
+        TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_GWRecoilKick[PI][k], remote->GWRecoilKick[k]);
+    }
+    /* Min/max reduce for SC formation time and last enrichment */
+    if(mode == TREEWALK_PRIMARY || remote->StarClusterFormationTimeMin < BH_GET_PRIV(tw)->BH_accreted_SCFormTimeMin[PI]) {
+        BH_GET_PRIV(tw)->BH_accreted_SCFormTimeMin[PI] = remote->StarClusterFormationTimeMin;
+    }
+    if(mode == TREEWALK_PRIMARY || remote->StarClusterLastEnrichmentMyrMax > BH_GET_PRIV(tw)->BH_accreted_SCLastEnrichMax[PI]) {
+        BH_GET_PRIV(tw)->BH_accreted_SCLastEnrichMax[PI] = remote->StarClusterLastEnrichmentMyrMax;
     }
     if (mode == TREEWALK_PRIMARY || BHP(place).minTimeBin > remote->BH_minTimeBin) {
         BHP(place).minTimeBin = remote->BH_minTimeBin;
@@ -1043,6 +1162,19 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
         BHP(n).StarClusterMass += new_sc_mass;
         /* P.Mass is always recomputed from Mtrack [+ SC] below. */
         BHP(n).StarClusterTotalMassReturned += BH_GET_PRIV(tw)->BH_accreted_SCTotalMassReturned[PI];
+        /* Merged SC formation time = min(swallower, swallowed),
+         * last enrichment = max(swallower, swallowed).
+         * The swallowed-side min/max were accumulated in the reduce. */
+        MyFloat swallowed_formtime = BH_GET_PRIV(tw)->BH_accreted_SCFormTimeMin[PI];
+        if(swallowed_formtime < 1.0e30) {
+            /* At least one swallowed BH had a star cluster */
+            if(BHP(n).StarClusterFormationTime <= 0 ||
+               swallowed_formtime < BHP(n).StarClusterFormationTime)
+                BHP(n).StarClusterFormationTime = swallowed_formtime;
+        }
+        float swallowed_lastenrich = BH_GET_PRIV(tw)->BH_accreted_SCLastEnrichMax[PI];
+        if(swallowed_lastenrich > BHP(n).StarClusterLastEnrichmentMyr)
+            BHP(n).StarClusterLastEnrichmentMyr = swallowed_lastenrich;
     }
     if(BH_GET_PRIV(tw)->BH_accreted_Mass[PI] > 0)
     {
@@ -1051,6 +1183,58 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
         int k;
         for(k = 0; k < 3; k++)
             P[n].Vel[k] = (P[n].Vel[k] * P[n].Mass + BH_GET_PRIV(tw)->BH_accreted_momentum[PI][k]) / (P[n].Mass + accmass);
+
+        /* Apply GW recoil kick to merger remnant velocity */
+        if(blackhole_params.GWRecoilVelocityKick) {
+            for(k = 0; k < 3; k++)
+                P[n].Vel[k] += BH_GET_PRIV(tw)->BH_GWRecoilKick[PI][k];
+        }
+
+        /* Check if the kick ejects the BH from its host star cluster.
+         * If v_kick > v_esc of the combined star cluster, zero the SC mass. */
+        if(blackhole_params.GWRecoilSCKick && BHP(n).StarClusterMass > 0) {
+            /* Kick magnitude in physical km/s */
+            double v_kick_sq = 0;
+            for(k = 0; k < 3; k++)
+                v_kick_sq += BH_GET_PRIV(tw)->BH_GWRecoilKick[PI][k]
+                           * BH_GET_PRIV(tw)->BH_GWRecoilKick[PI][k];
+            double atime = BH_GET_PRIV(tw)->atime;
+            double unit_vel = BH_GET_PRIV(tw)->units.UnitVelocity_in_cm_per_s;
+            double v_kick_kms = sqrt(v_kick_sq) / atime * (unit_vel / 1.0e5);
+
+            /* Escape velocity using BG21 (Brown & Gnedin 2021) half-mass radius
+             * with age="all" (full LEGUS sample):
+             * Reff = 2.55 * (M_sc / 1e4)^0.242  [pc]
+             * rh = (4/3) * Reff  (projected -> 3D half-mass radius)
+             * v_esc = 33.4 * sqrt(M_sc / 1e5) * rh^(-0.5)  [km/s] */
+            double M_sc_solar = BHP(n).StarClusterMass
+                              * BH_GET_PRIV(tw)->units.UnitMass_in_g / SOLAR_MASS;
+            double Reff = 2.55 * pow(M_sc_solar / 1.0e4, 0.242);
+            double rh = (4.0 / 3.0) * Reff;
+            double v_esc = 33.4 * sqrt(M_sc_solar / 1.0e5) * pow(rh, -0.5);
+
+            if(v_kick_kms > v_esc) {
+                message(0, "BH %ld: GW kick %.1f km/s exceeds v_esc %.1f km/s "
+                        "(M_sc = %.3g Msun), ejecting from star cluster\n",
+                        (long) P[n].ID, v_kick_kms, v_esc, M_sc_solar);
+                /* Reset all star cluster state so that if the BH later
+                 * reacquires SC mass via another merger, the evolution
+                 * starts fresh without stale initial-mass contamination
+                 * from StarClusterTotalMassReturned. */
+                BHP(n).StarClusterMass = 0;
+                BHP(n).StarClusterMetallicity = 0;
+                memset(BHP(n).StarClusterMetals, 0, sizeof(BHP(n).StarClusterMetals));
+                BHP(n).StarClusterTotalMassReturned = 0;
+                /* FormationTime=0 follows the existing "no cluster" convention
+                 * (SC evolution guard: FormationTime <= 0 → skip).
+                 * LastEnrichmentMyr=-1 ensures that if the BH reacquires
+                 * SC mass via a later merger, enrichment restarts from
+                 * scratch since the new merger's max will overwrite -1. */
+                BHP(n).StarClusterLastEnrichmentMyr = -1;
+                BHP(n).StarClusterFormationTime = 0;
+            }
+        }
+
         /* Mtrack accumulates the non-SC portion of swallowed mass for
          * mass conservation. P.Mass is derived from Mtrack below. */
         const MyFloat dynaccmass = accmass - BH_GET_PRIV(tw)->BH_accreted_StarClusterMass[PI];

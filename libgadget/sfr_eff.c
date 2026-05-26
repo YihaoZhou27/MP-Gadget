@@ -22,6 +22,8 @@
 #include <math.h>
 #include <omp.h>
 #include <gsl/gsl_sf_expint.h>
+#include <gsl/gsl_sf_result.h>
+#include <gsl/gsl_errno.h>
 #include "libgadget/timebinmgr.h"
 #include "physconst.h"
 #include "sfr_eff.h"
@@ -673,6 +675,24 @@ double get_helium_neutral_fraction_sfreff(int ion, double redshift, double hubbl
 /* This function turns a particle into a star. It returns 1 if a particle was
  * converted and 2 if a new particle was spawned. This is used
  * above to set stars_{spawned|converted}*/
+/* Wrapper for gsl_sf_expint_E1 that treats underflow as zero
+ * instead of triggering GSL's fatal error handler.
+ * Must temporarily turn off the GSL error handler because
+ * gsl_sf_expint_E1_e still invokes it before returning. */
+static double safe_expint_E1(double x)
+{
+    gsl_error_handler_t *old_handler = gsl_set_error_handler_off();
+    gsl_sf_result result;
+    int status = gsl_sf_expint_E1_e(x, &result);
+    gsl_set_error_handler(old_handler);
+    if(status == GSL_EUNDRFLW)
+        return 0.0;
+    if(status)
+        endrun(2001, "GSL_ERROR in safe_expint_E1: x=%g, errno:%d, error: %s\n",
+               x, status, gsl_strerror(status));
+    return result.val;
+}
+
 static int make_particle_star(int child, int parent, int placement, double Time, const double GravInternal, const RandTable * const rnd)
 {
     int retflag = 2;
@@ -768,8 +788,8 @@ static int make_particle_star(int child, int parent, int placement, double Time,
             if(Mcstar > 0) {
                 double x_min = sfr_params.msc_min_code / Mcstar;
                 double x_max = sfr_params.msc_max_code / Mcstar;
-                double E1_min = gsl_sf_expint_E1(x_min);
-                double E1_max = gsl_sf_expint_E1(x_max);
+                double E1_min = safe_expint_E1(x_min);
+                double E1_max = safe_expint_E1(x_max);
                 double numer = E1_min - E1_max;
                 double denom = exp(-x_min) / x_min - exp(-x_max) / x_max + E1_max - E1_min;
                 if(denom > 0)
@@ -839,11 +859,11 @@ static int make_particle_star(int child, int parent, int placement, double Time,
             if(Nsc > 0 && Mcstar > 0) {
                 double x_min_s = sfr_params.msc_min_code / Mcstar;
                 double x_max_s = sfr_params.msc_max_code / Mcstar;
-                double E1_xmin = gsl_sf_expint_E1(x_min_s);
+                double E1_xmin = safe_expint_E1(x_min_s);
                 double emxmin_over_xmin = exp(-x_min_s) / x_min_s;
                 /* CDF normalization */
                 double g_norm = emxmin_over_xmin - exp(-x_max_s) / x_max_s
-                              + gsl_sf_expint_E1(x_max_s) - E1_xmin;
+                              + safe_expint_E1(x_max_s) - E1_xmin;
 
                 for(int s = 0; s < Nsc; s++) {
                     double u_s = get_random_number(P[child].ID + 300 + (uint64_t)s, rnd);
@@ -854,7 +874,7 @@ static int make_particle_star(int child, int parent, int placement, double Time,
                     for(int iter = 0; iter < 50; iter++) {
                         double mid = 0.5 * (lo + hi);
                         double g_mid = emxmin_over_xmin - exp(-mid) / mid
-                                     + gsl_sf_expint_E1(mid) - E1_xmin;
+                                     + safe_expint_E1(mid) - E1_xmin;
                         if(g_mid < target)
                             lo = mid;
                         else

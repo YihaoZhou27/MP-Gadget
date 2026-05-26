@@ -24,6 +24,9 @@ struct BHPriv {
     MyFloat * BH_accreted_SCMetallicityWeighted;
     MyFloat (* BH_accreted_SCMetalsWeighted)[NMETALS];
     MyFloat * BH_accreted_SCTotalMassReturned;
+    MyFloat (*BH_GWRecoilKick)[3]; /* Accumulated GW recoil kick velocity from BH mergers */
+    MyFloat * BH_accreted_SCFormTimeMin; /* min StarClusterFormationTime across swallowed BHs */
+    float * BH_accreted_SCLastEnrichMax; /* max StarClusterLastEnrichmentMyr across swallowed BHs */
 
     /* This is a temporary computed in the accretion treewalk and used
      * in the feedback treewalk*/
