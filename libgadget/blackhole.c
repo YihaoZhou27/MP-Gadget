@@ -61,6 +61,7 @@ struct BlackholeParams
     int BlackholeTidalField; /* If 1, compute tidal field strength for BH particles every timestep */
     int GWRecoilVelocityKick; /* If 1, apply GW recoil velocity kick to BH merger remnants */
     int GWRecoilSCKick; /* If 1, check if GW kick ejects BH from star cluster and zero SC mass */
+    int BHVorticity; /* If 1, compute SPH vorticity of surrounding gas for each BH */
     /************************************************************************/
 } blackhole_params;
 
@@ -88,6 +89,7 @@ typedef struct {
     MyFloat V1sumDM[3];
     MyFloat NumDM;
     MyFloat MgasEnc;
+    MyFloat Vorticity[3];
 } TreeWalkResultBHAccretion;
 
 typedef struct {
@@ -142,6 +144,7 @@ void set_blackhole_params(ParameterSet * ps)
         blackhole_params.BlackholeTidalField = param_get_int(ps, "BlackholeTidalField");
         blackhole_params.GWRecoilVelocityKick = param_get_int(ps, "GWRecoilVelocityKick");
         blackhole_params.GWRecoilSCKick = param_get_int(ps, "GWRecoilSCKick");
+        blackhole_params.BHVorticity = param_get_int(ps, "BHVorticity");
         if(blackhole_params.GWRecoilSCKick && !blackhole_params.StarClusterOn)
             endrun(1, "GWRecoilSCKick=1 requires StarClusterOn=1.\n");
         if(blackhole_params.BlackholeTidalField && param_get_int(ps, "SplitGravityTimestepsOn"))
@@ -339,6 +342,14 @@ blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree *
     /* mark the state of AGN kinetic feedback */
     priv->KEflag = (int *) mymalloc("KEflag", SlotsManager->info[5].size * sizeof(int));
 
+    /* Dimensionless vorticity of surrounding gas for each BH */
+    priv->BH_Vorticity = (MyFloat *) mymalloc("BH_Vorticity", SlotsManager->info[5].size * sizeof(MyFloat));
+    memset(priv->BH_Vorticity, 0, SlotsManager->info[5].size * sizeof(MyFloat));
+    priv->BH_VorticityVec = (MyFloat (*) [3]) mymalloc("BH_VorticityVec", 3 * SlotsManager->info[5].size * sizeof(MyFloat));
+    memset(priv->BH_VorticityVec, 0, 3 * SlotsManager->info[5].size * sizeof(MyFloat));
+    priv->BH_SoundSpeed = (MyFloat *) mymalloc("BH_SoundSpeed", SlotsManager->info[5].size * sizeof(MyFloat));
+    memset(priv->BH_SoundSpeed, 0, SlotsManager->info[5].size * sizeof(MyFloat));
+
     /* Need hmax for the symmetric BH merger treewalk*/
     if(!tree->hmax_computed_flag)
         force_tree_calc_moments(tree, ddecomp);
@@ -419,6 +430,9 @@ blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree *
     myfree(priv->BH_accreted_Mass);
 
     /*****************************************************************/
+    myfree(priv->BH_SoundSpeed);
+    myfree(priv->BH_VorticityVec);
+    myfree(priv->BH_Vorticity);
     myfree(priv->KEflag);
     myfree(priv->MgasEnc);
     myfree(priv->NumDM);
@@ -462,12 +476,35 @@ blackhole_accretion_postprocess(int i, TreeWalk * tw)
         double rho_proper = rho * BH_GET_PRIV(tw)->a3inv;
 
         double soundspeed = blackhole_soundspeed(BH_GET_PRIV(tw)->BH_Entropy[PI], rho, BH_GET_PRIV(tw)->atime);
+        BH_GET_PRIV(tw)->BH_SoundSpeed[PI] = soundspeed;
 
         double norm = pow((pow(soundspeed, 2) + pow(bhvel, 2)), 1.5);
 
         if(norm > 0)
             mdot = 4. * M_PI * blackhole_params.BlackHoleAccretionFactor * BH_GET_PRIV(tw)->CP->GravInternal * BH_GET_PRIV(tw)->CP->GravInternal *
                 BHP(i).Mass * BHP(i).Mass * rho_proper / norm;
+
+        /* Compute dimensionless vorticity: omega_star = omega_phys * G * M_BH / (c_s^2 + v_rel^2)^1.5
+         * where R_bondi = G * M_BH / (c_s^2 + v_rel^2).
+         * The SPH curl in comoving code units gives omega_code = a^2 * omega_phys,
+         * because v_code = a * v_phys and nabla_comov W = a^4 * nabla_phys W_phys,
+         * so after dividing by rho_comov: omega_code = a^2 * omega_phys.
+         * soundspeed and bhvel are already physical. */
+        if(blackhole_params.BHVorticity && norm > 0) {
+            double omega = 0;
+            for(k = 0; k < 3; k++) {
+                double vort_k = BH_GET_PRIV(tw)->BH_VorticityVec[PI][k] / rho;
+                omega += vort_k * vort_k;
+            }
+            omega = sqrt(omega);
+            /* Convert from comoving to physical: omega_phys = omega_code / a^2 */
+            double atime = BH_GET_PRIV(tw)->atime;
+            omega /= (atime * atime);
+            double G = BH_GET_PRIV(tw)->CP->GravInternal;
+            BH_GET_PRIV(tw)->BH_Vorticity[PI] = omega * G * BHP(i).Mass / norm;
+        } else if(blackhole_params.BHVorticity) {
+            BH_GET_PRIV(tw)->BH_Vorticity[PI] = 0;
+        }
     }
 
     if(blackhole_params.BlackHoleEddingtonFactor > 0.0 &&
@@ -643,6 +680,22 @@ blackhole_accretion_ngbiter(TreeWalkQueryBHAccretion * I,
             O->GasVel[0] += (mass_j * wk * VelPred[0]);
             O->GasVel[1] += (mass_j * wk * VelPred[1]);
             O->GasVel[2] += (mass_j * wk * VelPred[2]);
+
+            /* Accumulate SPH curl of velocity: Σ m_j (v_j - v_BH) × (dwk/r * dist) */
+            if(blackhole_params.BHVorticity && r > 0) {
+                double dwk = density_kernel_dwk(&iter->kernel, r * iter->kernel.Hinv);
+                double fac = mass_j * dwk / r;
+                double dv[3];
+                const double * dist = iter->base.dist;
+                int d;
+                for(d = 0; d < 3; d++)
+                    dv[d] = VelPred[d] - I->Vel[d];
+                double rot[3];
+                crossproduct(dv, dist, rot);
+                for(d = 0; d < 3; d++)
+                    O->Vorticity[d] += fac * rot[d];
+            }
+
             /* here we have a gas particle; check for swallowing */
 
             /* compute accretion probability */
@@ -732,6 +785,10 @@ blackhole_accretion_reduce(int place, TreeWalkResultBHAccretion * remote, enum T
     }
     TREEWALK_REDUCE(BH_GET_PRIV(tw)->NumDM[PI], remote->NumDM);
     TREEWALK_REDUCE(BH_GET_PRIV(tw)->MgasEnc[PI], remote->MgasEnc);
+    if(blackhole_params.BHVorticity) {
+        for (k = 0; k < 3; k++)
+            TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_VorticityVec[PI][k], remote->Vorticity[k]);
+    }
 }
 
 static void

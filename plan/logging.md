@@ -308,6 +308,26 @@ Fixed a crash caused by `gsl_sf_expint_E1` triggering a fatal GSL underflow erro
 
 ---
 
+## 2026-05-26 — Add BH surrounding gas dimensionless vorticity calculation
+
+**Branch:** StarClusterEvolution
+
+Add a dimensionless vorticity calculation for the gas surrounding each BH. The SPH curl estimator ω = (1/ρ) Σⱼ mⱼ (vⱼ - v_BH) × ∇Wᵢⱼ is computed during the BH accretion tree walk, then converted to dimensionless form ω* = ω G M_BH / c_s³ (where c_s is the local sound speed). Both the dimensionless vorticity (`BH_DimlessVorticity`) and the sound speed (`BH_SoundSpeed`) are recorded in the BH details file. A new integer parameter `BHVorticity` (default 0) controls the vorticity calculation; when `BHVorticity=0`, the vorticity output is explicitly zeroed every step so no stale values leak. The sound speed is always recorded. When `BHP(i).Density <= 0` or `soundspeed <= 0`, the vorticity is set to zero.
+
+**Files modified:** `blackhole.c`, `blackhole.h`, `bhinfo.c`, `params.c`
+
+---
+
+## 2026-05-26 — Fix Bondi radius in BH vorticity calculation to include relative velocity
+
+**Branch:** StarClusterEvolution
+
+Fixed the dimensionless vorticity formula to use the correct Bondi radius `R_bondi = G * M_BH / (c_s² + v_rel²)`. Previously the formula used `G * M_BH / c_s³`, missing the BH-gas relative velocity term. Now uses `(c_s² + v_rel²)^1.5` (the `norm` variable already computed for the accretion rate) as the denominator.
+
+**Files modified:** `blackhole.c`
+
+---
+
 ## TODO
 
 - Allow seeding in primary FOF and secondary FOF to be on in the same run.

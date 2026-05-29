@@ -276,6 +276,7 @@ create_gadget_parameter_set()
     param_declare_int(ps, "BlackholeTidalField", OPTIONAL, 0, "If 1, compute tidal field strength for BH particles every timestep and record in BH detail files. Requires SplitGravityTimestepsOn=0.");
     param_declare_int(ps, "GWRecoilVelocityKick", OPTIONAL, 0, "If 1, apply gravitational wave recoil kick velocity to BH merger remnants assuming non-spinning BHs.");
     param_declare_int(ps, "GWRecoilSCKick", OPTIONAL, 0, "If 1, check if GW recoil kick ejects BH from its host star cluster (zero SC mass if v_kick > v_esc). Requires StarClusterOn=1.");
+    param_declare_int(ps, "BHVorticity", OPTIONAL, 0, "If 1, compute dimensionless SPH vorticity of surrounding gas for each BH and record in BH detail files.");
 
     /*Star cluster parameters*/
     param_declare_int(ps, "StarClusterOn", OPTIONAL, 0, "Enable star-cluster bh seeding formation.");

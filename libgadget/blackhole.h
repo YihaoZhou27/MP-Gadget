@@ -38,6 +38,13 @@ struct BHPriv {
     /* mark the state of AGN kinetic feedback, 1 accumulate, 2 release */
     int * KEflag;
 
+    /* Accumulated SPH vorticity vector (3-component, before density normalization) */
+    MyFloat (*BH_VorticityVec)[3];
+    /* Dimensionless vorticity magnitude: omega_star = omega * G * M_BH / c_s^3 */
+    MyFloat * BH_Vorticity;
+    /* Sound speed of surrounding gas (used in dimensionless vorticity) */
+    MyFloat * BH_SoundSpeed;
+
     /* Time factors*/
     double atime;
     double a3inv;
