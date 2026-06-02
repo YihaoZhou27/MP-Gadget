@@ -312,6 +312,7 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
         if(P[i].Type == 4) {
             STARP(i).initClusterMass = 0;
             STARP(i).initStarClusterMass_sample = 0;
+            STARP(i).Seeded = 0;
         }
     }
 
@@ -843,6 +844,7 @@ SIMPLE_PROPERTY_PI(Nsc_sample, Nsc_sample, int, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(StarClusterMass_sample, StarClusterMass_sample, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(initClusterMass, initClusterMass, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(initStarClusterMass_sample, initStarClusterMass_sample, float, 1, struct star_particle_data)
+SIMPLE_PROPERTY_PI(Seeded, Seeded, int, 1, struct star_particle_data)
 SIMPLE_PROPERTY_TYPE_PI(ClusterFormationEfficiency, 0, ClusterFormationEfficiency, float, 1, struct sph_particle_data)
 SIMPLE_PROPERTY_PI(SumSFRdt, SumSFRdt, float, 1, struct sph_particle_data)
 SIMPLE_PROPERTY_PI(SumSpawnedMass, SumSpawnedMass, float, 1, struct sph_particle_data)
@@ -1060,6 +1062,7 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
     IO_REG_NONFATAL(ClusterFormationEfficiency, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(ClusterMass, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(initClusterMass, "f4", 1, 4, IOTable);
+    IO_REG_NONFATAL(Seeded, "i4", 1, 4, IOTable);
     IO_REG_NONFATAL(Msc_ave, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(StarClusterMass_sample, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(initStarClusterMass_sample, "f4", 1, 4, IOTable);

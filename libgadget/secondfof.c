@@ -36,6 +36,7 @@ struct SecondFOFParams {
     int ComputeSize;        /* compute R50, R90, Rmax */
     int SecFOFonly;          /* skip primary FOF catalog, only save SecPIG */
     int SeedInSecFOFasStarCluster; /* use StarCluster BH-seeding in sec FOF catalog */
+    int SeedSecFOFcomSample; /* combined per-secFOF star-cluster sampling for BH seeding */
     int SecFOFStarCluster;  /* flag that sec FOF groups are star clusters (requires SecondFOFOn && StarClusterOn) */
     char SecondFOFFileBase[256];
 };
@@ -61,6 +62,13 @@ void set_secondfof_params(ParameterSet * ps)
             message(0, "SeedInSecFOFasStarCluster requires SecondFOFOn=1, StarClusterOn=1, and SecFOFStarCluster=1; disabling.\n");
             sfof_params.SeedInSecFOFasStarCluster = 0;
         }
+        /* SeedSecFOFcomSample requires the (effective) SeedInSecFOFasStarCluster.
+         * Hard error (exit) if not satisfied, per design. */
+        sfof_params.SeedSecFOFcomSample = param_get_int(ps, "SeedSecFOFcomSample");
+        if(sfof_params.SeedSecFOFcomSample && !sfof_params.SeedInSecFOFasStarCluster)
+            endrun(1, "SeedSecFOFcomSample=1 requires SeedInSecFOFasStarCluster=1 (effective: SecondFOFOn=1, StarClusterOn=1, SecFOFStarCluster=1).\n");
+        if(sfof_params.SeedSecFOFcomSample && param_get_double(ps, "MinMscForBHseed") <= 0)
+            endrun(1, "SeedSecFOFcomSample=1 requires MinMscForBHseed > 0.\n");
         if(sfof_params.SecondFOFOn && StarClusterOn) {
             if(sfof_params.SecFOFStarCluster && sfof_params.PrimaryLinkTypes != (1 << 4) && sfof_params.PrimaryLinkTypes != ((1 << 4) | (1 << 0)))
                 endrun(1, "SecFOFStarCluster requires SecondFOFPrimaryLinkTypes = 16 (star) or 17 (star+gas).\n");
@@ -854,8 +862,15 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
                 else hi = mid;
             }
             if(found) {
-                STARP(i).ClusterMass = 0;
-                STARP(i).StarClusterMass_sample = 0;
+                if(sfof_params.SeedSecFOFcomSample) {
+                    /* Combined-sample mode: mark the star as having contributed to
+                     * a BH seed so it is excluded from future seeding sums; keep
+                     * ClusterMass as a record. */
+                    STARP(i).Seeded = 1;
+                } else {
+                    STARP(i).ClusterMass = 0;
+                    STARP(i).StarClusterMass_sample = 0;
+                }
                 n_zeroed++;
             }
         }

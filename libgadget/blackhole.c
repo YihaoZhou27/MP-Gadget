@@ -1379,7 +1379,7 @@ bh_powerlaw_seed_mass(const MyIDType ID, const RandTable * const rnd)
 }
 
 void
-blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals) {
+blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals) {
     int child;
     int spawn_from_star = seeded_by_starcluster && (P[index].Type == 4);
 
@@ -1428,7 +1428,7 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
         BHP(child).Mass = blackhole_params.SeedBlackHoleMass;
 
     if(seeded_by_starcluster && blackhole_params.BHseedMassScaleMsc)
-        BHP(child).Mass *= StarClusterMass;
+        BHP(child).Mass *= ScalingMass;
 
     BHP(child).Mseed = BHP(child).Mass;
     BHP(child).Mdot = 0;
@@ -1605,7 +1605,7 @@ blackhole_seed_sc_particle(ActiveParticles * act, double atime,
         for(j = 0; j < NMETALS; j++)
             sc_metals[j] = STARP(pi).Metals[j];
 
-        blackhole_make_one(pi, atime, rnd, 1, sc_mass, sc_metallicity, sc_metals);
+        blackhole_make_one(pi, atime, rnd, 1, sc_mass, sc_mass, sc_metallicity, sc_metals);
 
         /* Zero the star cluster mass on the parent star. */
         STARP(pi).ClusterMass = 0;

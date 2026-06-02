@@ -92,6 +92,12 @@ struct Group
     double PotMinPos[3];
     MyFloat StarClusterMassSample; /*!< Sum of StarClusterMass_sample for all hosted stars */
     int NscSample; /*!< Sum of Nsc_sample for all hosted stars */
+
+    /* SeedSecFOFcomSample (combined per-secFOF sampling). All accumulated over
+     * UNSEEDED stars (STARP.Seeded==0) only. */
+    MyFloat SCcomMcut;    /*!< Sum of m_star over unseeded stars = mass-function cutoff M_cut */
+    MyFloat BHSeedMsc;    /*!< Combined-sampled seed cluster mass (bhseed_msc); set in fof_seed */
+    MyIDType SeedStarID;  /*!< ID of the max-ClusterMass unseeded star (RNG seed for the combined draw) */
 };
 
 /* Structure to hold all allocated FOF groups*/

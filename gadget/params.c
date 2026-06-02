@@ -225,6 +225,7 @@ create_gadget_parameter_set()
     param_declare_int(ps, "SecondFOFSize", OPTIONAL, 0, "Compute group size properties (R50, R90, Rmax) in second FOF.");
     param_declare_int(ps, "SecFOFonly", OPTIONAL, 0, "If 1, skip saving the primary FOF catalog (PIG) and only save the second FOF catalog (SecPIG). Primary FOF still runs internally.");
     param_declare_int(ps, "SeedInSecFOFasStarCluster", OPTIONAL, 0, "If 1, use StarCluster BH-seeding in the secondary FOF catalog. Requires SecondFOFOn=1 and StarClusterOn=1.");
+    param_declare_int(ps, "SeedSecFOFcomSample", OPTIONAL, 0, "If 1, seed BHs in the secondary FOF by one combined star-cluster sampling per group (mass function cutoff = group total unseeded stellar mass); seed mass set by clusters > 1e4 Msun. Requires SeedInSecFOFasStarCluster=1 and MinMscForBHseed>0.");
     param_declare_int(ps, "SecFOFStarCluster", OPTIONAL, 1, "Flag that second FOF groups are star clusters. Requires SecondFOFOn=1 and StarClusterOn=1. Writes StarClusterMass/Metallicity/MetalElemMass to SecPIG.");
 
     /*Black holes*/

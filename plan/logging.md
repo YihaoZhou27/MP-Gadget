@@ -328,6 +328,31 @@ Fixed the dimensionless vorticity formula to use the correct Bondi radius `R_bon
 
 ---
 
+## 2026-05-30 — SeedSecFOFcomSample: combined per-secFOF star-cluster sampling for BH seeding
+
+**Branch:** SecFOFCombined
+
+Added `SeedSecFOFcomSample` parameter (int, default 0; requires `SeedInSecFOFasStarCluster=1`
+and `MinMscForBHseed>0`, else the run exits). In this mode, BH seeding in the secondary FOF
+draws one combined star-cluster sample per group instead of summing per-star samples: the mass
+function n(m)~m^-2 exp(-m/M_cut) uses M_cut = group total unseeded stellar mass, the number of
+clusters is n = Σ(m_star·Γ)/<m> (over unseeded stars), and a Poisson-then-mass draw yields
+`bhseed_msc` = summed mass of sampled clusters above 1e4 Msun. A group seeds a BH (spawned from
+its largest-ClusterMass star) only if `bhseed_msc ≥ MinMscForBHseed`. The seed mass reuses the
+existing scaling (`SeedBlackHoleMass·bhseed_msc` when `BHseedMassScaleMsc=1`, else fixed
+`SeedBlackHoleMass`); the attached star-cluster mass is the full Σ(m_star·Γ) only when
+`StarClusterBHDyn=1`. Per-star cluster-mass sampling is skipped in this mode. A new per-star
+`Seeded` flag excludes stars that already contributed to a seed from later seeding sums (set on
+all stars of a group after it seeds; replaces ClusterMass-zeroing in this mode). The combined
+draw runs serially (the GSL E1 wrapper is not OpenMP-safe). Plan at
+`plan/seed_secfof_combined_sample_plan.md`.
+
+**Files modified:** `gadget/params.c`, `libgadget/sfr_eff.c`, `libgadget/sfr_eff.h`,
+`libgadget/fof.c`, `libgadget/fof.h`, `libgadget/blackhole.c`, `libgadget/blackhole.h`,
+`libgadget/secondfof.c`, `libgadget/run.c`, `libgadget/slotsmanager.h`, `libgadget/petaio.c`
+
+---
+
 ## TODO
 
 - Allow seeding in primary FOF and secondary FOF to be on in the same run.

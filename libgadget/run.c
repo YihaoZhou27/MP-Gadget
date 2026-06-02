@@ -209,6 +209,8 @@ set_all_global_params(ParameterSet * ps)
                 message(0, "SeedInSecFOFasStarCluster requires SecondFOFOn=1, StarClusterOn=1, and SecFOFStarCluster=1; disabling.\n");
                 SeedInSecFOFasStarCluster = 0;
             }
+            if(param_get_int(ps, "SeedSecFOFcomSample") && !SeedInSecFOFasStarCluster)
+                endrun(1, "SeedSecFOFcomSample=1 requires SeedInSecFOFasStarCluster=1 (effective: SecondFOFOn=1, StarClusterOn=1, SecFOFStarCluster=1).\n");
             /* Temporary: seeding in secondary FOF and primary FOF cannot
              * both be active in the same run. When SeedInSecFOFasStarCluster
              * is on, disable all primary FOF seeding methods. */

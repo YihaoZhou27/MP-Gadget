@@ -56,4 +56,13 @@ double get_MinEgySpec(void);
 /* Returns the density threshold for star formation in comoving units*/
 double sfr_density_threshold(const double atime);
 
+/* Combined per-secFOF star-cluster sampling for BH seeding (SeedSecFOFcomSample).
+ * Mcut       : mass-function cutoff = group total unseeded stellar mass (code units)
+ * sum_mGamma : sum of m_star*Gamma over unseeded stars (code units)
+ * rand_id    : RNG seed (reproducible)
+ * Returns bhseed_msc = sum of sampled cluster masses > 1e4 Msun (code units).
+ * Serial only (uses the global GSL error handler). */
+double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
+                                       uint64_t rand_id, const RandTable * const rnd);
+
 #endif

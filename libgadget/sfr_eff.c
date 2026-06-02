@@ -60,6 +60,7 @@ static struct SFRParams
     int BHFeedbackUseTcool;
     int StarClusterOn; /* if star cluster bh seeding formation is enabled */
     int StarClusterSampling; /* if star cluster mass sampling is enabled (requires StarClusterOn) */
+    int SeedSecFOFcomSample; /* combined per-secFOF cluster sampling for BH seeding; skips per-star sampling */
     /*!< may be used to set a floor for the gas temperature */
     double MinGasTemp;
     /* Precomputed constants for M_cstar calculation (in code units) */
@@ -68,6 +69,7 @@ static struct SFRParams
     /* Mass limits for msc_ave calculation (in code mass units) */
     double msc_min_code; /* 1e2 Msun in code mass */
     double msc_max_code; /* 1e8 Msun in code mass */
+    double msc_seed_thresh_code; /* 1e4 Msun in code mass: "massive cluster" cutoff for bhseed_msc */
 
     /* Unit conversion factor for the sfr_due_to_h2 function*/
     double tau_fmol_unit;
@@ -186,6 +188,9 @@ void set_sfr_params(ParameterSet * ps)
         sfr_params.StarClusterSampling = param_get_int(ps, "StarClusterSampling");
         if(sfr_params.StarClusterSampling && !sfr_params.StarClusterOn)
             endrun(0, "StarClusterSampling = 1 requires StarClusterOn = 1\n");
+        sfr_params.SeedSecFOFcomSample = param_get_int(ps, "SeedSecFOFcomSample");
+        if(sfr_params.SeedSecFOFcomSample && !sfr_params.StarClusterOn)
+            endrun(0, "SeedSecFOFcomSample = 1 requires StarClusterOn = 1\n");
         if(sfr_params.StarClusterOn) {
             int GasTidalField = param_get_int(ps, "GasTidalField");
             int SCgasVDisp = param_get_int(ps, "SCgasVDisp");
@@ -693,6 +698,107 @@ static double safe_expint_E1(double x)
     return result.val;
 }
 
+/* Average cluster mass <m> of n(m) ~ m^-2 exp(-m/Mcut) over [msc_min, msc_max],
+ * in code mass units. Returns 0 if Mcut <= 0 or the normalisation is non-positive.
+ *   <m> = Mcut * [E1(x_min) - E1(x_max)] /
+ *         [exp(-x_min)/x_min - exp(-x_max)/x_max + E1(x_max) - E1(x_min)],   x = m/Mcut. */
+static double msc_ave_from_cutoff(double Mcut)
+{
+    if(Mcut <= 0)
+        return 0;
+    double x_min = sfr_params.msc_min_code / Mcut;
+    double x_max = sfr_params.msc_max_code / Mcut;
+    double E1_min = safe_expint_E1(x_min);
+    double E1_max = safe_expint_E1(x_max);
+    double numer = E1_min - E1_max;
+    double denom = exp(-x_min) / x_min - exp(-x_max) / x_max + E1_max - E1_min;
+    if(denom > 0)
+        return Mcut * numer / denom;
+    return 0;
+}
+
+/* Combined per-secFOF star-cluster sampling for BH seeding (SeedSecFOFcomSample).
+ * Draws ONE cluster population for a whole secFOF group:
+ *   - mass function n(m) ~ m^-2 exp(-m/Mcut) on [1e2, 1e8] Msun, cutoff Mcut = group
+ *     total (unseeded) stellar mass;
+ *   - n = sum_mGamma / <m>; N ~ Poisson(n); then N cluster masses;
+ *   - returns the summed mass of sampled clusters above 1e4 Msun (bhseed_msc).
+ * All masses are in code units. rand_id seeds the (reproducible) RNG draws.
+ * NOT OpenMP-safe: safe_expint_E1 toggles the global GSL error handler, so this
+ * must be called from a serial context. */
+double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
+                                       uint64_t rand_id, const RandTable * const rnd)
+{
+    if(Mcut <= 0 || sum_mGamma <= 0)
+        return 0;
+    double m_ave = msc_ave_from_cutoff(Mcut);
+    if(m_ave <= 0)
+        return 0;
+    double lambda = sum_mGamma / m_ave;
+
+    /* Poisson sample N: normal approximation for large lambda, Knuth otherwise.
+     * Mirrors the per-star sampler; RNG offsets +10,+11 (and +10.. for Knuth). */
+    int N = 0;
+    if(lambda > 30) {
+        double u1 = get_random_number(rand_id + 10, rnd);
+        double u2 = get_random_number(rand_id + 11, rnd);
+        if(u1 < 1e-20)
+            u1 = 1e-20;
+        double z = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+        int sample = (int)(lambda + sqrt(lambda) * z + 0.5);
+        N = sample > 0 ? sample : 0;
+    }
+    else if(lambda > 0) {
+        const int max_iter = 200;
+        double L = exp(-lambda);
+        double p = 1.0;
+        int k = 0;
+        uint64_t seed = rand_id + 10;
+        do {
+            k++;
+            p *= get_random_number(seed, rnd);
+            seed++;
+            if(k > max_iter)
+                endrun(7774, "Combined Poisson sampling exceeded %d iterations for lambda=%g, rand_id=%ld\n",
+                       max_iter, lambda, (long)rand_id);
+        } while(p > L);
+        N = k - 1;
+    }
+    if(N <= 0)
+        return 0;
+
+    /* Sample N cluster masses from n(m) ~ m^-2 exp(-m/Mcut) via inverse-CDF
+     * bisection, summing those above the massive-cluster threshold (1e4 Msun).
+     * CDF(x) ∝ e^{-x_min}/x_min - e^{-x}/x + E1(x) - E1(x_min),  x = m/Mcut.
+     * RNG offsets +300+s, matching the per-star sampler. */
+    double x_min_s = sfr_params.msc_min_code / Mcut;
+    double x_max_s = sfr_params.msc_max_code / Mcut;
+    double E1_xmin = safe_expint_E1(x_min_s);
+    double emxmin_over_xmin = exp(-x_min_s) / x_min_s;
+    double g_norm = emxmin_over_xmin - exp(-x_max_s) / x_max_s
+                  + safe_expint_E1(x_max_s) - E1_xmin;
+
+    double bhseed_msc = 0;
+    for(int s = 0; s < N; s++) {
+        double u_s = get_random_number(rand_id + 300 + (uint64_t)s, rnd);
+        double target = u_s * g_norm;
+        double lo = x_min_s, hi = x_max_s;
+        for(int iter = 0; iter < 50; iter++) {
+            double mid = 0.5 * (lo + hi);
+            double g_mid = emxmin_over_xmin - exp(-mid) / mid
+                         + safe_expint_E1(mid) - E1_xmin;
+            if(g_mid < target)
+                lo = mid;
+            else
+                hi = mid;
+        }
+        double mass = Mcut * 0.5 * (lo + hi);
+        if(mass > sfr_params.msc_seed_thresh_code)
+            bhseed_msc += mass;
+    }
+    return bhseed_msc;
+}
+
 static int make_particle_star(int child, int parent, int placement, double Time, const double GravInternal, const RandTable * const rnd)
 {
     int retflag = 2;
@@ -710,6 +816,7 @@ static int make_particle_star(int child, int parent, int placement, double Time,
     STARP(child).FormationTime = Time;
     STARP(child).LastEnrichmentMyr = 0;
     STARP(child).TotalMassReturned = 0;
+    STARP(child).Seeded = 0;
     STARP(child).BirthDensity = oldslot.Density;
     const double a3inv = 1.0 / (Time * Time * Time);
     STARP(child).BirthInternalEnergy = oldslot.Entropy * entropy_to_u(oldslot.Density, a3inv);
@@ -778,31 +885,14 @@ static int make_particle_star(int child, int parent, int placement, double Time,
         double Mcstar = 0.1 * CFE * f_coll * M_T;
         STARP(child).Mcstar = Mcstar;
 
-        if(sfr_params.StarClusterSampling) {
-            /* Average cluster mass from n(m) ~ m^-2 exp(-m/Mcstar) over [m_min, m_max]:
-             * <m> = Mcstar * [E1(x_min) - E1(x_max)] /
-             *       [exp(-x_min)/x_min - exp(-x_max)/x_max + E1(x_max) - E1(x_min)]
-             * where x = m / Mcstar and E1 is the exponential integral. */
+        if(sfr_params.StarClusterSampling && !sfr_params.SeedSecFOFcomSample) {
+            /* Average cluster mass <m> of n(m) ~ m^-2 exp(-m/Mcstar) over [m_min, m_max]
+             * (shared helper, reused by the combined-sample seeder). */
             /* Flag to skip Poisson sampling and mass sampling if Msc_ave is invalid */
             int skip_sampling = 0;
-            if(Mcstar > 0) {
-                double x_min = sfr_params.msc_min_code / Mcstar;
-                double x_max = sfr_params.msc_max_code / Mcstar;
-                double E1_min = safe_expint_E1(x_min);
-                double E1_max = safe_expint_E1(x_max);
-                double numer = E1_min - E1_max;
-                double denom = exp(-x_min) / x_min - exp(-x_max) / x_max + E1_max - E1_min;
-                if(denom > 0)
-                    STARP(child).Msc_ave = Mcstar * numer / denom;
-                else {
-                    STARP(child).Msc_ave = 0;
-                    skip_sampling = 1;
-                }
-            }
-            else {
-                STARP(child).Msc_ave = 0;
+            STARP(child).Msc_ave = msc_ave_from_cutoff(Mcstar);
+            if(STARP(child).Msc_ave <= 0)
                 skip_sampling = 1;
-            }
 
             /* Number of star clusters */
             if(STARP(child).Msc_ave > 0)
@@ -1180,6 +1270,8 @@ void init_cooling_and_star_formation(int CoolingOn, int StarformationOn, Cosmolo
     /* Mass limits for msc_ave: 1e2 and 1e8 solar masses in code mass units */
     sfr_params.msc_min_code = 1e2 * SOLAR_MASS / units.UnitMass_in_g;
     sfr_params.msc_max_code = 1e8 * SOLAR_MASS / units.UnitMass_in_g;
+    /* "Massive cluster" threshold for combined-sample seeding: 1e4 solar masses */
+    sfr_params.msc_seed_thresh_code = 1e4 * SOLAR_MASS / units.UnitMass_in_g;
 
     init_cooling(sfr_params.TreeCoolFile, sfr_params.J21CoeffFile, sfr_params.MetalCoolFile, sfr_params.ReionHistFile, coolunits, CP);
 
