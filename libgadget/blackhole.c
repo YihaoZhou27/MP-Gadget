@@ -1379,7 +1379,7 @@ bh_powerlaw_seed_mass(const MyIDType ID, const RandTable * const rnd)
 }
 
 void
-blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals) {
+blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat StarClusterMetallicity, const float * StarClusterMetals) {
     int child;
     int spawn_from_star = seeded_by_starcluster && (P[index].Type == 4);
 
@@ -1458,6 +1458,11 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
     BHP(child).StarClusterLastEnrichmentMyr = 0;
     BHP(child).StarClusterTotalMassReturned = 0;
 
+    /* Record the star-cluster mass that seeded this BH. Frozen at creation:
+     * never modified by mergers, so an accretor keeps its own seed value. */
+    BHP(child).init_Msc = init_Msc;
+    BHP(child).init_Msc_sample = init_Msc_sample;
+
     /* Initialize MinPotPos to the current position to avoid drifting
      * to unknown locations (0,0,0) immediately after creation. */
     int j;
@@ -1525,7 +1530,7 @@ blackhole_seed_sc_particle(ActiveParticles * act, double atime,
         /* Fast path: only check newly formed stars. */
         for(i = 0; i < NumNewStar; i++) {
             int pi = NewStars[i];
-            if(P[pi].Type != 4)
+            if(P[pi].Type != 4 || STARP(pi).Seeded)
                 continue;
             MyFloat sc_mass = blackhole_params.StarClusterSampling ?
                 STARP(pi).StarClusterMass_sample : STARP(pi).ClusterMass;
@@ -1535,7 +1540,7 @@ blackhole_seed_sc_particle(ActiveParticles * act, double atime,
     } else {
         /* Fallback: full scan over all particles. */
         for(i = 0; i < PartManager->NumPart; i++) {
-            if(P[i].Type != 4)
+            if(P[i].Type != 4 || STARP(i).Seeded)
                 continue;
             MyFloat sc_mass = blackhole_params.StarClusterSampling ?
                 STARP(i).StarClusterMass_sample : STARP(i).ClusterMass;
@@ -1591,7 +1596,7 @@ blackhole_seed_sc_particle(ActiveParticles * act, double atime,
     const int64_t niter = use_newstars ? NumNewStar : NumPart_before;
     for(i = 0; i < niter; i++) {
         int pi = use_newstars ? NewStars[i] : (int) i;
-        if(P[pi].Type != 4)
+        if(P[pi].Type != 4 || STARP(pi).Seeded)
             continue;
         MyFloat sc_mass = blackhole_params.StarClusterSampling ?
             STARP(pi).StarClusterMass_sample : STARP(pi).ClusterMass;
@@ -1605,11 +1610,15 @@ blackhole_seed_sc_particle(ActiveParticles * act, double atime,
         for(j = 0; j < NMETALS; j++)
             sc_metals[j] = STARP(pi).Metals[j];
 
-        blackhole_make_one(pi, atime, rnd, 1, sc_mass, sc_mass, sc_metallicity, sc_metals);
+        blackhole_make_one(pi, atime, rnd, 1, sc_mass, sc_mass,
+                           STARP(pi).ClusterMass, STARP(pi).StarClusterMass_sample,
+                           sc_metallicity, sc_metals);
 
-        /* Zero the star cluster mass on the parent star. */
-        STARP(pi).ClusterMass = 0;
-        STARP(pi).StarClusterMass_sample = 0;
+        /* Flag the parent star as having contributed to a BH seed so it is
+         * excluded from any further seeding (here and in FOF group sums). Keep
+         * ClusterMass/StarClusterMass_sample as a record, consistent with
+         * SeedSecFOFcomSample. */
+        STARP(pi).Seeded = 1;
         n_seeded++;
     }
 

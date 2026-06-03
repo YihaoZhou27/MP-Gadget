@@ -81,9 +81,9 @@ struct Group
     MyFloat MaxStarClusterMass; /*!< Largest ClusterMass (or StarClusterMass_sample) among type-4 particles */
 
     /***********************/
-    MyFloat StarClusterMass; /*!< Mass of the star cluster sticked to the black hole */
-    MyFloat StarClusterMetallicity; /*!< Mass-weighted metallicity sum for star cluster */
-    float StarClusterMetalElemMass[NMETALS]; /*!< Mass-weighted species metal sums for star cluster */
+    MyFloat StarClusterMass; /*!< TOTAL ClusterMass over ALL hosted stars (seeded + unseeded). Catalogue output (SCMass). */
+    MyFloat StarClusterMetallicity; /*!< Mass-weighted metallicity sum over ALL hosted stars (total). */
+    float StarClusterMetalElemMass[NMETALS]; /*!< Mass-weighted species metal sums over ALL hosted stars (total). */
     /* Minimum gravitational potential among primary-linked particles.
      * Tracked during catalogue compilation, reduced across MPI ranks. */
     float PotMin;
@@ -93,10 +93,18 @@ struct Group
     MyFloat StarClusterMassSample; /*!< Sum of StarClusterMass_sample for all hosted stars */
     int NscSample; /*!< Sum of Nsc_sample for all hosted stars */
 
-    /* SeedSecFOFcomSample (combined per-secFOF sampling). All accumulated over
+    /* Cluster mass split by seeding state (Seeded flag on the star slot).
+     * StarClusterMassUnseeded drives ALL star-cluster BH seeding; SCMass_seeded
+     * is the consumed mass kept for the catalogue. The two sum to StarClusterMass. */
+    MyFloat StarClusterMassUnseeded;       /*!< Sum of ClusterMass over UNSEEDED stars (drives seeding). */
+    MyFloat StarClusterMassSampleUnseeded; /*!< Sum of StarClusterMass_sample over UNSEEDED stars (sampled seeding). */
+    MyFloat SCMass_seeded;                 /*!< Sum of ClusterMass over SEEDED stars (catalogue output). */
+
+    /* SeedSecFOFcomSample (combined per-secFOF sampling). Accumulated over
      * UNSEEDED stars (STARP.Seeded==0) only. */
     MyFloat SCcomMcut;    /*!< Sum of m_star over unseeded stars = mass-function cutoff M_cut */
-    MyFloat BHSeedMsc;    /*!< Combined-sampled seed cluster mass (bhseed_msc); set in fof_seed */
+    MyFloat BHSeedMsc;    /*!< Combined-sampled seed cluster mass > 1e4 Msun (bhseed_msc); drives seed mass. Set in fof_seed */
+    MyFloat BHSampledMscTotal; /*!< Combined-sampled cluster mass, full draw (no 1e4 cut); recorded as BH init_Msc_sample. Set in fof_seed */
     MyIDType SeedStarID;  /*!< ID of the max-ClusterMass unseeded star (RNG seed for the combined draw) */
 };
 

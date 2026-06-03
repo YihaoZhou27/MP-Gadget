@@ -659,6 +659,7 @@ SIMPLE_PROPERTY_FOF(BlackholeAccretionRate, BH_Mdot, float, 1)
 SIMPLE_PROPERTY_FOF(GasSfmpMass, sfmp_mass, float, 1)
 SIMPLE_PROPERTY_FOF(MassHeIonized, MassHeIonized, float, 1)
 SIMPLE_PROPERTY_FOF(StarClusterMass, StarClusterMass, float, 1)
+SIMPLE_PROPERTY_FOF(SCMass_seeded, SCMass_seeded, float, 1)
 SIMPLE_PROPERTY_FOF(StarClusterMassSample, StarClusterMassSample, float, 1)
 SIMPLE_PROPERTY_FOF(NscSample, NscSample, int, 1)
 
@@ -694,6 +695,7 @@ static void fof_register_io_blocks(int MetalReturnOn, struct IOTable * IOTable) 
     IO_REG(BlackholeAccretionRate, "f4", 1, PTYPE_FOF_GROUP, IOTable);
     IO_REG(GasSfmpMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
     IO_REG(StarClusterMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+    IO_REG(SCMass_seeded, "f4", 1, PTYPE_FOF_GROUP, IOTable);
     IO_REG(StarClusterMassSample, "f4", 1, PTYPE_FOF_GROUP, IOTable);
     IO_REG(NscSample, "i4", 1, PTYPE_FOF_GROUP, IOTable);
 }

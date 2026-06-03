@@ -685,6 +685,9 @@ static void fof_reduce_group(void * pdst, void * psrc) {
         gdst->StarClusterMetalElemMass[j] += gsrc->StarClusterMetalElemMass[j];
     gdst->StarClusterMassSample += gsrc->StarClusterMassSample;
     gdst->NscSample += gsrc->NscSample;
+    gdst->StarClusterMassUnseeded += gsrc->StarClusterMassUnseeded;
+    gdst->StarClusterMassSampleUnseeded += gsrc->StarClusterMassSampleUnseeded;
+    gdst->SCMass_seeded += gsrc->SCMass_seeded;
     gdst->SCcomMcut += gsrc->SCcomMcut;
     gdst->GasMetalMass += gsrc->GasMetalMass;
     gdst->StellarMetalMass += gsrc->StellarMetalMass;
@@ -767,21 +770,31 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
         for(j = 0; j < NMETALS; j++)
             gdst->StellarMetalElemMass[j] += STARP(index).Metals[j] * P[index].Mass;
 
-        /* For SeedSecFOFcomSample, stars that already contributed to a BH seed
-         * (Seeded==1) are excluded from the cluster-mass sum, the cutoff, and the
-         * seed-particle pick; when the flag is off, contribute is always true. */
-        int contribute = !(fof_params.SeedSecFOFcomSample && STARP(index).Seeded);
-        if(contribute) {
-            gdst->StarClusterMass += STARP(index).ClusterMass;
-            gdst->StarClusterMetallicity += STARP(index).Metallicity * STARP(index).ClusterMass;
-            for(j = 0; j < NMETALS; j++)
-                gdst->StarClusterMetalElemMass[j] += STARP(index).Metals[j] * STARP(index).ClusterMass;
+        /* Totals over ALL hosted stars (seeded + unseeded): catalogue output and
+         * the (intensive) mass-weighted metallicity used for the seed payload. */
+        gdst->StarClusterMass += STARP(index).ClusterMass;
+        gdst->StarClusterMetallicity += STARP(index).Metallicity * STARP(index).ClusterMass;
+        for(j = 0; j < NMETALS; j++)
+            gdst->StarClusterMetalElemMass[j] += STARP(index).Metals[j] * STARP(index).ClusterMass;
+        gdst->StarClusterMassSample += STARP(index).StarClusterMass_sample;
+        gdst->NscSample += STARP(index).Nsc_sample;
+
+        /* Stars that have already contributed to a BH seed (Seeded==1) are
+         * excluded from everything that drives seeding: the unseeded cluster-mass
+         * sums, the M_cut cutoff, and the seed-particle pick. Their cluster mass is
+         * recorded separately in SCMass_seeded for the catalogue. */
+        if(STARP(index).Seeded) {
+            gdst->SCMass_seeded += STARP(index).ClusterMass;
+        } else {
+            gdst->StarClusterMassUnseeded += STARP(index).ClusterMass;
+            gdst->StarClusterMassSampleUnseeded += STARP(index).StarClusterMass_sample;
             gdst->SCcomMcut += P[index].Mass;
 
-            /* Track the star particle with the largest ClusterMass (or
-             * StarClusterMass_sample when StarClusterSampling=1) for star-cluster
-             * BH seeding in secondary FOF. For SeedSecFOFcomSample use ClusterMass
-             * and record its ID as the RNG seed for the combined draw. */
+            /* Track the unseeded star with the largest ClusterMass (or
+             * StarClusterMass_sample when StarClusterSampling=1) as the seed
+             * particle for star-cluster BH seeding in secondary FOF. For
+             * SeedSecFOFcomSample use ClusterMass and record its ID as the RNG
+             * seed for the combined draw. */
             MyFloat scm = (fof_params.StarClusterSampling && !fof_params.SeedSecFOFcomSample) ?
                 STARP(index).StarClusterMass_sample : STARP(index).ClusterMass;
             if(scm > gdst->MaxStarClusterMass) {
@@ -791,8 +804,6 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
                 gdst->SeedStarID = P[index].ID;
             }
         }
-        gdst->StarClusterMassSample += STARP(index).StarClusterMass_sample;
-        gdst->NscSample += STARP(index).Nsc_sample;
     }
 
     if(P[index].Type == 5)
@@ -1489,6 +1500,11 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
     /* scaling_mass: scales the seed mass when BHseedMassScaleMsc=1.
      * payload_mass: attached to the BH as BHP.StarClusterMass. */
     MyFloat scaling_mass, payload_mass;
+    /* Star-cluster mass that seeded the BH, recorded on the BH slot (frozen
+     * across mergers). init_msc = cluster-forming mass (Sum star_mass*Gamma);
+     * init_msc_sample = the mass sampled from the cluster mass function. Both 0
+     * for non star-cluster (gas/halo) seeds. */
+    MyFloat init_msc = 0, init_msc_sample = 0;
     int seeded_by_starcluster;
     if(fof_params.SeedSecFOFcomSample) {
         /* Combined-sample seeding: Gate 2 already passed in fof_seed.
@@ -1496,15 +1512,24 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
          * mass only when StarClusterBHDyn is on. */
         seeded_by_starcluster = 1;
         scaling_mass = g->BHSeedMsc;
-        payload_mass = get_starcluster_bhdyn_on() ? g->StarClusterMass : 0;
+        payload_mass = get_starcluster_bhdyn_on() ? g->StarClusterMassUnseeded : 0;
+        /* init_Msc = cluster-forming mass of ALL consumed stars; init_Msc_sample =
+         * the full sampled cluster mass for those stars (not just the >1e4 part
+         * that sets the seed mass). */
+        init_msc = g->StarClusterMassUnseeded;
+        init_msc_sample = g->BHSampledMscTotal;
     } else {
         /* Select which star cluster mass to use based on StarClusterSampling.
-         * Must use the same mass variable as the marking code in fof_seed. */
-        MyFloat sc_mass = fof_params.StarClusterSampling ? g->StarClusterMassSample : g->StarClusterMass;
+         * Must use the same (unseeded) mass variable as the marking code in fof_seed. */
+        MyFloat sc_mass = fof_params.StarClusterSampling ? g->StarClusterMassSampleUnseeded : g->StarClusterMassUnseeded;
         seeded_by_starcluster = fof_params.BlackHoleSeedStarCluster
             && (sc_mass >= fof_params.MinMscForBHseed);
         scaling_mass = sc_mass;
         payload_mass = sc_mass;
+        if(seeded_by_starcluster) {
+            init_msc = g->StarClusterMassUnseeded;
+            init_msc_sample = g->StarClusterMassSampleUnseeded;
+        }
     }
     /* Compute mass-weighted average metallicity for star cluster */
     MyFloat sc_metallicity = 0;
@@ -1515,7 +1540,7 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
         for(j = 0; j < NMETALS; j++)
             sc_metals[j] = g->StarClusterMetalElemMass[j] / g->StarClusterMass;
     }
-    blackhole_make_one(index, atime, rnd, seeded_by_starcluster, payload_mass, scaling_mass, sc_metallicity, sc_metals);
+    blackhole_make_one(index, atime, rnd, seeded_by_starcluster, payload_mass, scaling_mass, init_msc, init_msc_sample, sc_metallicity, sc_metals);
 }
 
 void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTable * const rnd,
@@ -1537,7 +1562,7 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
         int Halo_Mask = 0;
         if(fof_params.BlackHoleSeedStarCluster && !fof_params.SeedSecFOFcomSample){
             double sc_mass_for_seed = fof_params.StarClusterSampling ?
-                fof->Group[i].StarClusterMassSample : fof->Group[i].StarClusterMass;
+                fof->Group[i].StarClusterMassSampleUnseeded : fof->Group[i].StarClusterMassUnseeded;
             SC_Mask =
                 (sc_mass_for_seed >= fof_params.MinMscForBHseed)
             &&  (fof->Group[i].seed_index >= 0 || fof->Group[i].seed_index_star >= 0);
@@ -1596,14 +1621,17 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
     if(fof_params.SeedSecFOFcomSample && fof_params.BlackHoleSeedStarCluster) {
         for(i = 0; i < fof->Ngroups; i++) {
             fof->Group[i].BHSeedMsc = 0;
+            fof->Group[i].BHSampledMscTotal = 0;
             if(fof->Group[i].seed_index_star < 0)
                 continue;
-            if(fof->Group[i].StarClusterMass < fof_params.MinMscForBHseed) /* Gate 1 */
+            if(fof->Group[i].StarClusterMassUnseeded < fof_params.MinMscForBHseed) /* Gate 1 */
                 continue;
+            double sampled_total = 0;
             double bhseed_msc = starcluster_combined_bhseed_msc(
-                    fof->Group[i].SCcomMcut, fof->Group[i].StarClusterMass,
-                    (uint64_t) fof->Group[i].SeedStarID, rnd);
+                    fof->Group[i].SCcomMcut, fof->Group[i].StarClusterMassUnseeded,
+                    (uint64_t) fof->Group[i].SeedStarID, rnd, &sampled_total);
             fof->Group[i].BHSeedMsc = bhseed_msc;
+            fof->Group[i].BHSampledMscTotal = sampled_total;
             if(bhseed_msc >= fof_params.MinMscForBHseed) {                  /* Gate 2 */
                 if(!Marked[i]) {
                     Marked[i] = 1;

@@ -577,6 +577,7 @@ SIMPLE_PROPERTY_SECFOF(PrimaryFOFNum, ext.PrimaryFOFNum, int32_t, 1)
 SIMPLE_PROPERTY_SECFOF(PrimaryFOFID, ext.PrimaryFOFID, int64_t, 1)
 
 SIMPLE_PROPERTY_SECFOF(SCMass, grp.StarClusterMass, float, 1)
+SIMPLE_PROPERTY_SECFOF(SCMass_seeded, grp.SCMass_seeded, float, 1)
 SIMPLE_PROPERTY_SECFOF(SCMetallicity, grp.StarClusterMetallicity, float, 1)
 SIMPLE_PROPERTY_SECFOF(SCMetalElemMass, grp.StarClusterMetalElemMass[0], float, NMETALS)
 
@@ -691,6 +692,7 @@ secondfof_register_io_blocks(int MetalReturnOn, int ComputeSize, int SecFOFStarC
     IO_REG(SecPrimaryFOFID, "i8", 1, PTYPE_FOF_GROUP, IOTable);
     if(SecFOFStarCluster) {
         IO_REG(SecSCMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+        IO_REG(SecSCMass_seeded, "f4", 1, PTYPE_FOF_GROUP, IOTable);
         IO_REG(SecSCMetallicity, "f4", 1, PTYPE_FOF_GROUP, IOTable);
         IO_REG(SecSCMetalElemMass, "f4", NMETALS, PTYPE_FOF_GROUP, IOTable);
     }

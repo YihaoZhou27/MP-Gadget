@@ -314,6 +314,10 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
             STARP(i).initStarClusterMass_sample = 0;
             STARP(i).Seeded = 0;
         }
+        if(P[i].Type == 5) {
+            BHP(i).init_Msc = 0;
+            BHP(i).init_Msc_sample = 0;
+        }
     }
 
     for(i = 0; i < IOTable->used; i ++) {
@@ -870,6 +874,8 @@ SIMPLE_PROPERTY_PI(BlackholeJumpToMinPot, JumpToMinPot, int, 1, struct bh_partic
 SIMPLE_PROPERTY_PI(BlackholeMtrack, Mtrack, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeMseed, Mseed, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeKineticFdbkEnergy, KineticFdbkEnergy, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(init_Msc, init_Msc, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(init_Msc_sample, init_Msc_sample, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeStarClusterMass, StarClusterMass, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeStarClusterFormationTime, StarClusterFormationTime, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeStarClusterMetallicity, StarClusterMetallicity, float, 1, struct bh_particle_data)
@@ -1097,6 +1103,8 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
     IO_REG(BlackholeMtrack,         "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeMseed,         "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeKineticFdbkEnergy, "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(init_Msc,        "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(init_Msc_sample, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeStarClusterMass, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeStarClusterFormationTime, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeStarClusterMetallicity, "f4", 1, 5, IOTable);

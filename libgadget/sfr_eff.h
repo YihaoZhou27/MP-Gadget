@@ -61,8 +61,11 @@ double sfr_density_threshold(const double atime);
  * sum_mGamma : sum of m_star*Gamma over unseeded stars (code units)
  * rand_id    : RNG seed (reproducible)
  * Returns bhseed_msc = sum of sampled cluster masses > 1e4 Msun (code units).
+ * If total_sampled_out != NULL, also returns the summed mass of ALL sampled
+ * clusters there (full draw, no threshold).
  * Serial only (uses the global GSL error handler). */
 double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
-                                       uint64_t rand_id, const RandTable * const rnd);
+                                       uint64_t rand_id, const RandTable * const rnd,
+                                       double * total_sampled_out);
 
 #endif

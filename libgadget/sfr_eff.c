@@ -61,6 +61,7 @@ static struct SFRParams
     int StarClusterOn; /* if star cluster bh seeding formation is enabled */
     int StarClusterSampling; /* if star cluster mass sampling is enabled (requires StarClusterOn) */
     int SeedSecFOFcomSample; /* combined per-secFOF cluster sampling for BH seeding; skips per-star sampling */
+    int SCmasscapSecFOFstarmass; /* if 1, cap the combined-sampled SC mass at the group's unseeded stellar mass */
     /*!< may be used to set a floor for the gas temperature */
     double MinGasTemp;
     /* Precomputed constants for M_cstar calculation (in code units) */
@@ -191,6 +192,7 @@ void set_sfr_params(ParameterSet * ps)
         sfr_params.SeedSecFOFcomSample = param_get_int(ps, "SeedSecFOFcomSample");
         if(sfr_params.SeedSecFOFcomSample && !sfr_params.StarClusterOn)
             endrun(0, "SeedSecFOFcomSample = 1 requires StarClusterOn = 1\n");
+        sfr_params.SCmasscapSecFOFstarmass = param_get_int(ps, "SCmasscapSecFOFstarmass");
         if(sfr_params.StarClusterOn) {
             int GasTidalField = param_get_int(ps, "GasTidalField");
             int SCgasVDisp = param_get_int(ps, "SCgasVDisp");
@@ -722,13 +724,18 @@ static double msc_ave_from_cutoff(double Mcut)
  *   - mass function n(m) ~ m^-2 exp(-m/Mcut) on [1e2, 1e8] Msun, cutoff Mcut = group
  *     total (unseeded) stellar mass;
  *   - n = sum_mGamma / <m>; N ~ Poisson(n); then N cluster masses;
- *   - returns the summed mass of sampled clusters above 1e4 Msun (bhseed_msc).
+ *   - returns the summed mass of sampled clusters above 1e4 Msun (bhseed_msc);
+ *   - if total_sampled_out != NULL, also returns there the summed mass of ALL
+ *     sampled clusters (the full draw, no 1e4 Msun threshold).
  * All masses are in code units. rand_id seeds the (reproducible) RNG draws.
  * NOT OpenMP-safe: safe_expint_E1 toggles the global GSL error handler, so this
  * must be called from a serial context. */
 double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
-                                       uint64_t rand_id, const RandTable * const rnd)
+                                       uint64_t rand_id, const RandTable * const rnd,
+                                       double * total_sampled_out)
 {
+    if(total_sampled_out)
+        *total_sampled_out = 0;
     if(Mcut <= 0 || sum_mGamma <= 0)
         return 0;
     double m_ave = msc_ave_from_cutoff(Mcut);
@@ -779,6 +786,7 @@ double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
                   + safe_expint_E1(x_max_s) - E1_xmin;
 
     double bhseed_msc = 0;
+    double total_sampled = 0;
     for(int s = 0; s < N; s++) {
         double u_s = get_random_number(rand_id + 300 + (uint64_t)s, rnd);
         double target = u_s * g_norm;
@@ -793,9 +801,23 @@ double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
                 hi = mid;
         }
         double mass = Mcut * 0.5 * (lo + hi);
+        total_sampled += mass;
         if(mass > sfr_params.msc_seed_thresh_code)
             bhseed_msc += mass;
     }
+    /* Optional cap (SCmasscapSecFOFstarmass): the sampled star-cluster mass cannot
+     * exceed the hosting stellar mass, i.e. the group's total unseeded stellar
+     * mass, which is exactly Mcut. Cap both the full draw (recorded as
+     * init_Msc_sample) and the seed-driving > 1e4 Msun sum, keeping
+     * bhseed_msc <= total_sampled <= Mcut. */
+    if(sfr_params.SCmasscapSecFOFstarmass) {
+        if(total_sampled > Mcut)
+            total_sampled = Mcut;
+        if(bhseed_msc > Mcut)
+            bhseed_msc = Mcut;
+    }
+    if(total_sampled_out)
+        *total_sampled_out = total_sampled;
     return bhseed_msc;
 }
 

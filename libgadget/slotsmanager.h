@@ -69,6 +69,8 @@ struct bh_particle_data {
     int CountProgs;
 
     /***********************/
+    MyFloat init_Msc;        /*!< Cluster-forming mass (Sum of star_mass*Gamma) that seeded this BH. Set at seeding, frozen across mergers (accretor keeps its own). */
+    MyFloat init_Msc_sample; /*!< Star-cluster mass sampled from the mass function that seeded this BH. Set at seeding, frozen across mergers. */
     MyFloat StarClusterMass; /*!< Mass of the star cluster sticked to the black hole */
     MyFloat StarClusterFormationTime; /*!< Formation time of the star cluster sticked to the black hole */
     MyFloat StarClusterMetallicity;        /*!< Total metallicity of the star cluster SSP */
@@ -106,7 +108,7 @@ struct star_particle_data
     int Nsc_sample; /*!< Poisson-sampled integer number of star clusters from NumStarCluster */
     MyFloat StarClusterMass_sample; /*!< Sum of Nsc_sample masses sampled from n(m)~m^-2 exp(-m/Mcstar) (zeroed after BH seeding in secFOF) */
     MyFloat initStarClusterMass_sample; /*!< Original StarClusterMass_sample at star formation (never modified) */
-    int Seeded; /*!< 1 if this star has already contributed to a BH seed (SeedSecFOFcomSample); excluded from later secFOF seeding sums. */
+    int Seeded; /*!< 1 if this star has already contributed to a BH seed (BlackholeSeedSCparticle or SeedSecFOFcomSample); excluded from all later star-cluster seeding sums. ClusterMass is kept as a record. */
 };
 
 /* the following structure holds data that is stored for each SPH particle in addition to the collisionless

@@ -353,6 +353,62 @@ draw runs serially (the GSL E1 wrapper is not OpenMP-safe). Plan at
 
 ---
 
+## 2026-06-02 — Consistent seeded-star handling + total/seeded star-cluster mass in catalogs
+
+Made the two star-cluster BH seeding paths behave consistently and exposed the consumed
+cluster mass in the group catalogs. `BlackholeSeedSCparticle` now flags a seeded star with
+`Seeded=1` and keeps its `ClusterMass` (instead of zeroing it), and skips already-seeded
+stars — matching the `SeedSecFOFcomSample` convention. The `Seeded` flag is now an
+unconditional exclusion from every star-cluster seeding sum (no longer only in com mode),
+which also prevents double-seeding when the per-particle and FOF-based paths run together.
+
+FOF/secFOF group star-cluster mass and metallicity are now accumulated over **all** member
+stars (total), while seeding internally uses new unseeded-only accumulators
+(`StarClusterMassUnseeded`, `StarClusterMassSampleUnseeded`). A new group field
+`SCMass_seeded` records the cluster mass of already-seeded stars and is written to both the
+PIG (`SCMass_seeded`) and SecPIG (`SecSCMass_seeded`) catalogs; the existing `SCMass`/
+`StarClusterMass` output is now the group total (`total = unseeded + SCMass_seeded`). The
+seed-mass payload metallicity is the total-mass-weighted group mean.
+
+**Files modified:** `libgadget/fof.h`, `libgadget/fof.c`, `libgadget/blackhole.c`,
+`libgadget/fofpetaio.c`, `libgadget/secondfof.c`, `libgadget/slotsmanager.h`
+
+---
+
+## 2026-06-02 — Record seeding star-cluster mass on BH (init_Msc, init_Msc_sample)
+
+Added two black-hole properties recording the star-cluster mass that seeded each BH:
+`init_Msc` (cluster-forming mass, Σ star_mass·Γ of the consumed stars) and `init_Msc_sample`
+(the mass drawn from the cluster mass function that triggered the seed). They are set once at
+seeding and never modified by mergers, so an accretor retains its own seed value. Per seeding
+path: per-particle (`BlackholeSeedSCparticle`) uses the star's ClusterMass and
+StarClusterMass_sample; combined per-secFOF (`SeedSecFOFcomSample`) uses the group's unseeded
+cluster-forming mass and the full sampled cluster mass of all consumed stars (the whole draw —
+not just the >1e4 Msun part that sets the seed mass; the combined sampler now also returns this
+total); group star-cluster seeding (`BlackHoleSeedStarCluster`) uses the group's unseeded
+cluster and sampled masses; gas/halo seeds leave both 0. Both are written (non-fatal) to the
+type-5 block of the snapshot (PART), PIG, and SecPIG catalogs, and pre-zeroed when reading
+older snapshots.
+
+**Files modified:** `libgadget/slotsmanager.h`, `libgadget/blackhole.h`,
+`libgadget/blackhole.c`, `libgadget/fof.c`, `libgadget/petaio.c`
+
+---
+
+## 2026-06-02 — Cap combined-sampled SC mass at hosting stellar mass (SCmasscapSecFOFstarmass)
+
+Added int parameter `SCmasscapSecFOFstarmass` (default 0; only relevant with
+`SeedSecFOFcomSample=1`). When 1, the combined per-secFOF star-cluster sampling caps its
+sampled cluster mass at the group's total unseeded stellar mass (the mass-function cutoff
+M_cut), so the sampled SC mass cannot exceed the stellar mass that hosts it. The cap is applied
+to both the full sampled draw (recorded as the BH `init_Msc_sample`) and the seed-driving
+> 1e4 Msun sum that sets the seed mass, preserving bhseed_msc <= total_sampled <= M_cut. When
+0, no cap (previous behaviour).
+
+**Files modified:** `gadget/params.c`, `libgadget/sfr_eff.c`
+
+---
+
 ## TODO
 
 - Allow seeding in primary FOF and secondary FOF to be on in the same run.
