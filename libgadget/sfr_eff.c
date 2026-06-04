@@ -24,6 +24,7 @@
 #include <gsl/gsl_sf_expint.h>
 #include <gsl/gsl_sf_result.h>
 #include <gsl/gsl_errno.h>
+#include <gsl/gsl_machine.h>
 #include "libgadget/timebinmgr.h"
 #include "physconst.h"
 #include "sfr_eff.h"
@@ -682,16 +683,34 @@ double get_helium_neutral_fraction_sfreff(int ion, double redshift, double hubbl
 /* This function turns a particle into a star. It returns 1 if a particle was
  * converted and 2 if a new particle was spawned. This is used
  * above to set stars_{spawned|converted}*/
-/* Wrapper for gsl_sf_expint_E1 that treats underflow as zero
- * instead of triggering GSL's fatal error handler.
- * Must temporarily turn off the GSL error handler because
- * gsl_sf_expint_E1_e still invokes it before returning. */
+/* Wrapper for gsl_sf_expint_E1 that treats underflow as zero instead of
+ * triggering GSL's fatal error handler.
+ *
+ * E1(x) underflows to ~0 once exp(-x)/x is too small to represent (large x,
+ * i.e. small cutoff masses). On underflow gsl_sf_expint_E1_e flags GSL_EUNDRFLW
+ * *by invoking the global GSL error handler* before it returns. gadget/main.c
+ * installs a handler that calls endrun(), and that handler is a single global
+ * shared by every OpenMP thread.
+ *
+ * The previous implementation toggled the handler off/on around the call. That
+ * is correct only in serial: make_particle_star() calls this from inside an
+ * "omp parallel for" (see cooling_and_starformation), so concurrent threads
+ * raced on the global handler — one thread would restore it while another was
+ * still inside gsl_sf_expint_E1_e hitting an underflow, aborting the run with a
+ * spurious "GSL_ERROR ... errno:15 ... underflow".
+ *
+ * Fix: never let GSL reach the underflow branch. Reproduce GSL's own threshold
+ * (GSL 2.6 src/specfunc/expint.c returns UNDERFLOW for x > xmax) and return 0
+ * directly, so the global handler is never invoked. No handler toggling => no
+ * global side effects => thread-safe. */
 static double safe_expint_E1(double x)
 {
-    gsl_error_handler_t *old_handler = gsl_set_error_handler_off();
+    const double xmaxt = -GSL_LOG_DBL_MIN;
+    const double xmax  = xmaxt - log(xmaxt);
+    if(x >= xmax)
+        return 0.0;
     gsl_sf_result result;
     int status = gsl_sf_expint_E1_e(x, &result);
-    gsl_set_error_handler(old_handler);
     if(status == GSL_EUNDRFLW)
         return 0.0;
     if(status)
@@ -872,39 +891,53 @@ static int make_particle_star(int child, int parent, int placement, double Time,
         /* Gas surface density: Sigma_gas = sqrt(2 * P / (pi * G * phi_P)) */
         double Sigma_gas = sqrt(2.0 * Pressure / (M_PI * G * phi_P));
 
-        /* Epicyclic frequency squared from tidal field eigenvalues:
-         * kappa^2 = trace(T) + lambda_1 where lambda_1 is the largest eigenvalue.
-         * Eigenvalues are stored sorted descending. */
+        /* Epicyclic frequency squared from the tidal field eigenvalues (E-MOSAICS eq. A6).
+         * E-MOSAICS uses T_ij = -d^2Phi/dx^2 and kappa^2 = -(sum_i lambda_i) - lambda_1 with
+         * lambda_1 their largest eigenvalue. MP-Gadget stores T_ij = +d^2Phi/dx^2 sorted
+         * descending, so their lambda_1 maps to -eig[2] and the formula becomes
+         *   kappa^2 = trace + eig[2]   (eig[2] = smallest / most negative eigenvalue).
+         * The eigenvalues are comoving (trace = 4 pi G rho_comoving); multiply by a3inv to get
+         * the physical kappa^2 used together with the physical Sigma_gas and densities. */
         double trace = oldslot.TidalFieldEigenvalues[0] + oldslot.TidalFieldEigenvalues[1] + oldslot.TidalFieldEigenvalues[2];
-        double kappa_sq = trace + oldslot.TidalFieldEigenvalues[0];
+        double kappa_sq = (trace + oldslot.TidalFieldEigenvalues[2]) * a3inv;
 
-        /* Toomre mass: M_T = 4 * pi^5 * G^2 * Sigma_gas^3 / kappa^4 */
-        double M_T = 0;
-        if(kappa_sq > 0)
-            M_T = 4.0 * pow(M_PI, 5) * G * G * Sigma_gas * Sigma_gas * Sigma_gas
-                / (kappa_sq * kappa_sq);
-
-        /* Toomre mass collapse fraction f_coll */
-        double f_coll = 1.0;
-        if(kappa_sq > 0 && rho_phys > 0) {
+        /* Maximum cloud (GMC) mass = min(Toomre-limited, feedback-limited) mass.
+         * This equals f_coll * M_T for kappa^2 > 0 (f_coll ~ kappa^4 and M_T ~ kappa^-4 cancel
+         * in the feedback-limited regime), but stays finite for kappa^2 <= 0, where there is no
+         * centrifugal support and the cloud is always feedback-limited. */
+        double M_GMC = 0;
+        if(rho_phys > 0) {
             const double esp_ff = 0.012;
             const double t_sn = sfr_params.t_sn_code;
             const double phi_fb = sfr_params.phi_fb_code;
 
+            /* Cloud feedback timescale t_fbg (independent of kappa) */
             double sigma_loc = sqrt(Pressure / rho_phys);
             double t_ff = sqrt(3.0 * M_PI / (32.0 * G * rho_phys));
-            double tff_2D = sqrt(2.0 * M_PI / kappa_sq);
-
             double term_tmp = 4.0 * t_ff * sigma_loc * sigma_loc
                             / (phi_fb * esp_ff * t_sn * t_sn);
             double t_fbg = t_sn / 2.0 * (1.0 + sqrt(1.0 + term_tmp));
-            f_coll = t_fbg / tff_2D;
-            if(f_coll > 1.0)
-                f_coll = 1.0;
+
+            /* Feedback-limited mass: M_fb = pi^3 G^2 Sigma_gas^3 t_fbg^4  (== f_coll * M_T) */
+            double M_feedback = pow(M_PI, 3) * G * G
+                              * Sigma_gas * Sigma_gas * Sigma_gas
+                              * t_fbg * t_fbg * t_fbg * t_fbg;
+
+            if(kappa_sq > 0) {
+                /* Toomre mass: M_T = 4 * pi^5 * G^2 * Sigma_gas^3 / kappa^4 */
+                double M_T = 4.0 * pow(M_PI, 5) * G * G
+                           * Sigma_gas * Sigma_gas * Sigma_gas
+                           / (kappa_sq * kappa_sq);
+                M_GMC = M_T < M_feedback ? M_T : M_feedback;
+            }
+            else {
+                /* kappa^2 <= 0: no centrifugal support, always feedback-limited */
+                M_GMC = M_feedback;
+            }
         }
 
-        /* M_cstar = 0.1 * CFE * f_coll * M_T */
-        double Mcstar = 0.1 * CFE * f_coll * M_T;
+        /* M_cstar = 0.1 * CFE * M_GMC  (0.1 = star formation efficiency per cloud) */
+        double Mcstar = 0.1 * CFE * M_GMC;
         STARP(child).Mcstar = Mcstar;
 
         if(sfr_params.StarClusterSampling && !sfr_params.SeedSecFOFcomSample) {

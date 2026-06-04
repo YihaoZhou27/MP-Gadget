@@ -409,6 +409,36 @@ to both the full sampled draw (recorded as the BH `init_Msc_sample`) and the see
 
 ---
 
+## 2026-06-03 — Fix epicyclic frequency and feedback-limited M_cstar (StarCluster)
+
+Corrected the epicyclic frequency used in the star-cluster Toomre-mass model to match the
+E-MOSAICS prescription (Pfeffer et al. 2018, eq. A6): the model now uses the smallest tidal
+eigenvalue (radial direction) rather than the largest, and converts the (comoving) tidal field
+to physical units before forming kappa^2, consistent with the analysis notebook `code/SC_MF.ipynb`.
+Replaced the explicit Toomre-mass × collapse-fraction product with the equivalent
+min(Toomre-limited, feedback-limited) cloud mass: this reproduces the previous result where gas
+is rotationally supported, restores the missing quartic feedback dependence, and now assigns a
+finite feedback-limited cluster mass (instead of zero) in compressive regions that have no
+centrifugal support (kappa^2 <= 0).
+
+**Files modified:** `libgadget/sfr_eff.c`
+
+---
+
+## 2026-06-04 — Fix OpenMP race in safe_expint_E1 (spurious GSL underflow abort)
+
+Fixed a crash (`GSL_ERROR ... expint.c ... errno:15 underflow`, MPI_Abort 2001) that occurred
+during star-cluster sampling. `safe_expint_E1` suppressed the expected large-x E1 underflow by
+toggling GSL's global error handler off/on around the call, but it is invoked from
+`make_particle_star` inside an OpenMP parallel for, so concurrent threads raced on the shared
+global handler and intermittently aborted. The wrapper now reproduces GSL's own underflow
+threshold and returns 0 for those x without calling GSL, so the global handler is never invoked —
+making the function thread-safe with no global side effects.
+
+**Files modified:** `libgadget/sfr_eff.c`
+
+---
+
 ## TODO
 
 - Allow seeding in primary FOF and secondary FOF to be on in the same run.

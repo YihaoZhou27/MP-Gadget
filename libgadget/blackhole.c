@@ -1379,7 +1379,7 @@ bh_powerlaw_seed_mass(const MyIDType ID, const RandTable * const rnd)
 }
 
 void
-blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat StarClusterMetallicity, const float * StarClusterMetals) {
+blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals) {
     int child;
     int spawn_from_star = seeded_by_starcluster && (P[index].Type == 4);
 
@@ -1462,6 +1462,10 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
      * never modified by mergers, so an accretor keeps its own seed value. */
     BHP(child).init_Msc = init_Msc;
     BHP(child).init_Msc_sample = init_Msc_sample;
+    /* SeedSecFOFcomSample only (0 otherwise): total mass of the host secFOF's
+     * unseeded star particles (= Mcut, the SCmasscapSecFOFstarmass cap value).
+     * Debug-only output; frozen at creation like init_Msc. */
+    BHP(child).CappedStarMass = CappedStarMass;
 
     /* Initialize MinPotPos to the current position to avoid drifting
      * to unknown locations (0,0,0) immediately after creation. */
@@ -1612,7 +1616,7 @@ blackhole_seed_sc_particle(ActiveParticles * act, double atime,
 
         blackhole_make_one(pi, atime, rnd, 1, sc_mass, sc_mass,
                            STARP(pi).ClusterMass, STARP(pi).StarClusterMass_sample,
-                           sc_metallicity, sc_metals);
+                           0, sc_metallicity, sc_metals);
 
         /* Flag the parent star as having contributed to a BH seed so it is
          * excluded from any further seeding (here and in FOF group sums). Keep

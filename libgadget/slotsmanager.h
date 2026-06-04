@@ -71,6 +71,7 @@ struct bh_particle_data {
     /***********************/
     MyFloat init_Msc;        /*!< Cluster-forming mass (Sum of star_mass*Gamma) that seeded this BH. Set at seeding, frozen across mergers (accretor keeps its own). */
     MyFloat init_Msc_sample; /*!< Star-cluster mass sampled from the mass function that seeded this BH. Set at seeding, frozen across mergers. */
+    MyFloat CappedStarMass;  /*!< SeedSecFOFcomSample only: total mass of the unseeded star particles of the host secFOF (= Mcut, the SCmasscapSecFOFstarmass cap value). 0 otherwise. Debug-only output. Set at seeding, frozen across mergers. */
     MyFloat StarClusterMass; /*!< Mass of the star cluster sticked to the black hole */
     MyFloat StarClusterFormationTime; /*!< Formation time of the star cluster sticked to the black hole */
     MyFloat StarClusterMetallicity;        /*!< Total metallicity of the star cluster SSP */

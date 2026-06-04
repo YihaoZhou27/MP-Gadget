@@ -1505,6 +1505,10 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
      * init_msc_sample = the mass sampled from the cluster mass function. Both 0
      * for non star-cluster (gas/halo) seeds. */
     MyFloat init_msc = 0, init_msc_sample = 0;
+    /* Debug-only record: total mass of the host secFOF's unseeded star particles
+     * (= Mcut, the SCmasscapSecFOFstarmass cap value). Only meaningful in the
+     * combined-sample mode; 0 for all other seeding paths. */
+    MyFloat capped_star_mass = 0;
     int seeded_by_starcluster;
     if(fof_params.SeedSecFOFcomSample) {
         /* Combined-sample seeding: Gate 2 already passed in fof_seed.
@@ -1518,6 +1522,7 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
          * that sets the seed mass). */
         init_msc = g->StarClusterMassUnseeded;
         init_msc_sample = g->BHSampledMscTotal;
+        capped_star_mass = g->SCcomMcut;
     } else {
         /* Select which star cluster mass to use based on StarClusterSampling.
          * Must use the same (unseeded) mass variable as the marking code in fof_seed. */
@@ -1540,7 +1545,7 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
         for(j = 0; j < NMETALS; j++)
             sc_metals[j] = g->StarClusterMetalElemMass[j] / g->StarClusterMass;
     }
-    blackhole_make_one(index, atime, rnd, seeded_by_starcluster, payload_mass, scaling_mass, init_msc, init_msc_sample, sc_metallicity, sc_metals);
+    blackhole_make_one(index, atime, rnd, seeded_by_starcluster, payload_mass, scaling_mass, init_msc, init_msc_sample, capped_star_mass, sc_metallicity, sc_metals);
 }
 
 void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTable * const rnd,
