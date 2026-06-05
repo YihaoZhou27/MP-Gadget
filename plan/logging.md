@@ -453,6 +453,16 @@ The filter is applied in the FOF engine's small-group elimination stage (alongsi
 
 ---
 
+## 2026-06-05 — secondary-FOF seeding: flag Seeded instead of zeroing ClusterMass (SeedSecFOFcomSample OFF)
+
+**Branch:** SecFOFCombined
+
+Made the post-seeding bookkeeping in secondary-FOF BH seeding consistent across all modes. Previously, with `SeedSecFOFcomSample` OFF, stars in a just-seeded group had their `ClusterMass`/`StarClusterMass_sample` zeroed, while the combined-sample mode and the per-star seeder only set the `Seeded` flag. Now all paths set `Seeded = 1` and keep `ClusterMass`/`StarClusterMass_sample` as a record. This is safe because the group-property accumulation already excludes `Seeded` stars from the unseeded cluster-mass sums that drive seeding (no behavior change to the seeding decision).
+
+**Files modified:** `libgadget/secondfof.c`, `libgadget/slotsmanager.h`
+
+---
+
 ## TODO
 
 - Allow seeding in primary FOF and secondary FOF to be on in the same run.

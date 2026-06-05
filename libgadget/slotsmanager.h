@@ -101,13 +101,13 @@ struct star_particle_data
     MyFloat BirthInternalEnergy; /*!< Internal energy of gas particle at star formation. */
     float FormationTime;      /*!< formation time of star particle */
     MyFloat ClusterFormationEfficiency; /*!< Cluster formation efficiency of star particle */
-    MyFloat ClusterMass; /*!< Mass of the cluster formed from this star particle (zeroed after BH seeding in secFOF) */
+    MyFloat ClusterMass; /*!< Mass of the cluster formed from this star particle (kept as a record after BH seeding; the star is flagged via Seeded instead) */
     MyFloat initClusterMass; /*!< Original ClusterMass at star formation (never modified) */
     MyFloat Mcstar; /*!< Star cluster mass from Toomre mass model: 0.1 * CFE * f_coll * M_T */
     MyFloat Msc_ave; /*!< Average mass of cluster MF n(m) ~ m^-2 exp(-m/Mcstar) over [1e2, 1e8] Msun */
     float NumStarCluster; /*!< Number of star clusters: ClusterMass / Msc_ave */
     int Nsc_sample; /*!< Poisson-sampled integer number of star clusters from NumStarCluster */
-    MyFloat StarClusterMass_sample; /*!< Sum of Nsc_sample masses sampled from n(m)~m^-2 exp(-m/Mcstar) (zeroed after BH seeding in secFOF) */
+    MyFloat StarClusterMass_sample; /*!< Sum of Nsc_sample masses sampled from n(m)~m^-2 exp(-m/Mcstar) (kept as a record after BH seeding; the star is flagged via Seeded instead) */
     MyFloat initStarClusterMass_sample; /*!< Original StarClusterMass_sample at star formation (never modified) */
     int Seeded; /*!< 1 if this star has already contributed to a BH seed (BlackholeSeedSCparticle or SeedSecFOFcomSample); excluded from all later star-cluster seeding sums. ClusterMass is kept as a record. */
 };

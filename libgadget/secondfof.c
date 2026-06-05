@@ -827,9 +827,10 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
     int n_local_seeded = 0;
     fof_seed(&secfof, act, atime, rnd, &local_seeded_grnr, &n_local_seeded, Comm);
 
-    /* Zero ClusterMass and StarClusterMass_sample for all type-4 stars in
-     * secondary FOF groups that just had a BH seeded.  The star cluster mass
-     * has been transferred to BHP.StarClusterMass on the new BH.
+    /* Flag (Seeded=1) all type-4 stars in secondary FOF groups that just had a
+     * BH seeded, so they are excluded from future seeding sums.  ClusterMass and
+     * StarClusterMass_sample are kept on the star as a record (the seed payload
+     * mass has already been recorded on BHP.StarClusterMass of the new BH).
      * Since groups may span MPI ranks, we Allgather the seeded GrNr set. */
     int NTask;
     MPI_Comm_size(Comm, &NTask);
@@ -854,9 +855,9 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
         /* Sort for binary search */
         qsort(all_seeded_grnr, n_total_seeded, sizeof(int64_t), cmp_int64);
 
-        /* Zero ClusterMass/StarClusterMass_sample for type-4 stars in seeded groups */
-        int64_t n_zeroed = 0;
-        #pragma omp parallel for reduction(+:n_zeroed)
+        /* Flag (Seeded=1) type-4 stars in seeded groups */
+        int64_t n_marked = 0;
+        #pragma omp parallel for reduction(+:n_marked)
         for(i = 0; i < PartManager->NumPart; i++) {
             if(P[i].Type != 4 || P[i].GrNr < 0)
                 continue;
@@ -871,23 +872,21 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
                 else hi = mid;
             }
             if(found) {
-                if(sfof_params.SeedSecFOFcomSample) {
-                    /* Combined-sample mode: mark the star as having contributed to
-                     * a BH seed so it is excluded from future seeding sums; keep
-                     * ClusterMass as a record. */
-                    STARP(i).Seeded = 1;
-                } else {
-                    STARP(i).ClusterMass = 0;
-                    STARP(i).StarClusterMass_sample = 0;
-                }
-                n_zeroed++;
+                /* Mark the star as having contributed to a BH seed so it is
+                 * excluded from future seeding sums; keep ClusterMass and
+                 * StarClusterMass_sample as a record. The group accumulation in
+                 * fof.c keys off Seeded (not zeroed ClusterMass), so this is
+                 * consistent across all seeding paths (SeedSecFOFcomSample on/off
+                 * and BlackholeSeedSCparticle). */
+                STARP(i).Seeded = 1;
+                n_marked++;
             }
         }
 
-        int64_t n_zeroed_total;
-        MPI_Allreduce(&n_zeroed, &n_zeroed_total, 1, MPI_INT64, MPI_SUM, Comm);
-        message(0, "SecondFOF seed: zeroed ClusterMass/StarClusterMass_sample for %ld stars "
-                   "in %d seeded groups.\n", n_zeroed_total, n_total_seeded);
+        int64_t n_marked_total;
+        MPI_Allreduce(&n_marked, &n_marked_total, 1, MPI_INT64, MPI_SUM, Comm);
+        message(0, "SecondFOF seed: flagged Seeded=1 for %ld stars "
+                   "in %d seeded groups.\n", n_marked_total, n_total_seeded);
 
         myfree(all_seeded_grnr);
     }
