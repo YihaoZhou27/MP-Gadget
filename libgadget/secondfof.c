@@ -33,6 +33,7 @@ struct SecondFOFParams {
     int SecondaryLinkTypes;
     double LinkingLength;   /* comoving, in code units (kpc/h) */
     int MinLength;
+    int MinPrimaryLength;   /* drop groups with fewer primary-link particles from the catalog (0 = off) */
     int ComputeSize;        /* compute R50, R90, Rmax */
     int SecFOFonly;          /* skip primary FOF catalog, only save SecPIG */
     int SeedInSecFOFasStarCluster; /* use StarCluster BH-seeding in sec FOF catalog */
@@ -53,6 +54,7 @@ void set_secondfof_params(ParameterSet * ps)
         sfof_params.SecondaryLinkTypes = param_get_int(ps, "SecondFOFSecondaryLinkTypes");
         sfof_params.LinkingLength = param_get_double(ps, "SecondFOFLinkingLength");
         sfof_params.MinLength = param_get_int(ps, "SecondFOFMinLength");
+        sfof_params.MinPrimaryLength = param_get_int(ps, "SecondFOFMinPrimaryLength");
         sfof_params.ComputeSize = param_get_int(ps, "SecondFOFSize");
         sfof_params.SecFOFonly = param_get_int(ps, "SecFOFonly");
         sfof_params.SeedInSecFOFasStarCluster = param_get_int(ps, "SeedInSecFOFasStarCluster");
@@ -755,10 +757,12 @@ static void secondfof_write_header(BigFile * bf, int64_t TotNgroups, const doubl
     /* Second FOF specific attributes */
     double ll = sfof_params.LinkingLength;
     int minlen = sfof_params.MinLength;
+    int minprimlen = sfof_params.MinPrimaryLength;
     int primary = sfof_params.PrimaryLinkTypes;
     int secondary = sfof_params.SecondaryLinkTypes;
     big_block_set_attr(&bh, "SecondFOFLinkingLength", &ll, "f8", 1);
     big_block_set_attr(&bh, "SecondFOFMinLength", &minlen, "i4", 1);
+    big_block_set_attr(&bh, "SecondFOFMinPrimaryLength", &minprimlen, "i4", 1);
     big_block_set_attr(&bh, "SecondFOFPrimaryLinkTypes", &primary, "i4", 1);
     big_block_set_attr(&bh, "SecondFOFSecondaryLinkTypes", &secondary, "i4", 1);
 
@@ -786,18 +790,21 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
     message(0, "Seeding black holes using secondary FOF catalog (StarCluster criteria).\n");
 
     /* Save current FOF parameters */
-    int save_PrimaryLT, save_SecondaryLT, save_MinLen, save_PotMin;
+    int save_PrimaryLT, save_SecondaryLT, save_MinLen, save_PotMin, save_MinPrimLen;
     double save_LinkLen;
     fof_get_params(&save_PrimaryLT, &save_SecondaryLT,
-                   &save_LinkLen, &save_MinLen, &save_PotMin);
+                   &save_LinkLen, &save_MinLen, &save_PotMin, &save_MinPrimLen);
 
     int save_SeedSC, save_SeedHalo, save_SeedGas;
     fof_get_seed_params(&save_SeedSC, &save_SeedHalo, &save_SeedGas);
 
     /* Override with secondary FOF linking parameters.
-     * Enable FOFPotentialMin so that PotMin/PotMinPos are tracked for group centers. */
+     * Enable FOFPotentialMin so that PotMin/PotMinPos are tracked for group centers.
+     * MinPrimaryLength drops groups with too few primary-link particles so they
+     * are not counted as a FOF at all (excluded from both seeding and the catalog). */
     fof_set_params(sfof_params.PrimaryLinkTypes, sfof_params.SecondaryLinkTypes,
-                   sfof_params.LinkingLength, sfof_params.MinLength, 1);
+                   sfof_params.LinkingLength, sfof_params.MinLength, 1,
+                   sfof_params.MinPrimaryLength);
 
     /* Override seeding params: only StarCluster-based seeding in sec FOF */
     fof_set_seed_params(1, 0, 0);
@@ -909,7 +916,7 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
 
     /* Restore original FOF parameters */
     fof_set_params(save_PrimaryLT, save_SecondaryLT,
-                   save_LinkLen, save_MinLen, save_PotMin);
+                   save_LinkLen, save_MinLen, save_PotMin, save_MinPrimLen);
     fof_set_seed_params(save_SeedSC, save_SeedHalo, save_SeedGas);
 }
 
@@ -923,10 +930,11 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential, MPI
     message(0, "Begin second FOF (star-primary) computation.\n");
 
     /* Step 1: Save current FOF parameters */
-    int save_PrimaryLinkTypes, save_SecondaryLinkTypes, save_MinLength, save_PotentialMin;
+    int save_PrimaryLinkTypes, save_SecondaryLinkTypes, save_MinLength, save_PotentialMin, save_MinPrimaryLength;
     double save_ComovingLinkingLength;
     fof_get_params(&save_PrimaryLinkTypes, &save_SecondaryLinkTypes,
-                   &save_ComovingLinkingLength, &save_MinLength, &save_PotentialMin);
+                   &save_ComovingLinkingLength, &save_MinLength, &save_PotentialMin,
+                   &save_MinPrimaryLength);
 
     /* Step 2: Save current GrNr for all particles */
     int64_t * saved_GrNr = (int64_t *) mymalloc("SecFOF_SavedGrNr", sizeof(int64_t) * PartManager->NumPart);
@@ -935,9 +943,12 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential, MPI
         saved_GrNr[i] = P[i].GrNr;
 
     /* Step 3: Override FOF parameters with second FOF values.
-     * Enable PotMin tracking only when potential data is available. */
+     * Enable PotMin tracking only when potential data is available.
+     * MinPrimaryLength drops groups with too few primary-link particles from
+     * the catalog (their particles get GrNr=-1 and are excluded automatically). */
     fof_set_params(sfof_params.PrimaryLinkTypes, sfof_params.SecondaryLinkTypes,
-                   sfof_params.LinkingLength, sfof_params.MinLength, OutputPotential);
+                   sfof_params.LinkingLength, sfof_params.MinLength, OutputPotential,
+                   sfof_params.MinPrimaryLength);
 
     /* Step 4: Run the FOF algorithm */
     FOFGroups fof = fof_fof(ddecomp, 1, Comm);
@@ -961,7 +972,8 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential, MPI
 
     /* Step 7: Restore original FOF parameters */
     fof_set_params(save_PrimaryLinkTypes, save_SecondaryLinkTypes,
-                   save_ComovingLinkingLength, save_MinLength, save_PotentialMin);
+                   save_ComovingLinkingLength, save_MinLength, save_PotentialMin,
+                   save_MinPrimaryLength);
 
     /* Step 8: Compute extra group properties.
      * PotMin/PotMinPos are already computed by fof_compile_catalogue

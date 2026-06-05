@@ -15,10 +15,10 @@ void fof_init(double DMMeanSeparation);
 /* Allow secondfof.c to temporarily override FOF parameters */
 void fof_get_params(int *PrimaryLinkTypes, int *SecondaryLinkTypes,
                     double *ComovingLinkingLength, int *MinLength,
-                    int *PotentialMin);
+                    int *PotentialMin, int *MinPrimaryLength);
 void fof_set_params(int PrimaryLinkTypes, int SecondaryLinkTypes,
                     double ComovingLinkingLength, int MinLength,
-                    int PotentialMin);
+                    int PotentialMin, int MinPrimaryLength);
 void fof_get_seed_params(int *BlackHoleSeedStarCluster, int *BlackHoleSeedHaloBased,
                          int *BlackHoleSeedGasBased);
 void fof_set_seed_params(int BlackHoleSeedStarCluster, int BlackHoleSeedHaloBased,
@@ -30,6 +30,9 @@ struct BaseGroup {
     int OriginalTask;
     int OriginalIndex;
     int Length;
+    /* Number of primary-linking-type particles in the group. Used by the
+     * second FOF MinPrimaryLength filter; counted in fof_compile_base. */
+    int LenPrimary;
     int GrNr;
     MyIDType MinID;
     int MinIDTask;

@@ -210,6 +210,7 @@ create_gadget_parameter_set()
     param_declare_int(ps, "FOFSaveParticles", OPTIONAL, 1, "Save particles in the FOF catalog.");
     param_declare_double(ps, "FOFHaloLinkingLength", OPTIONAL, 0.2, "Linking length for Friends of Friends halos.");
     param_declare_int(ps, "FOFHaloMinLength", OPTIONAL, 32, "Minimum number of particles per FOF Halo.");
+    param_declare_int(ps, "FOFMinPrimaryLength", OPTIONAL, 0, "Minimum number of primary-linking-type particles per FOF Halo. Halos with fewer primary particles are not counted as a FOF (excluded from the catalog and from BH seeding). 0 disables the filter.");
     param_declare_int(ps, "FOFPotentialMin", OPTIONAL, 0, "Track the position of minimum gravitational potential in FOF groups.");
     param_declare_double(ps, "MinFoFMassForNewSeed", OPTIONAL, 2, "Minimal halo mass for seeding tracer particles in internal mass units.");
     param_declare_double(ps, "MinMStarForNewSeed", OPTIONAL, 5e-4, "Minimal stellar mass in halo for seeding black holes in internal mass units.");
@@ -221,6 +222,7 @@ create_gadget_parameter_set()
     param_declare_int(ps, "SecondFOFSecondaryLinkTypes", OPTIONAL, 1, "2^ particle types for secondary linking in second FOF.");
     param_declare_double(ps, "SecondFOFLinkingLength", OPTIONAL, 0.01, "Comoving linking length for second FOF in code units (kpc/h).");
     param_declare_int(ps, "SecondFOFMinLength", OPTIONAL, 32, "Minimum particle count per group in second FOF.");
+    param_declare_int(ps, "SecondFOFMinPrimaryLength", OPTIONAL, 0, "Minimum number of primary-linking-type particles per group in second FOF. Groups with fewer primary particles are dropped from the SecPIG catalog. 0 disables the filter.");
     param_declare_string(ps, "SecondFOFFileBase", OPTIONAL, "SecPIG", "Base name of the second FOF catalog files.");
     param_declare_int(ps, "SecondFOFSize", OPTIONAL, 0, "Compute group size properties (R50, R90, Rmax) in second FOF.");
     param_declare_int(ps, "SecFOFonly", OPTIONAL, 0, "If 1, skip saving the primary FOF catalog (PIG) and only save the second FOF catalog (SecPIG). Primary FOF still runs internally.");

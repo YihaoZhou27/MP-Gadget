@@ -439,6 +439,20 @@ making the function thread-safe with no global side effects.
 
 ---
 
+## 2026-06-04 — FOFMinPrimaryLength / SecondFOFMinPrimaryLength: minimum primary-particle count per FOF group
+
+**Branch:** SecFOFCombined
+
+Added two integer parameters (both default 0 = disabled) that drop FOF groups with too few primary-linking-type particles, so such groups are no longer counted as a FOF at all — excluded from the catalog and from BH seeding:
+- `FOFMinPrimaryLength` — applies to the primary FOF.
+- `SecondFOFMinPrimaryLength` — applies to the secondary FOF (both the SecPIG catalog and secondary-FOF BH seeding).
+
+The filter is applied in the FOF engine's small-group elimination stage (alongside the existing min-length cut), so the existing group-number assignment keeps group and particle catalogs consistent and particles in dropped groups get GrNr=-1. The secondary value is recorded as a `SecondFOFMinPrimaryLength` attribute in the SecPIG header.
+
+**Files modified:** `gadget/params.c`, `libgadget/fof.h`, `libgadget/fof.c`, `libgadget/secondfof.c`
+
+---
+
 ## TODO
 
 - Allow seeding in primary FOF and secondary FOF to be on in the same run.

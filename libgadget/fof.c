@@ -48,6 +48,11 @@ struct FOFParams
 
 
     int FOFHaloMinLength;
+    /* Minimum number of primary-linking-type particles per group.
+     * Groups below this are eliminated in fof_compile_base. 0 disables it.
+     * Primary FOF reads it from "FOFMinPrimaryLength"; the second FOF overrides
+     * it with "SecondFOFMinPrimaryLength" via fof_set_params. */
+    int FOFMinPrimaryLength;
     int FOFPrimaryLinkTypes;
     int FOFSecondaryLinkTypes;
     int ExcursionSetReionOn;
@@ -72,6 +77,7 @@ void set_fof_params(ParameterSet * ps)
         fof_params.FOFSaveParticles = param_get_int(ps, "FOFSaveParticles");
         fof_params.FOFHaloLinkingLength = param_get_double(ps, "FOFHaloLinkingLength");
         fof_params.FOFHaloMinLength = param_get_int(ps, "FOFHaloMinLength");
+        fof_params.FOFMinPrimaryLength = param_get_int(ps, "FOFMinPrimaryLength");
         fof_params.MinFoFMassForNewSeed = param_get_double(ps, "MinFoFMassForNewSeed");
         fof_params.MinMStarForNewSeed = param_get_double(ps, "MinMStarForNewSeed");
         fof_params.BlackHoleSeedsfmpGas = param_get_double(ps, "BlackHoleSeedsfmpGas");
@@ -112,6 +118,7 @@ void set_fof_testpar(int FOFSaveParticles, double FOFHaloLinkingLength, int FOFH
     fof_params.BlackHoleseedsMetalThres = 1e-4;
 
     fof_params.FOFPotentialMin = 0;
+    fof_params.FOFMinPrimaryLength = 0;
 }
 
 void fof_init(double DMMeanSeparation)
@@ -121,24 +128,26 @@ void fof_init(double DMMeanSeparation)
 
 void fof_get_params(int *PrimaryLinkTypes, int *SecondaryLinkTypes,
                     double *ComovingLinkingLength, int *MinLength,
-                    int *PotentialMin)
+                    int *PotentialMin, int *MinPrimaryLength)
 {
     *PrimaryLinkTypes = fof_params.FOFPrimaryLinkTypes;
     *SecondaryLinkTypes = fof_params.FOFSecondaryLinkTypes;
     *ComovingLinkingLength = fof_params.FOFHaloComovingLinkingLength;
     *MinLength = fof_params.FOFHaloMinLength;
     *PotentialMin = fof_params.FOFPotentialMin;
+    *MinPrimaryLength = fof_params.FOFMinPrimaryLength;
 }
 
 void fof_set_params(int PrimaryLinkTypes, int SecondaryLinkTypes,
                     double ComovingLinkingLength, int MinLength,
-                    int PotentialMin)
+                    int PotentialMin, int MinPrimaryLength)
 {
     fof_params.FOFPrimaryLinkTypes = PrimaryLinkTypes;
     fof_params.FOFSecondaryLinkTypes = SecondaryLinkTypes;
     fof_params.FOFHaloComovingLinkingLength = ComovingLinkingLength;
     fof_params.FOFHaloMinLength = MinLength;
     fof_params.FOFPotentialMin = PotentialMin;
+    fof_params.FOFMinPrimaryLength = MinPrimaryLength;
 }
 
 void fof_get_seed_params(int *BlackHoleSeedStarCluster, int *BlackHoleSeedHaloBased,
@@ -661,6 +670,7 @@ static void fof_reduce_base_group(void * pdst, void * psrc) {
     struct BaseGroup * gdst = (struct BaseGroup *) pdst;
     struct BaseGroup * gsrc = (struct BaseGroup *) psrc;
     gdst->Length += gsrc->Length;
+    gdst->LenPrimary += gsrc->LenPrimary;
     /* preserve the dst FirstPos so all other base group gets the same FirstPos */
 }
 
@@ -949,16 +959,21 @@ fof_compile_base(struct BaseGroup * base, int NgroupsExt, struct fof_particle_li
                 break;
             }
             base[i].Length ++;
+            if((1 << P[HaloLabel[start].Pindex].Type) & fof_params.FOFPrimaryLinkTypes)
+                base[i].LenPrimary ++;
         }
     }
 
     /* update global attributes */
     fof_reduce_groups(base, NgroupsExt, sizeof(base[0]), fof_reduce_base_group, Comm);
 
-    /* eliminate all groups that are too small */
+    /* eliminate all groups that are too small. The FOFMinPrimaryLength filter
+     * (0 = off, set only by the second FOF) additionally drops groups with too
+     * few primary-linking-type particles. */
     for(i = 0; i < NgroupsExt; i++)
     {
-        if(base[i].Length < fof_params.FOFHaloMinLength)
+        if(base[i].Length < fof_params.FOFHaloMinLength
+           || base[i].LenPrimary < fof_params.FOFMinPrimaryLength)
         {
             base[i] = base[NgroupsExt - 1];
             NgroupsExt--;
