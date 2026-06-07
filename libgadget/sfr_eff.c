@@ -751,7 +751,7 @@ static double msc_ave_from_cutoff(double Mcut)
  * must be called from a serial context. */
 double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
                                        uint64_t rand_id, const RandTable * const rnd,
-                                       double * total_sampled_out)
+                                       double * total_sampled_out, int allow_cap)
 {
     if(total_sampled_out)
         *total_sampled_out = 0;
@@ -828,8 +828,11 @@ double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
      * exceed the hosting stellar mass, i.e. the group's total unseeded stellar
      * mass, which is exactly Mcut. Cap both the full draw (recorded as
      * init_Msc_sample) and the seed-driving > 1e4 Msun sum, keeping
-     * bhseed_msc <= total_sampled <= Mcut. */
-    if(sfr_params.SCmasscapSecFOFstarmass) {
+     * bhseed_msc <= total_sampled <= Mcut.
+     * Skipped when allow_cap == 0: the per-particle sampler (SeedSecFOFcomSampleParticle)
+     * passes Mcut = min(M_cstar, group stellar mass) per star, so the cap must be
+     * applied on the group-summed total instead, not on each per-star draw. */
+    if(allow_cap && sfr_params.SCmasscapSecFOFstarmass) {
         if(total_sampled > Mcut)
             total_sampled = Mcut;
         if(bhseed_msc > Mcut)
@@ -838,6 +841,14 @@ double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
     if(total_sampled_out)
         *total_sampled_out = total_sampled;
     return bhseed_msc;
+}
+
+/* Whether the combined-sampled SC mass is capped at the group's unseeded stellar
+ * mass. Exposed so fof.c can apply the cap on the group-summed tot_msc_fof in the
+ * per-particle (SeedSecFOFcomSampleParticle) seeding mode. */
+int get_scmasscap_secfof_starmass(void)
+{
+    return sfr_params.SCmasscapSecFOFstarmass;
 }
 
 static int make_particle_star(int child, int parent, int placement, double Time, const double GravInternal, const RandTable * const rnd)

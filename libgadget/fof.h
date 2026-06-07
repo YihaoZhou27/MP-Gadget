@@ -131,9 +131,14 @@ void fof_finish(FOFGroups * fof);
  * The active particle struct is used only because we may need to reallocate it. Random number seeds the BH mass.
  * If seeded_grnr_out != NULL, the GrNr of each locally-seeded group is written there
  * and *n_seeded_out is set to the count. The caller must myfree the returned array.
- * Pass NULL for both to skip collection (e.g. primary FOF callers). */
+ * If seeded_totmsc_out / seeded_mcut_out != NULL, the per-group tot_msc_fof
+ * (BHSeedMsc) and unseeded stellar mass (SCcomMcut) are returned in parallel
+ * arrays (used by secondfof_seed for SeedSecFOFcomSampleParticle redistribution).
+ * The caller must myfree any returned arrays in reverse allocation order
+ * (mcut, then totmsc, then grnr). Pass NULL to skip collection (e.g. primary FOF). */
 void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTable * const rnd,
-              int64_t ** seeded_grnr_out, int * n_seeded_out, MPI_Comm Comm);
+              int64_t ** seeded_grnr_out, int * n_seeded_out,
+              double ** seeded_totmsc_out, double ** seeded_mcut_out, MPI_Comm Comm);
 
 /* Saves the Group structure to disc.
  Returns 1 if a domain_exchange is needed afterwards.*/

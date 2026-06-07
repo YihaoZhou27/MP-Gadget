@@ -697,7 +697,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                         /* Seed BH using secondary FOF catalog */
                         secondfof_seed(ddecomp, &Act, atime, &rnd, MPI_COMM_WORLD);
                     } else if(need_fof_seeding) {
-                        fof_seed(&fof, &Act, atime, &rnd, NULL, NULL, MPI_COMM_WORLD);
+                        fof_seed(&fof, &Act, atime, &rnd, NULL, NULL, NULL, NULL, MPI_COMM_WORLD);
                     }
                     /* Seed BH from individual star particles with large SC mass.
                      * When BHseedEveryTimestep is on, this is handled after

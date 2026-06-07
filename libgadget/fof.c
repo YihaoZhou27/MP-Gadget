@@ -63,6 +63,7 @@ struct FOFParams
     int StarClusterOn;
     int StarClusterSampling;
     int SeedSecFOFcomSample; /* combined per-secFOF star-cluster sampling for BH seeding */
+    int SeedSecFOFcomSampleParticle; /* per-star-particle sampling variant of SeedSecFOFcomSample */
     int BHseedMassScaleMsc;
     double MinMscForBHseed;
     int FOFPotentialMin;
@@ -91,6 +92,7 @@ void set_fof_params(ParameterSet * ps)
         fof_params.StarClusterOn = param_get_int(ps, "StarClusterOn");
         fof_params.StarClusterSampling = param_get_int(ps, "StarClusterSampling");
         fof_params.SeedSecFOFcomSample = param_get_int(ps, "SeedSecFOFcomSample");
+        fof_params.SeedSecFOFcomSampleParticle = param_get_int(ps, "SeedSecFOFcomSampleParticle");
         fof_params.BHseedMassScaleMsc = param_get_int(ps, "BHseedMassScaleMsc");
         fof_params.MinMscForBHseed = param_get_double(ps, "MinMscForBHseed");
 
@@ -1563,8 +1565,170 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
     blackhole_make_one(index, atime, rnd, seeded_by_starcluster, payload_mass, scaling_mass, init_msc, init_msc_sample, capped_star_mass, sc_metallicity, sc_metals);
 }
 
+/* --- SeedSecFOFcomSampleParticle: per-star-particle star-cluster sampling ---
+ * One candidate secFOF group (passed Gate 1), broadcast to all ranks so each rank
+ * can sample the local member stars it holds. */
+struct sc_particle_cand {
+    int64_t GrNr;
+    double Mcut;   /* SCcomMcut: group total unseeded stellar mass */
+};
+
+static int cmp_sc_particle_cand(const void * a, const void * b)
+{
+    int64_t ga = ((const struct sc_particle_cand *)a)->GrNr;
+    int64_t gb = ((const struct sc_particle_cand *)b)->GrNr;
+    return (ga > gb) - (ga < gb);
+}
+
+/* Per-particle replacement for the single combined per-group draw. For every
+ * secFOF group passing Gate 1 (StarClusterMassUnseeded >= MinMscForBHseed with a
+ * valid seed star), each UNSEEDED member star draws its own cluster population
+ * (mass function n(m) ~ m^-2 exp(-m/m_cut), cutoff m_cut = min(M_cstar, group
+ * unseeded stellar mass)); the clusters above 1e4 Msun are summed per star and
+ * over the group into tot_msc_fof. Optionally capped at the group unseeded
+ * stellar mass, the result is written into Group.BHSeedMsc (full sampled sum into
+ * BHSampledMscTotal). Gate 2 (seed iff BHSeedMsc >= MinMscForBHseed) and the
+ * actual seeding remain in the fof_seed serial pass below.
+ *
+ * Member stars are distributed across ranks, so this runs collectively: Allgather
+ * the candidate groups, sample local stars into per-candidate partial sums,
+ * Allreduce, cap, then scatter tot_msc_fof back into locally-owned groups.
+ * Serial per rank (the sampler uses the global GSL error path), reproducible via
+ * per-star P.ID RNG seeds (independent of the domain decomposition). */
+static void fof_secfof_particle_sample(FOFGroups * fof, const RandTable * const rnd, MPI_Comm Comm)
+{
+    int NTask;
+    MPI_Comm_size(Comm, &NTask);
+    int64_t i;
+    int t;
+
+    /* Every owned group starts at 0 so non-candidates fail Gate 2 below. */
+    for(i = 0; i < fof->Ngroups; i++) {
+        fof->Group[i].BHSeedMsc = 0;
+        fof->Group[i].BHSampledMscTotal = 0;
+    }
+
+    /* Local candidates (Gate 1: cluster-forming mass over threshold, valid seed). */
+    int n_local_cand = 0;
+    for(i = 0; i < fof->Ngroups; i++) {
+        if(fof->Group[i].seed_index_star >= 0 &&
+           fof->Group[i].StarClusterMassUnseeded >= fof_params.MinMscForBHseed)
+            n_local_cand++;
+    }
+
+    int * recv_counts = (int *) mymalloc("CandRecvCounts", NTask * sizeof(int));
+    MPI_Allgather(&n_local_cand, 1, MPI_INT, recv_counts, 1, MPI_INT, Comm);
+    int n_cand = 0;
+    for(t = 0; t < NTask; t++)
+        n_cand += recv_counts[t];
+
+    if(n_cand == 0) {
+        myfree(recv_counts);
+        return;
+    }
+
+    /* Byte counts/displacements for the struct Allgatherv. */
+    int * byte_counts = (int *) mymalloc("CandByteCounts", NTask * sizeof(int));
+    int * byte_displs = (int *) mymalloc("CandByteDispls", NTask * sizeof(int));
+    int boff = 0;
+    for(t = 0; t < NTask; t++) {
+        byte_counts[t] = recv_counts[t] * (int) sizeof(struct sc_particle_cand);
+        byte_displs[t] = boff;
+        boff += byte_counts[t];
+    }
+
+    /* Pack and gather the candidate list. */
+    struct sc_particle_cand * local_cand = (struct sc_particle_cand *)
+        mymalloc("LocalCand", (n_local_cand > 0 ? n_local_cand : 1) * sizeof(struct sc_particle_cand));
+    int k = 0;
+    for(i = 0; i < fof->Ngroups; i++) {
+        if(fof->Group[i].seed_index_star >= 0 &&
+           fof->Group[i].StarClusterMassUnseeded >= fof_params.MinMscForBHseed) {
+            local_cand[k].GrNr = fof->Group[i].base.GrNr;
+            local_cand[k].Mcut = fof->Group[i].SCcomMcut;
+            k++;
+        }
+    }
+    struct sc_particle_cand * cand = (struct sc_particle_cand *)
+        mymalloc("Cand", n_cand * sizeof(struct sc_particle_cand));
+    MPI_Allgatherv(local_cand, n_local_cand * (int) sizeof(struct sc_particle_cand), MPI_BYTE,
+                   cand, byte_counts, byte_displs, MPI_BYTE, Comm);
+    qsort(cand, n_cand, sizeof(struct sc_particle_cand), cmp_sc_particle_cand);
+
+    /* Sample local unseeded stars into per-candidate partial sums. */
+    double * part_tot = (double *) mymalloc("CandPartTot", n_cand * sizeof(double));
+    double * part_full = (double *) mymalloc("CandPartFull", n_cand * sizeof(double));
+    memset(part_tot, 0, n_cand * sizeof(double));
+    memset(part_full, 0, n_cand * sizeof(double));
+
+    for(i = 0; i < PartManager->NumPart; i++) {
+        if(P[i].Type != 4 || P[i].GrNr < 0 || STARP(i).Seeded)
+            continue;
+        int64_t key = P[i].GrNr;
+        int lo = 0, hi = n_cand, c = -1;
+        while(lo < hi) {
+            int mid = lo + (hi - lo) / 2;
+            if(cand[mid].GrNr == key) { c = mid; break; }
+            else if(cand[mid].GrNr < key) lo = mid + 1;
+            else hi = mid;
+        }
+        if(c < 0)
+            continue;
+        double Mcstar = STARP(i).Mcstar;
+        double m_cut = (Mcstar < cand[c].Mcut) ? Mcstar : cand[c].Mcut;
+        /* allow_cap = 0: the cap is applied below on the group-summed tot_msc_fof,
+         * not on each per-star draw (whose cutoff is the per-star m_cut). */
+        double full = 0;
+        double msc_star = starcluster_combined_bhseed_msc(
+                m_cut, STARP(i).ClusterMass, (uint64_t) P[i].ID, rnd, &full, 0);
+        part_tot[c] += msc_star;
+        part_full[c] += full;
+    }
+
+    /* Sum the per-rank partials, then cap on the group total (if enabled). */
+    MPI_Allreduce(MPI_IN_PLACE, part_tot, n_cand, MPI_DOUBLE, MPI_SUM, Comm);
+    MPI_Allreduce(MPI_IN_PLACE, part_full, n_cand, MPI_DOUBLE, MPI_SUM, Comm);
+    if(get_scmasscap_secfof_starmass()) {
+        int c;
+        for(c = 0; c < n_cand; c++) {
+            if(part_tot[c] > cand[c].Mcut)
+                part_tot[c] = cand[c].Mcut;
+            if(part_full[c] > cand[c].Mcut)
+                part_full[c] = cand[c].Mcut;
+        }
+    }
+
+    /* Scatter tot_msc_fof back into each locally-owned candidate group. */
+    for(i = 0; i < fof->Ngroups; i++) {
+        if(!(fof->Group[i].seed_index_star >= 0 &&
+             fof->Group[i].StarClusterMassUnseeded >= fof_params.MinMscForBHseed))
+            continue;
+        int64_t key = fof->Group[i].base.GrNr;
+        int lo = 0, hi = n_cand, c = -1;
+        while(lo < hi) {
+            int mid = lo + (hi - lo) / 2;
+            if(cand[mid].GrNr == key) { c = mid; break; }
+            else if(cand[mid].GrNr < key) lo = mid + 1;
+            else hi = mid;
+        }
+        if(c < 0)
+            continue;
+        fof->Group[i].BHSeedMsc = part_tot[c];
+        fof->Group[i].BHSampledMscTotal = part_full[c];
+    }
+
+    myfree(part_full);
+    myfree(part_tot);
+    myfree(cand);
+    myfree(local_cand);
+    myfree(byte_displs);
+    myfree(byte_counts);
+    myfree(recv_counts);
+}
+
 void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTable * const rnd,
-              int64_t ** seeded_grnr_out, int * n_seeded_out, MPI_Comm Comm)
+              int64_t ** seeded_grnr_out, int * n_seeded_out,
+              double ** seeded_totmsc_out, double ** seeded_mcut_out, MPI_Comm Comm)
 {
     int i, j, n, ntot;
 
@@ -1633,26 +1797,36 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
         if(Marked[i]) Nexport ++;
     }
 
-    /* SeedSecFOFcomSample: serial pass (safe_expint_E1 toggles the global GSL
-     * error handler, so the per-group draw cannot run under OpenMP).
+    /* SeedSecFOFcomSample: serial pass (the sampler uses the global GSL error
+     * path, so the per-group draw cannot run under OpenMP).
      *   Gate 1 (cheap pre-filter): unseeded cluster-forming mass >= MinMscForBHseed.
-     *   Gate 2 (decision): draw bhseed_msc for the group; seed only if it
-     *   reaches MinMscForBHseed. */
+     *   Gate 2 (decision): BHSeedMsc for the group must reach MinMscForBHseed.
+     * BHSeedMsc is the single combined per-group draw, or — when
+     * SeedSecFOFcomSampleParticle is on — tot_msc_fof summed from per-star draws,
+     * computed collectively first by fof_secfof_particle_sample(). */
     if(fof_params.SeedSecFOFcomSample && fof_params.BlackHoleSeedStarCluster) {
+        if(fof_params.SeedSecFOFcomSampleParticle)
+            fof_secfof_particle_sample(fof, rnd, Comm);
         for(i = 0; i < fof->Ngroups; i++) {
-            fof->Group[i].BHSeedMsc = 0;
-            fof->Group[i].BHSampledMscTotal = 0;
+            if(!fof_params.SeedSecFOFcomSampleParticle) {
+                fof->Group[i].BHSeedMsc = 0;
+                fof->Group[i].BHSampledMscTotal = 0;
+            }
             if(fof->Group[i].seed_index_star < 0)
                 continue;
             if(fof->Group[i].StarClusterMassUnseeded < fof_params.MinMscForBHseed) /* Gate 1 */
                 continue;
-            double sampled_total = 0;
-            double bhseed_msc = starcluster_combined_bhseed_msc(
-                    fof->Group[i].SCcomMcut, fof->Group[i].StarClusterMassUnseeded,
-                    (uint64_t) fof->Group[i].SeedStarID, rnd, &sampled_total);
-            fof->Group[i].BHSeedMsc = bhseed_msc;
-            fof->Group[i].BHSampledMscTotal = sampled_total;
-            if(bhseed_msc >= fof_params.MinMscForBHseed) {                  /* Gate 2 */
+            if(!fof_params.SeedSecFOFcomSampleParticle) {
+                /* Single combined per-group draw (cap applied internally). */
+                double sampled_total = 0;
+                double bhseed_msc = starcluster_combined_bhseed_msc(
+                        fof->Group[i].SCcomMcut, fof->Group[i].StarClusterMassUnseeded,
+                        (uint64_t) fof->Group[i].SeedStarID, rnd, &sampled_total, 1);
+                fof->Group[i].BHSeedMsc = bhseed_msc;
+                fof->Group[i].BHSampledMscTotal = sampled_total;
+            }
+            /* else: BHSeedMsc/BHSampledMscTotal already set by the per-particle pass. */
+            if(fof->Group[i].BHSeedMsc >= fof_params.MinMscForBHseed) {     /* Gate 2 */
                 if(!Marked[i]) {
                     Marked[i] = 1;
                     Nexport++;
@@ -1763,30 +1937,54 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
         fof_seed_make_one(&ImportGroups[n], ThisTask, atime, rnd);
     }
 
-    /* Optionally return the GrNr of each locally-seeded group.
-     * Use ta_malloc for the temporary copy so it lives on the thread-local
-     * allocator, then free ImportGroups (mymalloc2), then copy into a
-     * mymalloc2 buffer that the caller will own and free. */
+    /* Optionally return the GrNr (and, for SeedSecFOFcomSampleParticle, the
+     * per-group tot_msc_fof = BHSeedMsc and unseeded stellar mass = SCcomMcut) of
+     * each locally-seeded group.  Use ta_malloc for the temporaries so they live
+     * on the thread-local allocator, then free ImportGroups (mymalloc2), then copy
+     * into mymalloc2 buffers the caller owns and frees (reverse: mcut,totmsc,grnr). */
     int64_t * seeded_grnr_tmp = NULL;
+    double * seeded_totmsc_tmp = NULL;
+    double * seeded_mcut_tmp = NULL;
     int n_seeded_local = 0;
     if(seeded_grnr_out && n_seeded_out && Nimport > 0) {
         seeded_grnr_tmp = ta_malloc("SeededGrNrTmp", int64_t, Nimport);
-        for(n = 0; n < Nimport; n++)
+        if(seeded_totmsc_out)
+            seeded_totmsc_tmp = ta_malloc("SeededTotMscTmp", double, Nimport);
+        if(seeded_mcut_out)
+            seeded_mcut_tmp = ta_malloc("SeededMcutTmp", double, Nimport);
+        for(n = 0; n < Nimport; n++) {
             seeded_grnr_tmp[n] = ImportGroups[n].base.GrNr;
+            if(seeded_totmsc_tmp) seeded_totmsc_tmp[n] = ImportGroups[n].BHSeedMsc;
+            if(seeded_mcut_tmp) seeded_mcut_tmp[n] = ImportGroups[n].SCcomMcut;
+        }
         n_seeded_local = Nimport;
     }
 
     myfree(ImportGroups);
 
-    /* Now that ImportGroups is freed, copy the temporary into persistent storage */
+    /* Now that ImportGroups is freed, copy the temporaries into persistent storage.
+     * Allocate grnr, then totmsc, then mcut so the caller frees mcut->totmsc->grnr. */
     if(seeded_grnr_out && n_seeded_out) {
         *n_seeded_out = n_seeded_local;
         if(n_seeded_local > 0) {
             *seeded_grnr_out = (int64_t *) mymalloc2("SeededGrNr", n_seeded_local * sizeof(int64_t));
             memcpy(*seeded_grnr_out, seeded_grnr_tmp, n_seeded_local * sizeof(int64_t));
+            if(seeded_totmsc_out) {
+                *seeded_totmsc_out = (double *) mymalloc2("SeededTotMsc", n_seeded_local * sizeof(double));
+                memcpy(*seeded_totmsc_out, seeded_totmsc_tmp, n_seeded_local * sizeof(double));
+            }
+            if(seeded_mcut_out) {
+                *seeded_mcut_out = (double *) mymalloc2("SeededMcut", n_seeded_local * sizeof(double));
+                memcpy(*seeded_mcut_out, seeded_mcut_tmp, n_seeded_local * sizeof(double));
+            }
+            /* ta_free in reverse allocation order */
+            if(seeded_mcut_tmp) ta_free(seeded_mcut_tmp);
+            if(seeded_totmsc_tmp) ta_free(seeded_totmsc_tmp);
             ta_free(seeded_grnr_tmp);
         } else {
             *seeded_grnr_out = NULL;
+            if(seeded_totmsc_out) *seeded_totmsc_out = NULL;
+            if(seeded_mcut_out) *seeded_mcut_out = NULL;
         }
     }
 

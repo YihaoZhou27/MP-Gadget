@@ -1,5 +1,13 @@
 # MP-Gadget Development Log
 
+## 2026-06-05 — SeedSecFOFcomSampleParticle: per-star-particle star-cluster sampling for secFOF BH seeding
+
+**Branch:** SecFOFCombined
+
+Added a per-star-particle variant of the combined per-secFOF star-cluster sampling, gated by a new int parameter `SeedSecFOFcomSampleParticle` (default 0; requires `SeedSecFOFcomSample=1`). When on, the single per-group draw is replaced by an independent draw for each unseeded star: cluster mass function n(m) ~ m^-2 exp(-m/m_cut) with cutoff m_cut = min(M_cstar, group total unseeded stellar mass), expected count n = Gamma*m_star/<m>, Poisson-sampled, and the >1e4 Msun clusters summed per star and over the group into tot_msc_fof (optionally capped at the group unseeded stellar mass via SCmasscapSecFOFstarmass). Seeding keeps the two gates (pre-filter on the group's summed Gamma*m_star, then seed iff tot_msc_fof >= MinMscForBHseed); tot_msc_fof sets the seed mass. For seeded groups, tot_msc_fof is redistributed into each unseeded star's ClusterMass weighted by stellar mass (sum conserved), and those stars are flagged Seeded. The per-particle sampling runs collectively (Allgather candidate groups, sample local stars, Allreduce). The combined (non-particle) mode and the StarClusterMass_sample block are unchanged.
+
+**Files modified:** `gadget/params.c`, `libgadget/fof.c`, `libgadget/fof.h`, `libgadget/secondfof.c`, `libgadget/sfr_eff.c`, `libgadget/sfr_eff.h`, `libgadget/run.c`
+
 ## 2026-05-10 — Fix BH dynamical mass (P.Mass) to track BHP.Mass + StarClusterMass
 
 **Branch:** SC_ParticleSeeding

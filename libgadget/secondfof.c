@@ -38,6 +38,7 @@ struct SecondFOFParams {
     int SecFOFonly;          /* skip primary FOF catalog, only save SecPIG */
     int SeedInSecFOFasStarCluster; /* use StarCluster BH-seeding in sec FOF catalog */
     int SeedSecFOFcomSample; /* combined per-secFOF star-cluster sampling for BH seeding */
+    int SeedSecFOFcomSampleParticle; /* per-star-particle sampling variant of SeedSecFOFcomSample */
     int SecFOFStarCluster;  /* flag that sec FOF groups are star clusters (requires SecondFOFOn && StarClusterOn) */
     char SecondFOFFileBase[256];
 };
@@ -71,6 +72,9 @@ void set_secondfof_params(ParameterSet * ps)
             endrun(1, "SeedSecFOFcomSample=1 requires SeedInSecFOFasStarCluster=1 (effective: SecondFOFOn=1, StarClusterOn=1, SecFOFStarCluster=1).\n");
         if(sfof_params.SeedSecFOFcomSample && param_get_double(ps, "MinMscForBHseed") <= 0)
             endrun(1, "SeedSecFOFcomSample=1 requires MinMscForBHseed > 0.\n");
+        sfof_params.SeedSecFOFcomSampleParticle = param_get_int(ps, "SeedSecFOFcomSampleParticle");
+        if(sfof_params.SeedSecFOFcomSampleParticle && !sfof_params.SeedSecFOFcomSample)
+            endrun(1, "SeedSecFOFcomSampleParticle=1 requires SeedSecFOFcomSample=1.\n");
         if(sfof_params.SecondFOFOn && StarClusterOn) {
             if(sfof_params.SecFOFStarCluster && sfof_params.PrimaryLinkTypes != (1 << 4) && sfof_params.PrimaryLinkTypes != ((1 << 4) | (1 << 0)))
                 endrun(1, "SecFOFStarCluster requires SecondFOFPrimaryLinkTypes = 16 (star) or 17 (star+gas).\n");
@@ -145,10 +149,22 @@ struct dist_mass_grp {
     int64_t GrNr;
 };
 
-static int cmp_int64(const void * a, const void * b)
+/* One secFOF group that just seeded a BH, broadcast to all ranks so every rank
+ * can flag its local member stars and (in SeedSecFOFcomSampleParticle mode)
+ * redistribute tot_msc_fof into each unseeded star's ClusterMass.
+ *   totmsc = group BHSeedMsc = tot_msc_fof (per-particle summed >1e4 Msun mass);
+ *   mcut   = group SCcomMcut = total unseeded stellar mass (redistribution weight
+ *            denominator). Both are unused (carried as 0) outside particle mode. */
+struct seeded_group {
+    int64_t GrNr;
+    double totmsc;
+    double mcut;
+};
+
+static int cmp_seeded_group(const void * a, const void * b)
 {
-    int64_t va = *(const int64_t *)a;
-    int64_t vb = *(const int64_t *)b;
+    int64_t va = ((const struct seeded_group *)a)->GrNr;
+    int64_t vb = ((const struct seeded_group *)b)->GrNr;
     return (va > vb) - (va < vb);
 }
 
@@ -821,17 +837,24 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
 
     FOFGroups secfof = fof_fof(ddecomp, 1, Comm);
 
-    /* fof_seed returns the GrNr of each locally-seeded group directly,
-     * rather than us inferring them from new particle indices. */
+    /* fof_seed returns, per locally-seeded group, the GrNr and (for
+     * SeedSecFOFcomSampleParticle) the per-group tot_msc_fof = BHSeedMsc and
+     * unseeded stellar mass = SCcomMcut, so we don't infer them from new indices. */
     int64_t * local_seeded_grnr = NULL;
+    double * local_seeded_totmsc = NULL;
+    double * local_seeded_mcut = NULL;
     int n_local_seeded = 0;
-    fof_seed(&secfof, act, atime, rnd, &local_seeded_grnr, &n_local_seeded, Comm);
+    fof_seed(&secfof, act, atime, rnd, &local_seeded_grnr, &n_local_seeded,
+             &local_seeded_totmsc, &local_seeded_mcut, Comm);
 
-    /* Flag (Seeded=1) all type-4 stars in secondary FOF groups that just had a
-     * BH seeded, so they are excluded from future seeding sums.  ClusterMass and
+    /* Flag (Seeded=1) all type-4 stars in secondary FOF groups that just had a BH
+     * seeded, so they are excluded from future seeding sums.  ClusterMass and
      * StarClusterMass_sample are kept on the star as a record (the seed payload
-     * mass has already been recorded on BHP.StarClusterMass of the new BH).
-     * Since groups may span MPI ranks, we Allgather the seeded GrNr set. */
+     * mass has already been recorded on BHP.StarClusterMass of the new BH).  In
+     * SeedSecFOFcomSampleParticle mode each unseeded member star's ClusterMass is
+     * additionally overwritten with its share of the group tot_msc_fof, weighted
+     * by stellar mass (denominator = group unseeded stellar mass = mcut).
+     * Since groups may span MPI ranks, we Allgather the seeded-group set. */
     int NTask;
     MPI_Comm_size(Comm, &NTask);
 
@@ -839,45 +862,56 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
     MPI_Allgather(&n_local_seeded, 1, MPI_INT, recv_counts, 1, MPI_INT, Comm);
 
     int n_total_seeded = 0;
-    int * displs = (int *) mymalloc2("Displs", NTask * sizeof(int));
+    int * byte_counts = (int *) mymalloc2("ByteCounts", NTask * sizeof(int));
+    int * byte_displs = (int *) mymalloc2("ByteDispls", NTask * sizeof(int));
+    int boff = 0;
     for(i = 0; i < NTask; i++) {
-        displs[i] = n_total_seeded;
+        byte_counts[i] = recv_counts[i] * (int) sizeof(struct seeded_group);
+        byte_displs[i] = boff;
+        boff += byte_counts[i];
         n_total_seeded += recv_counts[i];
     }
 
     if(n_total_seeded > 0) {
-        int64_t * all_seeded_grnr = (int64_t *) mymalloc2("AllSeededGrNr",
-                                        n_total_seeded * sizeof(int64_t));
+        /* Pack local seeded groups, gather, and sort by GrNr for binary search. */
+        struct seeded_group * local_sg = (struct seeded_group *) mymalloc2("LocalSeededGroups",
+                (n_local_seeded > 0 ? n_local_seeded : 1) * sizeof(struct seeded_group));
+        for(i = 0; i < n_local_seeded; i++) {
+            local_sg[i].GrNr = local_seeded_grnr[i];
+            local_sg[i].totmsc = local_seeded_totmsc ? local_seeded_totmsc[i] : 0;
+            local_sg[i].mcut = local_seeded_mcut ? local_seeded_mcut[i] : 0;
+        }
+        struct seeded_group * all_sg = (struct seeded_group *) mymalloc2("AllSeededGroups",
+                n_total_seeded * sizeof(struct seeded_group));
+        MPI_Allgatherv(local_sg, n_local_seeded * (int) sizeof(struct seeded_group), MPI_BYTE,
+                       all_sg, byte_counts, byte_displs, MPI_BYTE, Comm);
+        qsort(all_sg, n_total_seeded, sizeof(struct seeded_group), cmp_seeded_group);
 
-        MPI_Allgatherv(local_seeded_grnr, n_local_seeded, MPI_INT64_T,
-                        all_seeded_grnr, recv_counts, displs, MPI_INT64_T, Comm);
-
-        /* Sort for binary search */
-        qsort(all_seeded_grnr, n_total_seeded, sizeof(int64_t), cmp_int64);
-
-        /* Flag (Seeded=1) type-4 stars in seeded groups */
+        const int particle_mode = sfof_params.SeedSecFOFcomSampleParticle;
         int64_t n_marked = 0;
         #pragma omp parallel for reduction(+:n_marked)
         for(i = 0; i < PartManager->NumPart; i++) {
             if(P[i].Type != 4 || P[i].GrNr < 0)
                 continue;
-            /* Binary search for GrNr in seeded list */
+            /* Binary search for GrNr in the seeded-group list */
             int64_t key = P[i].GrNr;
-            int lo = 0, hi = n_total_seeded;
-            int found = 0;
+            int lo = 0, hi = n_total_seeded, found = -1;
             while(lo < hi) {
                 int mid = lo + (hi - lo) / 2;
-                if(all_seeded_grnr[mid] == key) { found = 1; break; }
-                else if(all_seeded_grnr[mid] < key) lo = mid + 1;
+                if(all_sg[mid].GrNr == key) { found = mid; break; }
+                else if(all_sg[mid].GrNr < key) lo = mid + 1;
                 else hi = mid;
             }
-            if(found) {
-                /* Mark the star as having contributed to a BH seed so it is
-                 * excluded from future seeding sums; keep ClusterMass and
-                 * StarClusterMass_sample as a record. The group accumulation in
+            if(found >= 0) {
+                /* Redistribute tot_msc_fof into ClusterMass for stars still
+                 * unseeded at this step (the set that fed mcut), weighted by
+                 * stellar mass; the group sum is conserved (= tot_msc_fof). */
+                if(particle_mode && STARP(i).Seeded == 0 && all_sg[found].mcut > 0)
+                    STARP(i).ClusterMass = all_sg[found].totmsc * P[i].Mass / all_sg[found].mcut;
+                /* Mark as having contributed to a BH seed; keep ClusterMass and
+                 * StarClusterMass_sample as a record.  The group accumulation in
                  * fof.c keys off Seeded (not zeroed ClusterMass), so this is
-                 * consistent across all seeding paths (SeedSecFOFcomSample on/off
-                 * and BlackholeSeedSCparticle). */
+                 * consistent across all seeding paths. */
                 STARP(i).Seeded = 1;
                 n_marked++;
             }
@@ -885,14 +919,21 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
 
         int64_t n_marked_total;
         MPI_Allreduce(&n_marked, &n_marked_total, 1, MPI_INT64, MPI_SUM, Comm);
-        message(0, "SecondFOF seed: flagged Seeded=1 for %ld stars "
-                   "in %d seeded groups.\n", n_marked_total, n_total_seeded);
+        message(0, "SecondFOF seed: flagged Seeded=1 for %ld stars in %d seeded groups.%s\n",
+                   n_marked_total, n_total_seeded,
+                   particle_mode ? " (ClusterMass redistributed from tot_msc_fof)" : "");
 
-        myfree(all_seeded_grnr);
+        myfree(all_sg);
+        myfree(local_sg);
     }
 
-    myfree(displs);
+    myfree(byte_displs);
+    myfree(byte_counts);
     myfree(recv_counts);
+    if(local_seeded_mcut)
+        myfree(local_seeded_mcut);
+    if(local_seeded_totmsc)
+        myfree(local_seeded_totmsc);
     if(local_seeded_grnr)
         myfree(local_seeded_grnr);
 

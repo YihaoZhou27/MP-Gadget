@@ -57,15 +57,25 @@ double get_MinEgySpec(void);
 double sfr_density_threshold(const double atime);
 
 /* Combined per-secFOF star-cluster sampling for BH seeding (SeedSecFOFcomSample).
- * Mcut       : mass-function cutoff = group total unseeded stellar mass (code units)
- * sum_mGamma : sum of m_star*Gamma over unseeded stars (code units)
+ * Also used per-star-particle for SeedSecFOFcomSampleParticle.
+ * Mcut       : mass-function cutoff (code units). Group total unseeded stellar
+ *              mass in the combined mode; min(M_cstar, group stellar mass) per
+ *              star in the per-particle mode.
+ * sum_mGamma : sum of m_star*Gamma over the sampled stars (code units): the group
+ *              total in combined mode, or a single star's m_star*Gamma per-particle.
  * rand_id    : RNG seed (reproducible)
+ * allow_cap  : if 1 and SCmasscapSecFOFstarmass is set, cap the result at Mcut;
+ *              pass 0 for the per-particle mode (the cap is applied on the group sum).
  * Returns bhseed_msc = sum of sampled cluster masses > 1e4 Msun (code units).
  * If total_sampled_out != NULL, also returns the summed mass of ALL sampled
  * clusters there (full draw, no threshold).
  * Serial only (uses the global GSL error handler). */
 double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
                                        uint64_t rand_id, const RandTable * const rnd,
-                                       double * total_sampled_out);
+                                       double * total_sampled_out, int allow_cap);
+
+/* Whether SCmasscapSecFOFstarmass is enabled (cap SC mass at the group's unseeded
+ * stellar mass). Used by the per-particle seeder to cap the group-summed mass. */
+int get_scmasscap_secfof_starmass(void);
 
 #endif
