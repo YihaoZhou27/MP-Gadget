@@ -6,6 +6,7 @@
 #include "utils/paramset.h"
 #include "timestep.h"
 #include "slotsmanager.h"
+#include "forcetree.h"
 #include "utils/system.h"
 
 void set_fof_params(ParameterSet * ps);
@@ -102,6 +103,7 @@ struct Group
     MyFloat StarClusterMassUnseeded;       /*!< Sum of ClusterMass over UNSEEDED stars (drives seeding). */
     MyFloat StarClusterMassSampleUnseeded; /*!< Sum of StarClusterMass_sample over UNSEEDED stars (sampled seeding). */
     MyFloat SCMass_seeded;                 /*!< Sum of ClusterMass over SEEDED stars (catalogue output). */
+    int NStarUnseeded;                     /*!< Count of UNSEEDED type-4 stars (caps the per-secFOF multi-seed number). */
 
     /* SeedSecFOFcomSample (combined per-secFOF sampling). Accumulated over
      * UNSEEDED stars (STARP.Seeded==0) only. */
@@ -136,7 +138,9 @@ void fof_finish(FOFGroups * fof);
  * arrays (used by secondfof_seed for SeedSecFOFcomSampleParticle redistribution).
  * The caller must myfree any returned arrays in reverse allocation order
  * (mcut, then totmsc, then grnr). Pass NULL to skip collection (e.g. primary FOF). */
-void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTable * const rnd,
+/* tree (the live gas/BH force tree from run.c, or NULL) is relocated off the
+ * MAIN bottom stack around slots_reserve so SlotsBase can be grown (LIFO). */
+void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double atime, const RandTable * const rnd,
               int64_t ** seeded_grnr_out, int * n_seeded_out,
               double ** seeded_totmsc_out, double ** seeded_mcut_out, MPI_Comm Comm);
 

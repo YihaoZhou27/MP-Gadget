@@ -72,6 +72,7 @@ static struct SFRParams
     double msc_min_code; /* 1e2 Msun in code mass */
     double msc_max_code; /* 1e8 Msun in code mass */
     double msc_seed_thresh_code; /* 1e4 Msun in code mass: "massive cluster" cutoff for bhseed_msc */
+    double msc_multiseed_thresh_code; /* 1e8 Msun in code mass: per-secFOF multi-seed threshold (M_SC>this seeds floor(M_SC/1e8) BHs) */
 
     /* Unit conversion factor for the sfr_due_to_h2 function*/
     double tau_fmol_unit;
@@ -851,6 +852,13 @@ int get_scmasscap_secfof_starmass(void)
     return sfr_params.SCmasscapSecFOFstarmass;
 }
 
+/* Per-secFOF multi-seed mass threshold (1e8 Msun) in code mass units. Exposed so
+ * fof.c can decide how many BHs to seed in a massive secondary-FOF group. */
+double get_msc_multiseed_thresh_code(void)
+{
+    return sfr_params.msc_multiseed_thresh_code;
+}
+
 static int make_particle_star(int child, int parent, int placement, double Time, const double GravInternal, const RandTable * const rnd)
 {
     int retflag = 2;
@@ -1338,6 +1346,9 @@ void init_cooling_and_star_formation(int CoolingOn, int StarformationOn, Cosmolo
     sfr_params.msc_max_code = 1e8 * SOLAR_MASS / units.UnitMass_in_g;
     /* "Massive cluster" threshold for combined-sample seeding: 1e4 solar masses */
     sfr_params.msc_seed_thresh_code = 1e4 * SOLAR_MASS / units.UnitMass_in_g;
+    /* Per-secFOF multi-seed threshold: 1e8 solar masses. When the seeding cluster
+     * mass M_SC of a secondary-FOF group exceeds this, floor(M_SC/1e8) BHs are seeded. */
+    sfr_params.msc_multiseed_thresh_code = 1e8 * SOLAR_MASS / units.UnitMass_in_g;
 
     init_cooling(sfr_params.TreeCoolFile, sfr_params.J21CoeffFile, sfr_params.MetalCoolFile, sfr_params.ReionHistFile, coolunits, CP);
 

@@ -90,9 +90,10 @@ void blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceT
 /* Make a black hole from the particle at index. Random number generator used
  * for the initial mass drawn from a power law.
  * seeded_by_starcluster: 1 if seeded by star-cluster criteria, 0 otherwise.
- * When seeded_by_starcluster && P[index].Type==4, a new particle is spawned
- * next to the star (secondary FOF path); otherwise the gas particle at
- * index is converted in-place (primary FOF / halo / gas-based path). */
+ * The parent particle is converted IN PLACE into the black hole (keeping its ID
+ * and full mass): a gas particle (type 0) for gas/halo-based seeding, or a star
+ * particle (type 4) for star-cluster seeding. The parent is consumed, and its
+ * mass is carried over as the BH's initial Mtrack. */
 void blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals);
 
 /* Seed black holes from individual star particles whose star cluster mass
@@ -101,7 +102,7 @@ void blackhole_make_one(int index, const double atime, const RandTable * const r
  * If NewStars/NumNewStar are provided (non-NULL, > 0), only those particle
  * indices are checked (newly formed stars).  Otherwise falls back to a full
  * scan of all type-4 particles. */
-void blackhole_seed_sc_particle(ActiveParticles * act, double atime,
+void blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime,
                                 const RandTable * const rnd, MPI_Comm Comm,
                                 int * NewStars, int64_t NumNewStar);
 

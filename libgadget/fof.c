@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <inttypes.h>
+#include <math.h>
 #include <omp.h>
 
 #include "utils/endrun.h"
@@ -27,6 +28,7 @@
 #include "utils/string.h"
 #include "physconst.h"
 #include "sfr_eff.h"
+#include "gravity.h"
 /*! \file fof.c
  *  \brief parallel FoF group finder
  */
@@ -64,6 +66,7 @@ struct FOFParams
     int StarClusterSampling;
     int SeedSecFOFcomSample; /* combined per-secFOF star-cluster sampling for BH seeding */
     int SeedSecFOFcomSampleParticle; /* per-star-particle sampling variant of SeedSecFOFcomSample */
+    int SeedInSecFOFMultipleSeeds; /* if 1, seed multiple BHs in a secFOF group with M_SC > 1e8 Msun */
     int BHseedMassScaleMsc;
     double MinMscForBHseed;
     int FOFPotentialMin;
@@ -93,6 +96,7 @@ void set_fof_params(ParameterSet * ps)
         fof_params.StarClusterSampling = param_get_int(ps, "StarClusterSampling");
         fof_params.SeedSecFOFcomSample = param_get_int(ps, "SeedSecFOFcomSample");
         fof_params.SeedSecFOFcomSampleParticle = param_get_int(ps, "SeedSecFOFcomSampleParticle");
+        fof_params.SeedInSecFOFMultipleSeeds = param_get_int(ps, "SeedInSecFOFMultipleSeeds");
         fof_params.BHseedMassScaleMsc = param_get_int(ps, "BHseedMassScaleMsc");
         fof_params.MinMscForBHseed = param_get_double(ps, "MinMscForBHseed");
 
@@ -700,6 +704,7 @@ static void fof_reduce_group(void * pdst, void * psrc) {
     gdst->StarClusterMassUnseeded += gsrc->StarClusterMassUnseeded;
     gdst->StarClusterMassSampleUnseeded += gsrc->StarClusterMassSampleUnseeded;
     gdst->SCMass_seeded += gsrc->SCMass_seeded;
+    gdst->NStarUnseeded += gsrc->NStarUnseeded;
     gdst->SCcomMcut += gsrc->SCcomMcut;
     gdst->GasMetalMass += gsrc->GasMetalMass;
     gdst->StellarMetalMass += gsrc->StellarMetalMass;
@@ -801,6 +806,7 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
             gdst->StarClusterMassUnseeded += STARP(index).ClusterMass;
             gdst->StarClusterMassSampleUnseeded += STARP(index).StarClusterMass_sample;
             gdst->SCcomMcut += P[index].Mass;
+            gdst->NStarUnseeded++;
 
             /* Track the unseeded star with the largest ClusterMass (or
              * StarClusterMass_sample when StarClusterSampling=1) as the seed
@@ -1508,6 +1514,72 @@ static int cmp_seed_task(const void * c1, const void * c2) {
     return g1->seed_task - g2->seed_task;
 }
 
+/* Per-secFOF multi-seed count.  N_seed = floor(M_SC/thresh) (thresh = 1e8 Msun),
+ * plus one extra seed when the surplus mass (M_SC - floor(M_SC/thresh)*thresh) is
+ * itself seedable (>= MinMscForBHseed).  This avoids a single BH growing past the
+ * threshold mass when thresh < M_SC < 2*thresh.  N_seed is capped by the number of
+ * unseeded stars and is at least 1 (groups below the threshold return 1 = ordinary
+ * single seed).  The seeds are NOT equal mass (see secfof_seed_scaling); only
+ * meaningful for SC seeds. */
+static int secfof_compute_nseed(const struct Group * g)
+{
+    if(!fof_params.SeedInSecFOFMultipleSeeds)
+        return 1;
+    double Msc;
+    if(fof_params.SeedSecFOFcomSample)
+        Msc = g->BHSeedMsc;
+    else
+        Msc = fof_params.StarClusterSampling ? g->StarClusterMassSampleUnseeded
+                                             : g->StarClusterMassUnseeded;
+    double thresh = get_msc_multiseed_thresh_code();
+    if(thresh <= 0)
+        return 1;
+    int n = (int) floor(Msc / thresh);
+    if(n < 1)
+        return 1;
+    /* Add one more seed if the leftover above n*thresh is itself seedable. */
+    double rem = Msc - (double) n * thresh;
+    if(rem >= fof_params.MinMscForBHseed)
+        n += 1;
+    if(g->NStarUnseeded > 0 && n > g->NStarUnseeded)
+        n = g->NStarUnseeded;
+    if(n < 1) n = 1;
+    return n;
+}
+
+/* Seed-mass scaling (the M_SC-equivalent passed as ScalingMass to blackhole_make_one)
+ * for the rank-th seed of a multi-seed group, rank>=1.  "First capped, rest equal":
+ * seed 1 carries exactly the threshold mass (1e8 Msun in code units) so its BH mass is
+ * SeedBlackHoleMass*thresh; the remaining nseed-1 seeds split the surplus (M_SC-thresh)
+ * equally.  Groups that do not actually multi-seed (floor(M_SC/thresh) < 1, or nseed<=1)
+ * keep the ordinary full-M_SC scaling.  Mass is conserved: thresh + (nseed-1)*extra = M_SC. */
+static double secfof_seed_scaling(double Msc, int nseed, int rank, double thresh)
+{
+    if(thresh <= 0 || nseed <= 1)
+        return Msc;
+    if((int) floor(Msc / thresh) < 1)
+        return Msc;
+    if(rank <= 1)
+        return thresh;
+    return (Msc - thresh) / (nseed - 1);
+}
+
+/* Fraction of the group's StarClusterMass payload (and init_Msc / init_Msc_sample
+ * records) carried by the rank-th seed.  "Proportional to seed mass": with
+ * BHseedMassScaleMsc the seed mass scales with M_SC, so the share = scaling/M_SC;
+ * otherwise all seeds are equal mass and the payload splits evenly (1/nseed). */
+static double secfof_seed_massfrac(double Msc, int nseed, int rank, double thresh)
+{
+    if(nseed <= 1)
+        return 1.0;
+    if(fof_params.BHseedMassScaleMsc) {
+        if(Msc <= 0)
+            return 1.0 / nseed;
+        return secfof_seed_scaling(Msc, nseed, rank, thresh) / Msc;
+    }
+    return 1.0 / nseed;
+}
+
 static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime, const RandTable * const rnd) {
    if(g->seed_task != ThisTask) {
         endrun(7771, "Seed does not belong to the right task");
@@ -1553,6 +1625,24 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
             init_msc_sample = g->StarClusterMassSampleUnseeded;
         }
     }
+    /* Per-secFOF multi-seeding: a massive group (M_SC > 1e8 Msun) seeds N_seed BHs.
+     * This is seed 1 (the largest-m*Gamma star).  "First capped, rest equal": seed 1
+     * carries exactly the threshold mass (1e8 Msun-equivalent); the remaining N_seed-1
+     * extras (placed by fof_secfof_extra_seeds() after the single-seed loop) split the
+     * surplus.  The attached cluster mass / init records follow the seed-mass share. */
+    if(seeded_by_starcluster) {
+        int nseed = secfof_compute_nseed(g);
+        if(nseed > 1) {
+            double thresh = get_msc_multiseed_thresh_code();
+            double Msc = scaling_mass;     /* full seeding cluster mass M_SC */
+            double frac = secfof_seed_massfrac(Msc, nseed, 1, thresh);
+            scaling_mass = secfof_seed_scaling(Msc, nseed, 1, thresh);
+            payload_mass *= frac;
+            init_msc *= frac;
+            init_msc_sample *= frac;
+        }
+    }
+
     /* Compute mass-weighted average metallicity for star cluster */
     MyFloat sc_metallicity = 0;
     float sc_metals[NMETALS] = {0};
@@ -1563,6 +1653,421 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
             sc_metals[j] = g->StarClusterMetalElemMass[j] / g->StarClusterMass;
     }
     blackhole_make_one(index, atime, rnd, seeded_by_starcluster, payload_mass, scaling_mass, init_msc, init_msc_sample, capped_star_mass, sc_metallicity, sc_metals);
+}
+
+/* ===================== Per-secFOF multi-seeding (M_SC > 1e8 Msun) =====================
+ * A secondary-FOF group whose seeding star-cluster mass M_SC exceeds 1e8 Msun seeds
+ * N_seed = floor(M_SC/1e8) equal-mass BHs (capped by the number of unseeded stars).
+ * Seed 1 is the largest-m*Gamma star (handled by fof_seed_make_one).  Seeds 2..N are
+ * the next-largest-m*Gamma unseeded stars lying farther than 2*GravitySoftening from
+ * seed 1; each is converted in place into an equal-mass BH.  Stars are considered in
+ * descending m*Gamma order; if too few are far enough, the missing seeds are skipped
+ * (logged).  The separation criterion is measured from seed 1 only. */
+
+/* Whether this (owned, reduced) group seeds a BH via the star-cluster path from a
+ * star particle (the case that supports multi-seeding).  Mirrors the SC gate in
+ * fof_seed and requires the chosen seed to be the star (not a gas particle). */
+static int secfof_group_sc_seeds(const struct Group * g)
+{
+    if(!fof_params.BlackHoleSeedStarCluster)
+        return 0;
+    if(g->seed_index_star < 0)
+        return 0;
+    /* Seed 1 must be the star itself (in secFOF there is no gas, so this always holds;
+     * in a mixed group it excludes a gas-particle seed). */
+    if(g->seed_index != g->seed_index_star || g->seed_task != g->seed_task_star)
+        return 0;
+    if(fof_params.SeedSecFOFcomSample)
+        return g->BHSeedMsc >= fof_params.MinMscForBHseed;
+    MyFloat sc_mass = fof_params.StarClusterSampling ? g->StarClusterMassSampleUnseeded
+                                                     : g->StarClusterMassUnseeded;
+    return sc_mass >= fof_params.MinMscForBHseed;
+}
+
+static int cmp_int64_asc(const void * a, const void * b)
+{
+    int64_t x = *(const int64_t *) a, y = *(const int64_t *) b;
+    return (x > y) - (x < y);
+}
+
+/* One multi-seed group, gathered to every rank. */
+struct ms_group {
+    int64_t  GrNr;
+    int      Nseed;             /* target number of seeds (>= 2) */
+    int      seed_task_star;    /* rank owning seed 1 */
+    int      seed_index_star;   /* local index of seed 1 on seed_task_star */
+    uint64_t SeedStarID;        /* ID of seed 1 (excluded from extra candidates) */
+    double   seed1pos[3];       /* position of seed 1 (filled by its owner) */
+    double   Msc;               /* full seeding cluster mass M_SC (for logging) */
+    double   per_scaling;       /* seed-mass scaling for each extra seed (rank>=2) */
+    double   per_payload;       /* StarClusterMass payload per extra seed */
+    double   per_init_msc;      /* init_Msc per extra seed */
+    double   per_init_msc_sample; /* init_Msc_sample per extra seed */
+    double   capped;            /* SCcomMcut (group; recorded as-is) */
+    double   metallicity;       /* group mass-weighted metallicity */
+    float    metals[NMETALS];
+};
+
+static int cmp_ms_group_grnr(const void * a, const void * b)
+{
+    int64_t x = ((const struct ms_group *) a)->GrNr, y = ((const struct ms_group *) b)->GrNr;
+    return (x > y) - (x < y);
+}
+
+/* Binary search the (GrNr-sorted) MSG array; returns index or -1. */
+static int ms_find(const struct ms_group * msg, int n, int64_t gr)
+{
+    int lo = 0, hi = n;
+    while(lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if(msg[mid].GrNr == gr) return mid;
+        else if(msg[mid].GrNr < gr) lo = mid + 1;
+        else hi = mid;
+    }
+    return -1;
+}
+
+/* One eligible extra-seed candidate star (far enough from seed 1). */
+struct ms_cand {
+    int64_t  GrNr;
+    double   mGamma;       /* ClusterMass = m_star*Gamma (ranking key) */
+    uint64_t ID;           /* tiebreak / identity */
+    double   pos[3];       /* position (for logging the seed locations) */
+    int      owner_task;
+    int      local_index;
+};
+
+/* Order: GrNr asc, then m*Gamma desc, then ID asc (deterministic across ranks). */
+static int cmp_ms_cand(const void * a, const void * b)
+{
+    const struct ms_cand * x = (const struct ms_cand *) a;
+    const struct ms_cand * y = (const struct ms_cand *) b;
+    if(x->GrNr != y->GrNr) return (x->GrNr > y->GrNr) - (x->GrNr < y->GrNr);
+    if(x->mGamma != y->mGamma) return (x->mGamma < y->mGamma) - (x->mGamma > y->mGamma);
+    return (x->ID > y->ID) - (x->ID < y->ID);
+}
+
+/* (GrNr, Nseed) for one multi-seed group, gathered to every rank so the local
+ * extra-seed upper bound can be computed with the per-group (Nseed-1) cap. */
+struct ms_seed_cap {
+    int64_t GrNr;
+    int     Nseed;      /* target number of seeds (>= 2) */
+    int     placed;     /* running local count, capped at Nseed-1 */
+};
+static int cmp_ms_seed_cap_grnr(const void * a, const void * b)
+{
+    int64_t x = ((const struct ms_seed_cap *) a)->GrNr, y = ((const struct ms_seed_cap *) b)->GrNr;
+    return (x > y) - (x < y);
+}
+
+/* Upper bound on the number of EXTRA (2nd..N_seed) seeds this rank will convert,
+ * used to pre-reserve BH slots while the ActiveParticle/tree juggling is still safe.
+ * Builds the global set of multi-seed groups (GrNr, Nseed) and counts local
+ * unseeded member stars in those groups, capped at (Nseed-1) per group: a group
+ * cannot receive more than Nseed-1 extra seeds regardless of how many stars it
+ * holds, so without the cap a single massive group can inflate the request by
+ * thousands of slots and force an unnecessary slots grow.  All scratch is freed
+ * before returning (LIFO). */
+static int64_t secfof_count_extra_seed_ub(FOFGroups * fof, MPI_Comm Comm)
+{
+    if(!fof_params.SeedInSecFOFMultipleSeeds || !fof_params.BlackHoleSeedStarCluster)
+        return 0;
+    int NTask;
+    MPI_Comm_size(Comm, &NTask);
+    int64_t i;
+    int t;
+
+    int n_local = 0;
+    for(i = 0; i < fof->Ngroups; i++)
+        if(secfof_group_sc_seeds(&fof->Group[i]) && secfof_compute_nseed(&fof->Group[i]) >= 2)
+            n_local++;
+
+    int * rc = (int *) mymalloc("MSubRC", NTask * sizeof(int));
+    MPI_Allgather(&n_local, 1, MPI_INT, rc, 1, MPI_INT, Comm);
+    int n_tot = 0;
+    for(t = 0; t < NTask; t++) n_tot += rc[t];
+    if(n_tot == 0) { myfree(rc); return 0; }
+
+    int * bc = (int *) mymalloc("MSubBC", NTask * sizeof(int));
+    int * bd = (int *) mymalloc("MSubBD", NTask * sizeof(int));
+    int boff = 0;
+    for(t = 0; t < NTask; t++) { bc[t] = rc[t] * (int) sizeof(struct ms_seed_cap); bd[t] = boff; boff += bc[t]; }
+
+    struct ms_seed_cap * local_g = (struct ms_seed_cap *) mymalloc("MSubLocal",
+            (n_local > 0 ? n_local : 1) * sizeof(struct ms_seed_cap));
+    int k = 0;
+    for(i = 0; i < fof->Ngroups; i++)
+        if(secfof_group_sc_seeds(&fof->Group[i]) && secfof_compute_nseed(&fof->Group[i]) >= 2) {
+            local_g[k].GrNr   = fof->Group[i].base.GrNr;
+            local_g[k].Nseed  = secfof_compute_nseed(&fof->Group[i]);
+            local_g[k].placed = 0;
+            k++;
+        }
+    struct ms_seed_cap * all_g = (struct ms_seed_cap *) mymalloc("MSubAll", n_tot * sizeof(struct ms_seed_cap));
+    MPI_Allgatherv(local_g, n_local * (int) sizeof(struct ms_seed_cap), MPI_BYTE,
+                   all_g, bc, bd, MPI_BYTE, Comm);
+    qsort(all_g, n_tot, sizeof(struct ms_seed_cap), cmp_ms_seed_cap_grnr);
+
+    int64_t cnt = 0;
+    for(i = 0; i < PartManager->NumPart; i++) {
+        if(P[i].Type != 4 || P[i].GrNr < 0 || STARP(i).Seeded) continue;
+        int lo = 0, hi = n_tot, found = -1;
+        int64_t key = P[i].GrNr;
+        while(lo < hi) {
+            int mid = lo + (hi - lo) / 2;
+            if(all_g[mid].GrNr == key) { found = mid; break; }
+            else if(all_g[mid].GrNr < key) lo = mid + 1;
+            else hi = mid;
+        }
+        if(found >= 0 && all_g[found].placed < all_g[found].Nseed - 1) {
+            all_g[found].placed++;
+            cnt++;
+        }
+    }
+    myfree(all_g);
+    myfree(local_g);
+    myfree(bd);
+    myfree(bc);
+    myfree(rc);
+    return cnt;
+}
+
+/* Place the 2nd..N_seed seeds for massive secondary-FOF groups.  BH slots were
+ * pre-reserved by the caller (no reservation/ActiveParticle juggling here).  Called
+ * after the single-seed loop, while ImportGroups (mymalloc2/high stack) is alive;
+ * all scratch here is mymalloc (low stack) and freed in LIFO order. */
+static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTable * const rnd, MPI_Comm Comm)
+{
+    if(!fof_params.SeedInSecFOFMultipleSeeds || !fof_params.BlackHoleSeedStarCluster)
+        return;
+
+    int NTask, ThisTask;
+    MPI_Comm_size(Comm, &NTask);
+    MPI_Comm_rank(Comm, &ThisTask);
+    int64_t i;
+    int t;
+    const int bhdyn = get_starcluster_bhdyn_on();
+
+    /* ---- Phase 1: build the global multi-seed group list (MSG). ---- */
+    int n_local = 0;
+    for(i = 0; i < fof->Ngroups; i++)
+        if(secfof_group_sc_seeds(&fof->Group[i]) && secfof_compute_nseed(&fof->Group[i]) >= 2)
+            n_local++;
+
+    int * rc = (int *) mymalloc("MSrc", NTask * sizeof(int));
+    MPI_Allgather(&n_local, 1, MPI_INT, rc, 1, MPI_INT, Comm);
+    int n_msg = 0;
+    for(t = 0; t < NTask; t++) n_msg += rc[t];
+    if(n_msg == 0) { myfree(rc); return; }
+
+    int * bc = (int *) mymalloc("MSbc", NTask * sizeof(int));
+    int * bd = (int *) mymalloc("MSbd", NTask * sizeof(int));
+    int boff = 0;
+    for(t = 0; t < NTask; t++) { bc[t] = rc[t] * (int) sizeof(struct ms_group); bd[t] = boff; boff += bc[t]; }
+
+    struct ms_group * local_msg = (struct ms_group *) mymalloc("MSlocal",
+            (n_local > 0 ? n_local : 1) * sizeof(struct ms_group));
+    int k = 0;
+    for(i = 0; i < fof->Ngroups; i++) {
+        struct Group * g = &fof->Group[i];
+        if(!(secfof_group_sc_seeds(g) && secfof_compute_nseed(g) >= 2)) continue;
+        int nseed = secfof_compute_nseed(g);
+        struct ms_group * m = &local_msg[k++];
+        memset(m, 0, sizeof(*m));
+        m->GrNr = g->base.GrNr;
+        m->Nseed = nseed;
+        m->seed_task_star = g->seed_task_star;
+        m->seed_index_star = g->seed_index_star;
+        m->SeedStarID = (uint64_t) g->SeedStarID;
+        /* Per-extra-seed (rank>=2) masses; all extras are uniform under the
+         * "first capped, rest equal" scheme (seed 1 is handled separately). */
+        double Msc, payload, init_msc, init_msc_sample;
+        if(fof_params.SeedSecFOFcomSample) {
+            Msc = g->BHSeedMsc;
+            payload = bhdyn ? g->StarClusterMassUnseeded : 0;
+            init_msc = g->StarClusterMassUnseeded;
+            init_msc_sample = g->BHSampledMscTotal;
+            m->capped = g->SCcomMcut;
+        } else {
+            double sc_mass = fof_params.StarClusterSampling ? g->StarClusterMassSampleUnseeded
+                                                            : g->StarClusterMassUnseeded;
+            Msc = sc_mass;
+            payload = sc_mass;
+            init_msc = g->StarClusterMassUnseeded;
+            init_msc_sample = g->StarClusterMassSampleUnseeded;
+            m->capped = 0;
+        }
+        double thresh = get_msc_multiseed_thresh_code();
+        double frac = secfof_seed_massfrac(Msc, nseed, 2, thresh);
+        m->Msc = Msc;
+        m->per_scaling = secfof_seed_scaling(Msc, nseed, 2, thresh);
+        m->per_payload = payload * frac;
+        m->per_init_msc = init_msc * frac;
+        m->per_init_msc_sample = init_msc_sample * frac;
+        if(g->StarClusterMass > 0) {
+            m->metallicity = g->StarClusterMetallicity / g->StarClusterMass;
+            int j;
+            for(j = 0; j < NMETALS; j++)
+                m->metals[j] = g->StarClusterMetalElemMass[j] / g->StarClusterMass;
+        }
+    }
+    struct ms_group * msg = (struct ms_group *) mymalloc("MSG", n_msg * sizeof(struct ms_group));
+    MPI_Allgatherv(local_msg, n_local * (int) sizeof(struct ms_group), MPI_BYTE,
+                   msg, bc, bd, MPI_BYTE, Comm);
+    qsort(msg, n_msg, sizeof(struct ms_group), cmp_ms_group_grnr);
+
+    /* ---- Phase 2: fill seed-1 positions (owner of seed_index_star contributes). ---- */
+    double * pos = (double *) mymalloc("MSpos", 3 * n_msg * sizeof(double));
+    memset(pos, 0, 3 * n_msg * sizeof(double));
+    for(i = 0; i < n_msg; i++) {
+        if(msg[i].seed_task_star == ThisTask) {
+            int si = msg[i].seed_index_star;
+            pos[3 * i + 0] = P[si].Pos[0];
+            pos[3 * i + 1] = P[si].Pos[1];
+            pos[3 * i + 2] = P[si].Pos[2];
+        }
+    }
+    MPI_Allreduce(MPI_IN_PLACE, pos, 3 * n_msg, MPI_DOUBLE, MPI_SUM, Comm);
+    for(i = 0; i < n_msg; i++) {
+        msg[i].seed1pos[0] = pos[3 * i + 0];
+        msg[i].seed1pos[1] = pos[3 * i + 1];
+        msg[i].seed1pos[2] = pos[3 * i + 2];
+    }
+    myfree(pos);
+
+    /* ---- Phase 3: collect local eligible candidates (> 2*GravitySoftening from seed 1). ---- */
+    const double eps = FORCE_SOFTENING() / 2.8;   /* GravitySoftening (Plummer-equivalent) */
+    const double sep2 = (2.0 * eps) * (2.0 * eps);
+    const double box = PartManager->BoxSize;
+
+    int n_elig = 0;
+    for(i = 0; i < PartManager->NumPart; i++) {
+        if(P[i].Type != 4 || P[i].GrNr < 0 || STARP(i).Seeded) continue;
+        int c = ms_find(msg, n_msg, P[i].GrNr);
+        if(c < 0) continue;
+        if((uint64_t) P[i].ID == msg[c].SeedStarID) continue;
+        double dx = NEAREST(P[i].Pos[0] - msg[c].seed1pos[0], box);
+        double dy = NEAREST(P[i].Pos[1] - msg[c].seed1pos[1], box);
+        double dz = NEAREST(P[i].Pos[2] - msg[c].seed1pos[2], box);
+        if(dx * dx + dy * dy + dz * dz <= sep2) continue;
+        n_elig++;
+    }
+    struct ms_cand * elig = (struct ms_cand *) mymalloc("MSelig",
+            (n_elig > 0 ? n_elig : 1) * sizeof(struct ms_cand));
+    int e = 0;
+    for(i = 0; i < PartManager->NumPart; i++) {
+        if(P[i].Type != 4 || P[i].GrNr < 0 || STARP(i).Seeded) continue;
+        int c = ms_find(msg, n_msg, P[i].GrNr);
+        if(c < 0) continue;
+        if((uint64_t) P[i].ID == msg[c].SeedStarID) continue;
+        double dx = NEAREST(P[i].Pos[0] - msg[c].seed1pos[0], box);
+        double dy = NEAREST(P[i].Pos[1] - msg[c].seed1pos[1], box);
+        double dz = NEAREST(P[i].Pos[2] - msg[c].seed1pos[2], box);
+        if(dx * dx + dy * dy + dz * dz <= sep2) continue;
+        elig[e].GrNr = P[i].GrNr;
+        elig[e].mGamma = STARP(i).ClusterMass;
+        elig[e].ID = (uint64_t) P[i].ID;
+        elig[e].pos[0] = P[i].Pos[0];
+        elig[e].pos[1] = P[i].Pos[1];
+        elig[e].pos[2] = P[i].Pos[2];
+        elig[e].owner_task = ThisTask;
+        elig[e].local_index = (int) i;
+        e++;
+    }
+    /* Pre-truncate locally to at most (Nseed-1) per group (descending m*Gamma). */
+    qsort(elig, n_elig, sizeof(struct ms_cand), cmp_ms_cand);
+    int n_keep = 0;
+    {
+        int c = 0;
+        while(c < n_elig) {
+            int64_t gr = elig[c].GrNr;
+            int gi = ms_find(msg, n_msg, gr);
+            int limit = (gi >= 0) ? (msg[gi].Nseed - 1) : 0;
+            int taken = 0;
+            while(c < n_elig && elig[c].GrNr == gr) {
+                if(taken < limit) { elig[n_keep++] = elig[c]; taken++; }
+                c++;
+            }
+        }
+    }
+
+    /* ---- Phase 4: gather candidates and globally select top (Nseed-1) per group. ---- */
+    int * crc = (int *) mymalloc("MScrc", NTask * sizeof(int));
+    MPI_Allgather(&n_keep, 1, MPI_INT, crc, 1, MPI_INT, Comm);
+    int n_call = 0;
+    for(t = 0; t < NTask; t++) n_call += crc[t];
+    int * cbc = (int *) mymalloc("MScbc", NTask * sizeof(int));
+    int * cbd = (int *) mymalloc("MScbd", NTask * sizeof(int));
+    int coff = 0;
+    for(t = 0; t < NTask; t++) { cbc[t] = crc[t] * (int) sizeof(struct ms_cand); cbd[t] = coff; coff += cbc[t]; }
+    struct ms_cand * allc = (struct ms_cand *) mymalloc("MSallc",
+            (n_call > 0 ? n_call : 1) * sizeof(struct ms_cand));
+    MPI_Allgatherv(elig, n_keep * (int) sizeof(struct ms_cand), MPI_BYTE,
+                   allc, cbc, cbd, MPI_BYTE, Comm);
+    qsort(allc, n_call, sizeof(struct ms_cand), cmp_ms_cand);
+
+    /* The selection is identical on every rank (msg and allc are global+sorted), so
+     * each rank converts only the candidates it owns while the per-group counts and
+     * logging are consistent.  Loop over msg (ALL multi-seed groups, including ones
+     * with no far-enough star) and consume each group's contiguous block of eligible
+     * candidates in allc (sorted by GrNr, then m*Gamma desc), taking the top
+     * (Nseed-1).  M_SC, N_seed and every seed position are logged on rank 0. */
+    const double thresh_code = get_msc_multiseed_thresh_code();
+    int64_t n_placed = 0, n_short = 0, n_conv_local = 0;
+    int ac = 0;
+    for(i = 0; i < n_msg; i++) {
+        struct ms_group * m = &msg[i];
+        int limit = m->Nseed - 1;
+        /* Advance to this group's contiguous candidate block in allc. */
+        while(ac < n_call && allc[ac].GrNr < m->GrNr) ac++;
+        int bstart = ac;
+        while(ac < n_call && allc[ac].GrNr == m->GrNr) ac++;
+        int navail = ac - bstart;
+        int nsel = (navail < limit) ? navail : limit;
+
+        /* thresh_code = 1e8 Msun in code units, so M_SC[Msun] = M_SC_code / thresh_code * 1e8. */
+        double Msc_code = m->Msc;
+        double Msc_solar = (thresh_code > 0) ? Msc_code / thresh_code * 1e8 : 0;
+        message(0, "secFOF multi-seed group GrNr=%ld: M_SC=%.4g Msun (%.4g code), "
+                   "N_seed=%d, placed=%d; seed 1 ID=%lu pos=(%.5g, %.5g, %.5g)\n",
+                (long) m->GrNr, Msc_solar, Msc_code, m->Nseed, 1 + nsel,
+                (unsigned long) m->SeedStarID,
+                m->seed1pos[0], m->seed1pos[1], m->seed1pos[2]);
+
+        int s;
+        for(s = 0; s < nsel; s++) {
+            struct ms_cand * cc = &allc[bstart + s];
+            if(cc->owner_task == ThisTask) {
+                blackhole_make_one(cc->local_index, atime, rnd, 1,
+                                   (MyFloat) m->per_payload, (MyFloat) m->per_scaling,
+                                   (MyFloat) m->per_init_msc, (MyFloat) m->per_init_msc_sample,
+                                   (MyFloat) m->capped, (MyFloat) m->metallicity, m->metals);
+                n_conv_local++;
+            }
+            message(0, "    seed %d ID=%lu pos=(%.5g, %.5g, %.5g)\n",
+                    s + 2, (unsigned long) cc->ID, cc->pos[0], cc->pos[1], cc->pos[2]);
+            n_placed++;
+        }
+        if(nsel < limit) n_short++;
+    }
+
+    message(0, "secFOF multi-seed: %d massive group(s); placed %ld extra BH seed(s); "
+               "%ld group(s) short of target (too few stars >2*softening from seed 1).\n",
+            n_msg, n_placed, n_short);
+    (void) n_conv_local;
+
+    /* Free all scratch in reverse allocation order (msg/local_msg/bd/bc/rc are the
+     * deepest, freed last). */
+    myfree(allc);
+    myfree(cbd);
+    myfree(cbc);
+    myfree(crc);
+    myfree(elig);
+    myfree(msg);
+    myfree(local_msg);
+    myfree(bd);
+    myfree(bc);
+    myfree(rc);
 }
 
 /* --- SeedSecFOFcomSampleParticle: per-star-particle star-cluster sampling ---
@@ -1726,7 +2231,7 @@ static void fof_secfof_particle_sample(FOFGroups * fof, const RandTable * const 
     myfree(recv_counts);
 }
 
-void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTable * const rnd,
+void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double atime, const RandTable * const rnd,
               int64_t ** seeded_grnr_out, int * n_seeded_out,
               double ** seeded_totmsc_out, double ** seeded_mcut_out, MPI_Comm Comm)
 {
@@ -1747,9 +2252,12 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
         if(fof_params.BlackHoleSeedStarCluster && !fof_params.SeedSecFOFcomSample){
             double sc_mass_for_seed = fof_params.StarClusterSampling ?
                 fof->Group[i].StarClusterMassSampleUnseeded : fof->Group[i].StarClusterMassUnseeded;
+            /* Require a star seed: SC seeding converts the largest-ClusterMass star,
+             * never gas (a densest-gas seed_index, if gas is a secondary link type,
+             * must not be used here). */
             SC_Mask =
                 (sc_mass_for_seed >= fof_params.MinMscForBHseed)
-            &&  (fof->Group[i].seed_index >= 0 || fof->Group[i].seed_index_star >= 0);
+            &&  (fof->Group[i].seed_index_star >= 0);
         }
         else{
             /* SeedSecFOFcomSample: deferred to the serial pass below
@@ -1787,9 +2295,12 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
             Marked[i] = 0;
         }
 
-        /* For star-cluster seeding in secondary FOF (no gas particles),
-         * fall back to the star with the largest ClusterMass as the seed particle. */
-        if(SC_Mask && fof->Group[i].seed_index < 0 && fof->Group[i].seed_index_star >= 0) {
+        /* Star-cluster seeding must seed from the star, never from gas.  Override
+         * any densest-gas seed_index UNCONDITIONALLY (gas can be a secondary link
+         * type in the secondary FOF, so seed_index may be >= 0 even here; the old
+         * `seed_index < 0` guard left that gas index in place and converted gas).
+         * Mirrors the SeedSecFOFcomSample serial pass below. */
+        if(SC_Mask && fof->Group[i].seed_index_star >= 0) {
             fof->Group[i].seed_index = fof->Group[i].seed_index_star;
             fof->Group[i].seed_task = fof->Group[i].seed_task_star;
         }
@@ -1886,56 +2397,83 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, double atime, const RandTa
 
     message(0, "Making %d new black hole particles.\n", ntot);
 
+    /* Per-secFOF multi-seeding may convert additional (2nd..N_seed) stars into BHs
+     * later (fof_secfof_extra_seeds).  Those also need BH slots, so include an upper
+     * bound here in the single slots_reserve below (the bottom-stack relocation of
+     * the force tree / ActiveParticle around slots_reserve makes the growth safe). */
+    int64_t n_extra_ub = secfof_count_extra_seed_ub(fof, Comm);   /* local upper bound */
+    int64_t ntot_extra = 0;
+    MPI_Allreduce(&n_extra_ub, &ntot_extra, 1, MPI_INT64, MPI_SUM, Comm);
+
     /* Do we have enough black hole slots to create this many black holes?
      * If not, allocate more slots. */
-    if(Nimport + SlotsManager->info[5].size > SlotsManager->info[5].maxsize)
+    if(Nimport + n_extra_ub + SlotsManager->info[5].size > SlotsManager->info[5].maxsize)
     {
-        int *ActiveParticle_tmp=NULL;
-        /* This is only called on a PM step, so the condition should never be true*/
+        /* The live force tree (gasTree from run.c) and act->ActiveParticle both sit
+         * on the MAIN bottom stack ABOVE SlotsBase.  slots_reserve grows SlotsBase via
+         * myrealloc, which requires SlotsBase to be the top of the bottom stack, so
+         * relocate them to the top stack first and restore afterwards (strict LIFO).
+         * Mirrors the pattern in sfr_eff.c.  The tree stays valid because seeding only
+         * converts particles in place (no position/mass change, just type). */
+        struct NODE * nodes_base_tmp = NULL;
+        int * Father_tmp = NULL;
+        int * ActiveParticle_tmp = NULL;
+        if(tree && force_tree_allocated(tree)) {
+            nodes_base_tmp = (struct NODE *) mymalloc2("nodesbasetmp", tree->numnodes * sizeof(struct NODE));
+            memmove(nodes_base_tmp, tree->Nodes_base, tree->numnodes * sizeof(struct NODE));
+            myfree(tree->Nodes_base);
+            Father_tmp = (int *) mymalloc2("Father_tmp", PartManager->MaxPart * sizeof(int));
+            memmove(Father_tmp, tree->Father, PartManager->MaxPart * sizeof(int));
+            myfree(tree->Father);
+        }
+        /* This is only called on a PM step, so the condition should normally be false. */
         if(act->ActiveParticle) {
             ActiveParticle_tmp = (int *) mymalloc2("ActiveParticle_tmp", act->NumActiveParticle * sizeof(int));
             memmove(ActiveParticle_tmp, act->ActiveParticle, act->NumActiveParticle * sizeof(int));
             myfree(act->ActiveParticle);
         }
 
-        /*Now we can extend the slots! */
+        /*Now SlotsBase is the top of the bottom stack: extend the slots! */
         int64_t atleast[6];
         int64_t i;
         for(i = 0; i < 6; i++)
             atleast[i] = SlotsManager->info[i].maxsize;
-        atleast[5] += ntot*1.1;
+        atleast[5] += (ntot + ntot_extra)*1.1;
         slots_reserve(1, atleast, SlotsManager);
 
-        /*And now we need our memory back in the right place*/
+        /*And now we need our memory back in the right place (reverse allocation order)*/
         if(ActiveParticle_tmp) {
             act->ActiveParticle = (int *) mymalloc("ActiveParticle", sizeof(int)*(act->NumActiveParticle + PartManager->MaxPart - PartManager->NumPart));
             memmove(act->ActiveParticle, ActiveParticle_tmp, act->NumActiveParticle * sizeof(int));
             myfree(ActiveParticle_tmp);
+        }
+        if(tree && force_tree_allocated(tree)) {
+            tree->Father = (int *) mymalloc("Father", PartManager->MaxPart * sizeof(int));
+            memmove(tree->Father, Father_tmp, PartManager->MaxPart * sizeof(int));
+            myfree(Father_tmp);
+            tree->Nodes_base = (struct NODE *) mymalloc("Nodes_base", tree->numnodes * sizeof(struct NODE));
+            memmove(tree->Nodes_base, nodes_base_tmp, tree->numnodes * sizeof(struct NODE));
+            myfree(nodes_base_tmp);
+            /* Don't forget to update the Nodes pointer as well as Nodes_base! */
+            tree->Nodes = tree->Nodes_base - tree->firstnode;
         }
     }
 
     int ThisTask;
     MPI_Comm_rank(Comm, &ThisTask);
 
-    /* When seeding from star particles (secondary FOF), each seed spawns
-     * a new base particle.  Count how many will be spawned and verify
-     * that PartManager has room.  MaxPart cannot be grown at runtime, so
-     * abort early with a clear message instead of crashing mid-loop. */
-    int Nspawn = 0;
-    for(n = 0; n < Nimport; n++) {
-        int index = ImportGroups[n].seed_index;
-        if(fof_params.BlackHoleSeedStarCluster && P[index].Type == 4)
-            Nspawn++;
-    }
-    if(PartManager->NumPart + Nspawn > PartManager->MaxPart)
-        endrun(8888, "Not enough base particle capacity for BH seeding from stars: "
-               "NumPart=%ld + Nspawn=%d > MaxPart=%ld. Increase PartAllocFactor.",
-               PartManager->NumPart, Nspawn, PartManager->MaxPart);
-
+    /* Both star-cluster and gas/halo seeds are converted in-place into BHs
+     * (the parent star or gas particle is consumed), so no new base particles
+     * are created here — only BH slots, reserved above.  NumPart is unchanged. */
     for(n = 0; n < Nimport; n++)
     {
         fof_seed_make_one(&ImportGroups[n], ThisTask, atime, rnd);
     }
+
+    /* Per-secFOF multi-seeding: place the extra (2nd..N_seed) BH seeds for massive
+     * groups now that seed 1 exists.  Uses pre-reserved BH slots; converts the chosen
+     * stars in place.  Collective (every rank participates). */
+    fof_secfof_extra_seeds(fof, atime, rnd, Comm);
 
     /* Optionally return the GrNr (and, for SeedSecFOFcomSampleParticle, the
      * per-group tot_msc_fof = BHSeedMsc and unseeded stellar mass = SCcomMcut) of

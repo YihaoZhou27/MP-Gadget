@@ -211,6 +211,8 @@ set_all_global_params(ParameterSet * ps)
             }
             if(param_get_int(ps, "SeedSecFOFcomSample") && !SeedInSecFOFasStarCluster)
                 endrun(1, "SeedSecFOFcomSample=1 requires SeedInSecFOFasStarCluster=1 (effective: SecondFOFOn=1, StarClusterOn=1, SecFOFStarCluster=1).\n");
+            if(param_get_int(ps, "SeedInSecFOFMultipleSeeds") && !SeedInSecFOFasStarCluster)
+                endrun(1, "SeedInSecFOFMultipleSeeds=1 requires SeedInSecFOFasStarCluster=1 (effective: SecondFOFOn=1, StarClusterOn=1, SecFOFStarCluster=1).\n");
             /* Temporary: seeding in secondary FOF and primary FOF cannot
              * both be active in the same run. When SeedInSecFOFasStarCluster
              * is on, disable all primary FOF seeding methods. */
@@ -695,15 +697,15 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                         || All.BlackHoleSeedStarCluster || All.BlackHoleSeedGasBased;
                     if(seed_in_secfof) {
                         /* Seed BH using secondary FOF catalog */
-                        secondfof_seed(ddecomp, &Act, atime, &rnd, MPI_COMM_WORLD);
+                        secondfof_seed(ddecomp, &Act, &gasTree, atime, &rnd, MPI_COMM_WORLD);
                     } else if(need_fof_seeding) {
-                        fof_seed(&fof, &Act, atime, &rnd, NULL, NULL, NULL, NULL, MPI_COMM_WORLD);
+                        fof_seed(&fof, &Act, &gasTree, atime, &rnd, NULL, NULL, NULL, NULL, MPI_COMM_WORLD);
                     }
                     /* Seed BH from individual star particles with large SC mass.
                      * When BHseedEveryTimestep is on, this is handled after
                      * star formation instead so it runs every timestep. */
                     if(!All.BHseedEveryTimestep)
-                        blackhole_seed_sc_particle(&Act, atime, &rnd, MPI_COMM_WORLD, NULL, 0);
+                        blackhole_seed_sc_particle(&Act, &gasTree, atime, &rnd, MPI_COMM_WORLD, NULL, 0);
                     TimeNextSeedingCheck = atime * All.TimeBetweenSeedingSearch;
                 }
 
@@ -754,7 +756,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
              * timestep right after star formation, using only the newly formed
              * stars instead of scanning all particles. */
             if(All.BlackHoleOn && All.BHseedEveryTimestep)
-                blackhole_seed_sc_particle(&Act, atime, &rnd, MPI_COMM_WORLD, SFR_NewStars, SFR_NumNewStar);
+                blackhole_seed_sc_particle(&Act, &gasTree, atime, &rnd, MPI_COMM_WORLD, SFR_NewStars, SFR_NumNewStar);
             if(SFR_NewStars)
                 myfree(SFR_NewStars);
         }

@@ -78,4 +78,7 @@ double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
  * stellar mass). Used by the per-particle seeder to cap the group-summed mass. */
 int get_scmasscap_secfof_starmass(void);
 
+/* Per-secFOF multi-seed mass threshold (1e8 Msun) in code mass units. */
+double get_msc_multiseed_thresh_code(void);
+
 #endif

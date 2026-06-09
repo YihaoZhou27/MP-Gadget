@@ -1,5 +1,45 @@
 # MP-Gadget Development Log
 
+## 2026-06-07 — secFOF multi-seeding: surplus-aware N_seed and "first-capped, rest-equal" seed masses
+
+**Branch:** SecFOFCombined
+
+Reworked how the per-secFOF multi-seeding splits mass among the N_seed black holes. N_seed is now floor(M_SC/1e8) **plus one extra** when the leftover above floor(M_SC/1e8)×1e8 is itself seedable (≥ MinMscForBHseed), still capped by the number of unseeded stars. The seeds are no longer equal mass: seed 1 (the largest-m·Γ star) carries exactly the threshold mass (1e8 Msun-equivalent, i.e. its BH mass is 1e8×SeedBlackHoleMass under `BHseedMassScaleMsc=1`), and the remaining N_seed−1 extra seeds split the surplus (M_SC − 1e8) equally. This removes the old discontinuity where a single BH in the 1e8–2e8 Msun range could be seeded above the threshold mass. The attached StarClusterMass payload and the init_Msc / init_Msc_sample records follow the seed-mass share (proportional to each seed's mass when `BHseedMassScaleMsc=1`, otherwise an equal 1/N_seed split); total seed mass and payload remain conserved across the N_seed seeds. Only affects groups with `SeedInSecFOFMultipleSeeds=1`.
+
+**Files modified:** `libgadget/fof.c`
+
+## 2026-06-07 — Fix: non-combined secFOF star-cluster seeding could convert gas instead of a star
+
+**Branch:** SecFOFCombined
+
+Fixed a bug in non-combined (`SeedSecFOFcomSample=0`) secondary-FOF star-cluster seeding: the seed particle could be a gas particle instead of the intended star. When gas is a secondary linking type, the group carries a densest-gas `seed_index >= 0`, and the star override only replaced it when `seed_index < 0`, so the gas index was kept and that gas particle was converted into the BH (with the star-cluster payload attached). Now the star override is unconditional (always uses the largest-ClusterMass star), and the SC seeding mask additionally requires that a star seed exists — matching the combined-sample path, which already overrode gas unconditionally. Star-cluster seeding now always converts a star. (This also makes the multi-seed feature trigger correctly for such groups.)
+
+**Files modified:** `libgadget/fof.c`
+
+## 2026-06-07 — secFOF multi-seeding: gating parameter + per-group logging
+
+**Branch:** SecFOFCombined
+
+Put the per-secFOF multi-seeding feature behind a new int parameter `SeedInSecFOFMultipleSeeds` (default 0). When 0 the behaviour is the original single seed per group; when 1 the multi-seeding (below) runs. `SeedInSecFOFMultipleSeeds=1` requires the effective `SeedInSecFOFasStarCluster=1` (i.e. SecondFOFOn=1, StarClusterOn=1, SecFOFStarCluster=1); otherwise the run aborts with an error (checked in both `set_secondfof_params` and the `run.c` init, mirroring the `SeedSecFOFcomSample` validation). Also added a rank-0 log message, emitted per multi-seed group (M_SC > 1e8 Msun), reporting M_SC (solar masses and code units), N_seed, the number of seeds actually placed, and the position (and ID) of every seed — seed 1 plus each extra seed — followed by a one-line global summary.
+
+**Files modified:** `gadget/params.c`, `libgadget/fof.c`, `libgadget/secondfof.c`, `libgadget/run.c`
+
+## 2026-06-06 — secFOF star-cluster seeding: multiple BH seeds in very massive groups
+
+**Branch:** SecFOFCombined
+
+Added per-secFOF multi-seeding for the `SeedInSecFOFasStarCluster` path. When a secondary-FOF group's seeding star-cluster mass M_SC exceeds 1e8 Msun (converted to code units), it now seeds N_seed = floor(M_SC/1e8) black holes (capped by the number of unseeded stars in the group) instead of one. All N seeds have equal mass: with `BHseedMassScaleMsc=1` each is M_SC*SeedBlackHoleMass/N_seed, and the attached StarClusterMass payload (when `StarClusterBHDyn=1`) is split equally (Σmγ/N_seed). Seed 1 is the largest-m·Γ unseeded star (as before); seeds 2..N are the next-largest-m·Γ unseeded stars lying farther than 2×(gravitational softening ε) from seed 1, each converted in place into a BH. Stars are considered in descending m·Γ order; the separation is measured from seed 1 only. If too few stars are far enough, the remaining seeds are skipped and a summary is logged. The selection is a collective operation across MPI ranks (multi-seed groups and seed-1 positions are gathered, candidates are globally ranked, and each rank converts the chosen stars it owns); BH slots for the extra seeds are pre-reserved up front. Groups below 1e8 Msun are unaffected (single seed, identical to before). (Gated by `SeedInSecFOFMultipleSeeds` as of 2026-06-07.)
+
+**Files modified:** `libgadget/sfr_eff.c`, `libgadget/sfr_eff.h`, `libgadget/fof.h`, `libgadget/fof.c`
+
+## 2026-06-06 — Star-cluster BH seeding: convert the parent star in-place instead of spawning
+
+**Branch:** SecFOFCombined
+
+Changed star-cluster-based BH seeding (both the per-star `BlackholeSeedSCparticle` path and the secondary-FOF `SeedInSecFOFasStarCluster` path, including the combined-sample modes) to **convert the parent star particle in-place into the black hole** instead of spawning a new BH next to it. The star is now consumed and disappears from the simulation, exactly as a gas particle is consumed under `BlackHoleSeedHaloBased=1`. The BH keeps the star's ID and full mass, and its initial `Mtrack` is the parent star mass (mass-conserving). The attached `StarClusterMass` payload and seed-mass scaling are unchanged. Removed the now-unnecessary base-particle capacity checks (no new particles are created; only BH slots are still reserved) and the post-seed star `Seeded` flagging on the consumed star.
+
+**Files modified:** `libgadget/blackhole.c`, `libgadget/fof.c`, `libgadget/secondfof.c`
+
 ## 2026-06-05 — SeedSecFOFcomSampleParticle: per-star-particle star-cluster sampling for secFOF BH seeding
 
 **Branch:** SecFOFCombined
@@ -468,6 +508,16 @@ The filter is applied in the FOF engine's small-group elimination stage (alongsi
 Made the post-seeding bookkeeping in secondary-FOF BH seeding consistent across all modes. Previously, with `SeedSecFOFcomSample` OFF, stars in a just-seeded group had their `ClusterMass`/`StarClusterMass_sample` zeroed, while the combined-sample mode and the per-star seeder only set the `Seeded` flag. Now all paths set `Seeded = 1` and keep `ClusterMass`/`StarClusterMass_sample` as a record. This is safe because the group-property accumulation already excludes `Seeded` stars from the unseeded cluster-mass sums that drive seeding (no behavior change to the seeding decision).
 
 **Files modified:** `libgadget/secondfof.c`, `libgadget/slotsmanager.h`
+
+---
+
+## 2026-06-07 — fix "Mismatched Free: SlotsBase" crash during BH seeding
+
+**Branch:** SecFOFCombined
+
+Fixed a memory-allocator (LIFO) crash that aborted multi-seeding runs when BH slots had to grow during seeding. The live gas/BH force tree from the main loop sits on the allocator's bottom stack above the slots block, so growing the slots violated LIFO. The seeding routines now temporarily relocate the force tree (and active-particle list) off the bottom stack around the slot growth and restore it afterwards — the same pattern already used by star formation. Also tightened the multi-seed BH-slot pre-reservation so it no longer over-counts by the full number of member stars (now capped per group at the actual number of extra seeds), avoiding unnecessary slot growth. The tree stays valid because seeding only converts particles in place.
+
+**Files modified:** `libgadget/fof.c`, `libgadget/fof.h`, `libgadget/secondfof.c`, `libgadget/secondfof.h`, `libgadget/blackhole.c`, `libgadget/blackhole.h`, `libgadget/run.c`
 
 ---
 

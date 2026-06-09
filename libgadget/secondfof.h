@@ -14,7 +14,7 @@ int get_seed_in_secfof(void);
 
 /* Run a secondary FOF specifically for BH seeding: swaps FOF params,
  * runs fof_fof, calls fof_seed, then restores params and frees. */
-void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
+void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * tree,
                     double atime, const RandTable * rnd, MPI_Comm Comm);
 
 /* Opaque handle holding second FOF results between run and write phases */

@@ -1381,44 +1381,16 @@ bh_powerlaw_seed_mass(const MyIDType ID, const RandTable * const rnd)
 void
 blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals) {
     int child;
-    int spawn_from_star = seeded_by_starcluster && (P[index].Type == 4);
 
-    if(spawn_from_star) {
-        /* Star-cluster seeding in secondary FOF: spawn a new BH next to
-         * the star.  The parent star is NOT modified. */
-        if(P[index].Type != 4)
-            endrun(7773, "blackhole_make_one spawn_from_star called on non-star particle (type %d).\n",
-                   P[index].Type);
-        int64_t new_child = atomic_fetch_and_add_64(&PartManager->NumPart, 1);
-        if(new_child >= PartManager->MaxPart)
-            endrun(8888, "Tried to spawn BH from star: NumPart=%ld MaxPart=%ld.\n",
-                   new_child, PartManager->MaxPart);
-
-        PartManager->Base[new_child] = PartManager->Base[index];
-        PartManager->Base[index].Generation++;
-        /* Use the star's own generation (encoded in its ID top byte) plus
-         * a fixed offset of 128 to derive the BH child ID.  This avoids
-         * collision with sibling stars from the same gas parent, whose
-         * generations occupy the range 1..Generations (max 14). */
-        uint64_t star_gen = (PartManager->Base[index].ID >> 56L) & 0xFFL;
-        uint64_t bh_gen = star_gen + 128;
-        PartManager->Base[new_child].ID = (PartManager->Base[index].ID & 0x00ffffffffffffffL) + (bh_gen << 56L);
-        if(bh_gen >= (1 << (64 - 56L)))
-            endrun(1, "Particle %ld (ID: %ld) BH generation %ld (from star gen %ld) wrapped.\n",
-                   (long)index, (long)PartManager->Base[index].ID, (long)bh_gen, (long)star_gen);
-        PartManager->Base[new_child].PI = -1;
-        if(blackhole_params.SeedBHDynMass > 0)
-            P[new_child].Mass = blackhole_params.SeedBHDynMass;
-        else
-            P[new_child].Mass = blackhole_params.SeedBlackHoleMass;
-        child = slots_convert(new_child, 5, -1, PartManager, SlotsManager);
-    } else {
-        /* Standard gas-based seeding: convert the gas particle in-place.
-         * The full P[i].Mass is kept so we don't leave low-mass tracers. */
-        if(P[index].Type != 0)
-            endrun(7772, "Only Gas turns into blackholes, what's wrong?");
-        child = slots_convert(index, 5, -1, PartManager, SlotsManager);
-    }
+    /* Convert the parent particle in-place into a black hole, keeping its ID
+     * and full mass.  Both gas (BlackHoleSeedHaloBased / gas-based seeding) and
+     * star (star-cluster seeding: BlackholeSeedSCparticle / SeedInSecFOFasStarCluster)
+     * are consumed the same way: the parent particle disappears as its original
+     * type and its full P.Mass is carried over (so we don't leave low-mass
+     * tracers, and the mass is conserved into BHP.Mtrack below). */
+    if(P[index].Type != 0 && P[index].Type != 4)
+        endrun(7772, "Only Gas or Star turns into blackholes, got type %d.\n", P[index].Type);
+    child = slots_convert(index, 5, -1, PartManager, SlotsManager);
 
     /* The accretion mass should always be the seed black hole mass,
      * irrespective of the gravitational mass of the particle. */
@@ -1483,12 +1455,10 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
     BHP(child).JumpToMinPot = 0;
     BHP(child).CountProgs = 1;
 
-    /* Mtrack always tracks mass conservation. For gas-seeded BHs it starts
-     * at the gas particle mass; for star-seeded BHs it starts at BHP.Mass. */
-    if(spawn_from_star)
-        BHP(child).Mtrack = BHP(child).Mass;
-    else
-        BHP(child).Mtrack = P[child].Mass;
+    /* Mtrack always tracks mass conservation.  The BH is an in-place conversion
+     * of its parent particle, so it starts at the parent mass: the gas mass for
+     * gas-based seeding, the parent star mass for star-cluster seeding. */
+    BHP(child).Mtrack = P[child].Mass;
     /* P.Mass = max(Mtrack [+ SC if StarClusterBHDyn], SeedBHDynMass). */
     {
         double target = BHP(child).Mtrack;
@@ -1500,9 +1470,8 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
     }
 
     double sc_in_dyn = blackhole_params.StarClusterBHDyn ? BHP(child).StarClusterMass : 0;
-    if(!spawn_from_star &&
-       (P[child].Mass - sc_in_dyn < BHP(child).Mass ||
-        P[child].Mass - sc_in_dyn < BHP(child).Mtrack))
+    if(P[child].Mass - sc_in_dyn < BHP(child).Mass ||
+       P[child].Mass - sc_in_dyn < BHP(child).Mtrack)
         message(1, "WARNING: BH Mass (%g) for ID %ld is larger than particle mass (%g) or mtrack (%g)\n",
                 BHP(child).Mass, P[child].ID, P[child].Mass - sc_in_dyn, BHP(child).Mtrack);
 
@@ -1517,7 +1486,7 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
  * indices are checked (newly formed stars from this timestep).  Otherwise
  * falls back to a full scan of all type-4 particles (PM-step path). */
 void
-blackhole_seed_sc_particle(ActiveParticles * act, double atime,
+blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime,
                            const RandTable * const rnd, MPI_Comm Comm,
                            int * NewStars, int64_t NumNewStar)
 {
@@ -1562,7 +1531,23 @@ blackhole_seed_sc_particle(ActiveParticles * act, double atime,
 
     /* Ensure enough BH slots. */
     if(Nseed + SlotsManager->info[5].size > SlotsManager->info[5].maxsize) {
-        int *ActiveParticle_tmp = NULL;
+        /* The live force tree (gasTree from run.c) and act->ActiveParticle both sit
+         * on the MAIN bottom stack ABOVE SlotsBase.  slots_reserve grows SlotsBase via
+         * myrealloc, which requires SlotsBase to be the top of the bottom stack, so
+         * relocate them to the top stack first and restore afterwards (strict LIFO).
+         * Mirrors the pattern in sfr_eff.c.  The tree stays valid because seeding only
+         * converts particles in place (no position/mass change, just type). */
+        struct NODE * nodes_base_tmp = NULL;
+        int * Father_tmp = NULL;
+        int * ActiveParticle_tmp = NULL;
+        if(tree && force_tree_allocated(tree)) {
+            nodes_base_tmp = (struct NODE *) mymalloc2("nodesbasetmp", tree->numnodes * sizeof(struct NODE));
+            memmove(nodes_base_tmp, tree->Nodes_base, tree->numnodes * sizeof(struct NODE));
+            myfree(tree->Nodes_base);
+            Father_tmp = (int *) mymalloc2("Father_tmp", PartManager->MaxPart * sizeof(int));
+            memmove(Father_tmp, tree->Father, PartManager->MaxPart * sizeof(int));
+            myfree(tree->Father);
+        }
         if(act->ActiveParticle) {
             ActiveParticle_tmp = (int *) mymalloc2("ActiveParticle_tmp",
                                     act->NumActiveParticle * sizeof(int));
@@ -1576,6 +1561,7 @@ blackhole_seed_sc_particle(ActiveParticles * act, double atime,
             atleast[k] = SlotsManager->info[k].maxsize;
         atleast[5] += Nseed_total * 1.1;
         slots_reserve(1, atleast, SlotsManager);
+        /* Restore in reverse allocation order. */
         if(ActiveParticle_tmp) {
             act->ActiveParticle = (int *) mymalloc("ActiveParticle",
                 sizeof(int) * (act->NumActiveParticle + PartManager->MaxPart - PartManager->NumPart));
@@ -1583,16 +1569,21 @@ blackhole_seed_sc_particle(ActiveParticles * act, double atime,
                     act->NumActiveParticle * sizeof(int));
             myfree(ActiveParticle_tmp);
         }
+        if(tree && force_tree_allocated(tree)) {
+            tree->Father = (int *) mymalloc("Father", PartManager->MaxPart * sizeof(int));
+            memmove(tree->Father, Father_tmp, PartManager->MaxPart * sizeof(int));
+            myfree(Father_tmp);
+            tree->Nodes_base = (struct NODE *) mymalloc("Nodes_base", tree->numnodes * sizeof(struct NODE));
+            memmove(tree->Nodes_base, nodes_base_tmp, tree->numnodes * sizeof(struct NODE));
+            myfree(nodes_base_tmp);
+            /* Don't forget to update the Nodes pointer as well as Nodes_base! */
+            tree->Nodes = tree->Nodes_base - tree->firstnode;
+        }
     }
 
-    /* Ensure enough base particle capacity for new BH spawns. */
-    if(PartManager->NumPart + Nseed > PartManager->MaxPart)
-        endrun(8889, "Not enough base particle capacity for BH seeding from SC particles: "
-               "NumPart=%ld + Nseed=%d > MaxPart=%ld. Increase PartAllocFactor.\n",
-               PartManager->NumPart, Nseed, PartManager->MaxPart);
-
-    /* Second pass: seed BHs from qualifying stars.
-     * NumPart grows as we spawn, so iterate only over the original range. */
+    /* Second pass: seed BHs from qualifying stars.  Each qualifying star is
+     * converted in-place into a BH (consumed); NumPart does not grow, so no
+     * extra base-particle capacity is needed.  Iterate over the original range. */
     int64_t NumPart_before = PartManager->NumPart;
     int n_seeded = 0;
 
@@ -1618,11 +1609,10 @@ blackhole_seed_sc_particle(ActiveParticles * act, double atime,
                            STARP(pi).ClusterMass, STARP(pi).StarClusterMass_sample,
                            0, sc_metallicity, sc_metals);
 
-        /* Flag the parent star as having contributed to a BH seed so it is
-         * excluded from any further seeding (here and in FOF group sums). Keep
-         * ClusterMass/StarClusterMass_sample as a record, consistent with
-         * SeedSecFOFcomSample. */
-        STARP(pi).Seeded = 1;
+        /* The parent star has been converted in-place into the BH (consumed):
+         * it is now type 5, so it no longer participates in any seeding scan or
+         * FOF star-cluster sum and needs no Seeded flag.  Do NOT touch STARP(pi)
+         * here — that slot is now the BH slot. */
         n_seeded++;
     }
 

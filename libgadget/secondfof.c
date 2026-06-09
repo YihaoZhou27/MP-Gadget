@@ -70,6 +70,9 @@ void set_secondfof_params(ParameterSet * ps)
         sfof_params.SeedSecFOFcomSample = param_get_int(ps, "SeedSecFOFcomSample");
         if(sfof_params.SeedSecFOFcomSample && !sfof_params.SeedInSecFOFasStarCluster)
             endrun(1, "SeedSecFOFcomSample=1 requires SeedInSecFOFasStarCluster=1 (effective: SecondFOFOn=1, StarClusterOn=1, SecFOFStarCluster=1).\n");
+        /* SeedInSecFOFMultipleSeeds requires the (effective) SeedInSecFOFasStarCluster. */
+        if(param_get_int(ps, "SeedInSecFOFMultipleSeeds") && !sfof_params.SeedInSecFOFasStarCluster)
+            endrun(1, "SeedInSecFOFMultipleSeeds=1 requires SeedInSecFOFasStarCluster=1 (effective: SecondFOFOn=1, StarClusterOn=1, SecFOFStarCluster=1).\n");
         if(sfof_params.SeedSecFOFcomSample && param_get_double(ps, "MinMscForBHseed") <= 0)
             endrun(1, "SeedSecFOFcomSample=1 requires MinMscForBHseed > 0.\n");
         sfof_params.SeedSecFOFcomSampleParticle = param_get_int(ps, "SeedSecFOFcomSampleParticle");
@@ -799,7 +802,7 @@ struct SecondFOFResult {
     int64_t TotNgroups;
 };
 
-void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
+void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * tree,
                     double atime, const RandTable * rnd, MPI_Comm Comm)
 {
     int i;
@@ -844,7 +847,7 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
     double * local_seeded_totmsc = NULL;
     double * local_seeded_mcut = NULL;
     int n_local_seeded = 0;
-    fof_seed(&secfof, act, atime, rnd, &local_seeded_grnr, &n_local_seeded,
+    fof_seed(&secfof, act, tree, atime, rnd, &local_seeded_grnr, &n_local_seeded,
              &local_seeded_totmsc, &local_seeded_mcut, Comm);
 
     /* Flag (Seeded=1) all type-4 stars in secondary FOF groups that just had a BH
@@ -946,8 +949,10 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act,
         P[i].GrNr = P[i].SecGrNr;
         P[i].SecGrNr = -1;
     }
-    /* Newly spawned BHs (indices [NumPart_before, NumPart)) are not part
-     * of the primary FOF or any prior secondary FOF. */
+    /* Seeds are now converted in-place (the parent star/gas becomes the BH at
+     * the same index), so NumPart does not grow and this loop is normally a
+     * no-op.  Kept defensively: any particle appended past NumPart_before is
+     * not part of the primary FOF or any prior secondary FOF. */
     int64_t NumPart_now = PartManager->NumPart;
     for(i = NumPart_before; i < NumPart_now; i++) {
         P[i].GrNr = -1;
