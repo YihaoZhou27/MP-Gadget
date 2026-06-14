@@ -20,6 +20,9 @@ void fof_get_params(int *PrimaryLinkTypes, int *SecondaryLinkTypes,
 void fof_set_params(int PrimaryLinkTypes, int SecondaryLinkTypes,
                     double ComovingLinkingLength, int MinLength,
                     int PotentialMin, int MinPrimaryLength);
+/* Restrict the primary-linking set to unseeded star particles (drop seeded
+ * stars). Set transiently by the second FOF when SecFOFUnseededPart=1. */
+void fof_set_primary_unseeded_only(int flag);
 void fof_get_seed_params(int *BlackHoleSeedStarCluster, int *BlackHoleSeedHaloBased,
                          int *BlackHoleSeedGasBased);
 void fof_set_seed_params(int BlackHoleSeedStarCluster, int BlackHoleSeedHaloBased,

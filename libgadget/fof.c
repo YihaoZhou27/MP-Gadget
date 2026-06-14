@@ -70,6 +70,10 @@ struct FOFParams
     int BHseedMassScaleMsc;
     double MinMscForBHseed;
     int FOFPotentialMin;
+    /* If 1, seeded star particles (Type==4 && STARP.Seeded) are excluded from
+     * the primary-linking set. Set transiently by secondfof_run when
+     * SecFOFUnseededPart=1. Not read from the parameter file directly. */
+    int FOFPrimaryUnseededStarsOnly;
 } fof_params;
 
 /*Set the parameters of the BH module*/
@@ -154,6 +158,14 @@ void fof_set_params(int PrimaryLinkTypes, int SecondaryLinkTypes,
     fof_params.FOFHaloMinLength = MinLength;
     fof_params.FOFPotentialMin = PotentialMin;
     fof_params.FOFMinPrimaryLength = MinPrimaryLength;
+}
+
+/* Toggle the "unseeded stars only" restriction on the primary-linking set.
+ * Set on every MPI rank (like fof_set_params); secondfof_run enables it
+ * around the second-FOF fof_fof() call and resets it to 0 afterwards. */
+void fof_set_primary_unseeded_only(int flag)
+{
+    fof_params.FOFPrimaryUnseededStarsOnly = flag;
 }
 
 void fof_get_seed_params(int *BlackHoleSeedStarCluster, int *BlackHoleSeedHaloBased,
@@ -445,10 +457,26 @@ static void fof_primary_copy(int place, TreeWalkQueryFOF * I, TreeWalk * tw) {
     I->MinIDTask = FOF_PRIMARY_GET_PRIV(tw)->HaloLabel[head].MinIDTask;
 }
 
+/* True if particle i acts as a primary-linking particle for the current FOF run.
+ * This is the type-mask test, plus the FOFPrimaryUnseededStarsOnly restriction
+ * (second FOF with SecFOFUnseededPart=1) which drops seeded star particles
+ * (Type==4 && STARP.Seeded) from the primary set. Used in the primary/secondary
+ * neighbour iterators and the LenPrimary / PotMin accounting so a seeded star is
+ * consistently treated as not-primary even though it stays in the FOF tree. */
+static inline int
+fof_is_primary_link(int i)
+{
+    if(!((1 << P[i].Type) & fof_params.FOFPrimaryLinkTypes))
+        return 0;
+    if(fof_params.FOFPrimaryUnseededStarsOnly && P[i].Type == 4 && STARP(i).Seeded)
+        return 0;
+    return 1;
+}
+
 static int fof_primary_haswork(int n, TreeWalk * tw) {
     if(P[n].IsGarbage || P[n].Swallowed)
         return 0;
-    return (((1 << P[n].Type) & (fof_params.FOFPrimaryLinkTypes))) && FOF_PRIMARY_GET_PRIV(tw)->PrimaryActive[n];
+    return fof_is_primary_link(n) && FOF_PRIMARY_GET_PRIV(tw)->PrimaryActive[n];
 }
 
 static void
@@ -648,6 +676,13 @@ fof_primary_ngbiter(TreeWalkQueryFOF * I,
     }
     int other = iter->base.other;
 
+    /* The neighbour search only filters by particle type, so seeded stars are
+     * still returned when FOFPrimaryUnseededStarsOnly is set. Skip them so they
+     * are never linked as primary particles (the initiating target is already
+     * filtered out by fof_primary_haswork). */
+    if(!fof_is_primary_link(other))
+        return;
+
     if(lv->mode == TREEWALK_PRIMARY) {
         /* Local FOF */
         if(lv->target <= other) {
@@ -842,7 +877,7 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
 
     /* Track minimum potential among primary-linked particles.
      * Used by second FOF for group center; only when FOFPotentialMin is enabled. */
-    if(fof_params.FOFPotentialMin && ((1 << P[index].Type) & fof_params.FOFPrimaryLinkTypes)) {
+    if(fof_params.FOFPotentialMin && fof_is_primary_link(index)) {
         if(P[index].Potential < gdst->PotMin) {
             gdst->PotMin = P[index].Potential;
             int d;
@@ -967,7 +1002,7 @@ fof_compile_base(struct BaseGroup * base, int NgroupsExt, struct fof_particle_li
                 break;
             }
             base[i].Length ++;
-            if((1 << P[HaloLabel[start].Pindex].Type) & fof_params.FOFPrimaryLinkTypes)
+            if(fof_is_primary_link(HaloLabel[start].Pindex))
                 base[i].LenPrimary ++;
         }
     }
@@ -1394,6 +1429,10 @@ fof_secondary_ngbiter(TreeWalkQueryFOF * I,
     }
     int other = iter->base.other;
     double r = iter->base.r;
+    /* Don't attach a secondary particle to a seeded star left in the tree when
+     * FOFPrimaryUnseededStarsOnly is set: seeded stars are not primary anchors. */
+    if(!fof_is_primary_link(other))
+        return;
     if(r < O->Distance)
     {
         O->Distance = r;

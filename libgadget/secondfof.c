@@ -40,6 +40,7 @@ struct SecondFOFParams {
     int SeedSecFOFcomSample; /* combined per-secFOF star-cluster sampling for BH seeding */
     int SeedSecFOFcomSampleParticle; /* per-star-particle sampling variant of SeedSecFOFcomSample */
     int SecFOFStarCluster;  /* flag that sec FOF groups are star clusters (requires SecondFOFOn && StarClusterOn) */
+    int SecFOFUnseededPart; /* if 1, only unseeded star particles are primary-linking particles (requires StarClusterOn) */
     char SecondFOFFileBase[256];
 };
 
@@ -61,6 +62,11 @@ void set_secondfof_params(ParameterSet * ps)
         sfof_params.SeedInSecFOFasStarCluster = param_get_int(ps, "SeedInSecFOFasStarCluster");
         sfof_params.SecFOFStarCluster = param_get_int(ps, "SecFOFStarCluster");
         int StarClusterOn = param_get_int(ps, "StarClusterOn");
+        /* SecFOFUnseededPart restricts the second-FOF primary-linking set to
+         * unseeded star particles; it relies on the StarCluster Seeded flag. */
+        sfof_params.SecFOFUnseededPart = param_get_int(ps, "SecFOFUnseededPart");
+        if(sfof_params.SecFOFUnseededPart && !StarClusterOn)
+            endrun(1, "SecFOFUnseededPart=1 requires StarClusterOn=1.\n");
         if(sfof_params.SeedInSecFOFasStarCluster && (!sfof_params.SecondFOFOn || !StarClusterOn || !sfof_params.SecFOFStarCluster)) {
             message(0, "SeedInSecFOFasStarCluster requires SecondFOFOn=1, StarClusterOn=1, and SecFOFStarCluster=1; disabling.\n");
             sfof_params.SeedInSecFOFasStarCluster = 0;
@@ -995,8 +1001,14 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential, MPI
                    sfof_params.LinkingLength, sfof_params.MinLength, OutputPotential,
                    sfof_params.MinPrimaryLength);
 
+    /* When enabled, restrict the primary-linking set to unseeded stars for the
+     * duration of this fof_fof() call only (reset immediately afterwards). */
+    fof_set_primary_unseeded_only(sfof_params.SecFOFUnseededPart);
+
     /* Step 4: Run the FOF algorithm */
     FOFGroups fof = fof_fof(ddecomp, 1, Comm);
+
+    fof_set_primary_unseeded_only(0);
 
     /* Step 5: Copy GrNr -> SecGrNr */
     #pragma omp parallel for

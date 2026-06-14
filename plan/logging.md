@@ -1,5 +1,21 @@
 # MP-Gadget Development Log
 
+## 2026-06-09 16:58 (UTC-5) — analysis notebook axis conversion warning fix
+
+Updated the analysis notebook plotting conversion so age/redshift axis mapping is consistent and no longer triggers the astropy bracketing warning during figure rendering.
+
+## 2026-06-09 18:56 (UTC-5) — analysis notebook SU log stitching robustness fix
+
+Updated the analysis notebook log-stitching helper to safely handle restart files with identical starting points and avoid empty-slice reduction failures while combining SU history segments.
+
+## 2026-06-09 — secFOF: option to link only unseeded star particles
+
+**Branch:** SecFOFCombined
+
+Added a new int parameter `SecFOFUnseededPart` (default 0). When set to 1, the second FOF uses only unseeded star particles as primary-linking particles; star particles that have already seeded a black hole are dropped from the primary-linking set (other configured primary types, e.g. gas, are unaffected). Seeded stars no longer anchor or join secondary-FOF groups, and are excluded from the primary-length count and the group potential-minimum. `SecFOFUnseededPart=1` requires `StarClusterOn=1`, otherwise the run aborts with an error (checked in both `set_secondfof_params` and the `run.c` init, mirroring the other secFOF parameter validations).
+
+**Files modified:** `gadget/params.c`, `libgadget/fof.c`, `libgadget/fof.h`, `libgadget/secondfof.c`, `libgadget/run.c`
+
 ## 2026-06-07 — secFOF multi-seeding: surplus-aware N_seed and "first-capped, rest-equal" seed masses
 
 **Branch:** SecFOFCombined

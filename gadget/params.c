@@ -232,6 +232,7 @@ create_gadget_parameter_set()
     param_declare_int(ps, "SCmasscapSecFOFstarmass", OPTIONAL, 0, "Only used with SeedSecFOFcomSample=1. If 1, the combined-sampled star-cluster mass is capped at the total stellar mass of the group's unseeded stars before it enters BH seeding (sampled SC mass cannot exceed the hosting stellar mass). If 0, no cap.");
     param_declare_int(ps, "SeedInSecFOFMultipleSeeds", OPTIONAL, 0, "Only used with SeedInSecFOFasStarCluster star-cluster seeding. If 1, a secondary-FOF group whose seeding cluster mass M_SC exceeds 1e8 Msun seeds N_seed=floor(M_SC/1e8) equal-mass BHs (capped by the number of unseeded stars) instead of one: seed 1 is the largest-m*Gamma star, the others are the next-largest unseeded stars lying farther than 2*GravitySoftening from seed 1. If 0, always one seed per group.");
     param_declare_int(ps, "SecFOFStarCluster", OPTIONAL, 1, "Flag that second FOF groups are star clusters. Requires SecondFOFOn=1 and StarClusterOn=1. Writes StarClusterMass/Metallicity/MetalElemMass to SecPIG.");
+    param_declare_int(ps, "SecFOFUnseededPart", OPTIONAL, 0, "If 1, the second FOF uses only unseeded star particles (Type 4 with Seeded==0) as primary-linking particles; seeded stars are dropped from the primary-linking set (other configured primary types such as gas are unaffected). Requires StarClusterOn=1.");
 
     /*Black holes*/
     param_declare_int(ps, "BlackHoleOn", REQUIRED, 1, "Master switch to enable black hole formation and feedback. If this is on, type 5 particles are treated as black holes.");
