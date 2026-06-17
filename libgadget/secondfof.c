@@ -84,6 +84,17 @@ void set_secondfof_params(ParameterSet * ps)
         sfof_params.SeedSecFOFcomSampleParticle = param_get_int(ps, "SeedSecFOFcomSampleParticle");
         if(sfof_params.SeedSecFOFcomSampleParticle && !sfof_params.SeedSecFOFcomSample)
             endrun(1, "SeedSecFOFcomSampleParticle=1 requires SeedSecFOFcomSample=1.\n");
+        /* SeedSeedFOFMassiveBoundStar restricts massive secFOF groups to their
+         * gravitationally bound unseeded stars; v1 supports the combined sampler
+         * only (not the per-particle sampler). */
+        if(param_get_int(ps, "SeedSeedFOFMassiveBoundStar")) {
+            if(!sfof_params.SeedSecFOFcomSample)
+                endrun(1, "SeedSeedFOFMassiveBoundStar=1 requires SeedSecFOFcomSample=1.\n");
+            if(sfof_params.SeedSecFOFcomSampleParticle)
+                endrun(1, "SeedSeedFOFMassiveBoundStar=1 is incompatible with SeedSecFOFcomSampleParticle=1 (v1 supports the combined sampler only).\n");
+            if(param_get_int(ps, "SeedInSecFOFMultipleSeeds"))
+                endrun(1, "SeedSeedFOFMassiveBoundStar=1 is incompatible with SeedInSecFOFMultipleSeeds=1 (only the primary seed would be bound; multi-seeding is not bound-aware).\n");
+        }
         if(sfof_params.SecondFOFOn && StarClusterOn) {
             if(sfof_params.SecFOFStarCluster && sfof_params.PrimaryLinkTypes != (1 << 4) && sfof_params.PrimaryLinkTypes != ((1 << 4) | (1 << 0)))
                 endrun(1, "SecFOFStarCluster requires SecondFOFPrimaryLinkTypes = 16 (star) or 17 (star+gas).\n");
@@ -809,7 +820,7 @@ struct SecondFOFResult {
 };
 
 void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * tree,
-                    double atime, const RandTable * rnd, MPI_Comm Comm)
+                    double atime, const RandTable * rnd, Cosmology * CP, MPI_Comm Comm)
 {
     int i;
     message(0, "Seeding black holes using secondary FOF catalog (StarCluster criteria).\n");
@@ -854,7 +865,7 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
     double * local_seeded_mcut = NULL;
     int n_local_seeded = 0;
     fof_seed(&secfof, act, tree, atime, rnd, &local_seeded_grnr, &n_local_seeded,
-             &local_seeded_totmsc, &local_seeded_mcut, Comm);
+             &local_seeded_totmsc, &local_seeded_mcut, CP, Comm);
 
     /* Flag (Seeded=1) all type-4 stars in secondary FOF groups that just had a BH
      * seeded, so they are excluded from future seeding sums.  ClusterMass and

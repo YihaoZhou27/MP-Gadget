@@ -213,6 +213,14 @@ set_all_global_params(ParameterSet * ps)
                 endrun(1, "SeedSecFOFcomSample=1 requires SeedInSecFOFasStarCluster=1 (effective: SecondFOFOn=1, StarClusterOn=1, SecFOFStarCluster=1).\n");
             if(param_get_int(ps, "SeedInSecFOFMultipleSeeds") && !SeedInSecFOFasStarCluster)
                 endrun(1, "SeedInSecFOFMultipleSeeds=1 requires SeedInSecFOFasStarCluster=1 (effective: SecondFOFOn=1, StarClusterOn=1, SecFOFStarCluster=1).\n");
+            if(param_get_int(ps, "SeedSeedFOFMassiveBoundStar")) {
+                if(!param_get_int(ps, "SeedSecFOFcomSample"))
+                    endrun(1, "SeedSeedFOFMassiveBoundStar=1 requires SeedSecFOFcomSample=1.\n");
+                if(param_get_int(ps, "SeedSecFOFcomSampleParticle"))
+                    endrun(1, "SeedSeedFOFMassiveBoundStar=1 is incompatible with SeedSecFOFcomSampleParticle=1 (v1 supports the combined sampler only).\n");
+                if(param_get_int(ps, "SeedInSecFOFMultipleSeeds"))
+                    endrun(1, "SeedSeedFOFMassiveBoundStar=1 is incompatible with SeedInSecFOFMultipleSeeds=1 (only the primary seed would be bound; multi-seeding is not bound-aware).\n");
+            }
             if(param_get_int(ps, "SecFOFUnseededPart") && !All.StarClusterOn)
                 endrun(1, "SecFOFUnseededPart=1 requires StarClusterOn=1.\n");
             /* Temporary: seeding in secondary FOF and primary FOF cannot
@@ -699,9 +707,9 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                         || All.BlackHoleSeedStarCluster || All.BlackHoleSeedGasBased;
                     if(seed_in_secfof) {
                         /* Seed BH using secondary FOF catalog */
-                        secondfof_seed(ddecomp, &Act, &gasTree, atime, &rnd, MPI_COMM_WORLD);
+                        secondfof_seed(ddecomp, &Act, &gasTree, atime, &rnd, &All.CP, MPI_COMM_WORLD);
                     } else if(need_fof_seeding) {
-                        fof_seed(&fof, &Act, &gasTree, atime, &rnd, NULL, NULL, NULL, NULL, MPI_COMM_WORLD);
+                        fof_seed(&fof, &Act, &gasTree, atime, &rnd, NULL, NULL, NULL, NULL, &All.CP, MPI_COMM_WORLD);
                     }
                     /* Seed BH from individual star particles with large SC mass.
                      * When BHseedEveryTimestep is on, this is handled after

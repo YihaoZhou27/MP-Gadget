@@ -145,7 +145,7 @@ void fof_finish(FOFGroups * fof);
  * MAIN bottom stack around slots_reserve so SlotsBase can be grown (LIFO). */
 void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double atime, const RandTable * const rnd,
               int64_t ** seeded_grnr_out, int * n_seeded_out,
-              double ** seeded_totmsc_out, double ** seeded_mcut_out, MPI_Comm Comm);
+              double ** seeded_totmsc_out, double ** seeded_mcut_out, Cosmology * CP, MPI_Comm Comm);
 
 /* Saves the Group structure to disc.
  Returns 1 if a domain_exchange is needed afterwards.*/

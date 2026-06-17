@@ -1,5 +1,31 @@
 # MP-Gadget Development Log
 
+## 2026-06-16 14:47 (UTC-4) — analysis notebook star-cluster mass toggle for mass-radius comparison
+
+Updated the subfind/secFOF mass-vs-radius analysis notebook cell with a new switch that can plot either stellar-mass blocks (existing behavior) or star-cluster mass blocks (bound or total) for both catalogs.
+
+## 2026-06-15 00:08 (UTC-4) — analysis notebook bound-threshold FOF plotting helpers
+
+Added two analysis-notebook plotting helpers to visualize only bound-mass-selected structures in one FOF: one for subfind and one for secFOF, both with configurable bound-star-mass threshold (and optional StarPot mode for subfind).
+
+## 2026-06-14 16:49 (CDT) — secFOF bound-star restriction: forbid combining with multi-seeding
+
+`SeedSeedFOFMassiveBoundStar=1` now aborts the run if `SeedInSecFOFMultipleSeeds=1`, since multi-seeding's extra seeds are not bound-aware (only the primary seed would be bound). Checked in both `set_secondfof_params` and the `run.c` init, mirroring the existing parameter validations; parameter help text updated. Compiles and links cleanly.
+
+**Files modified:** `gadget/params.c`, `libgadget/secondfof.c`, `libgadget/run.c`
+
+## 2026-06-14 16:06 (CDT) — secFOF bound-star restriction: seed at a bound star + parallelize the potential
+
+Follow-up to the `SeedSeedFOFMassiveBoundStar` feature below. Two changes: (1) the black-hole seed location is now moved to the largest-Σ(m·Γ) **bound** unseeded star (the seed position, RNG seed, and star ID all track that one bound particle), so a massive group is never seeded at an unbound star; if no unseeded star is bound the seed is dropped. (2) The per-group O(N²) softened-potential computation is now OpenMP-parallelized over members (results unchanged/reproducible), the main performance cost for the rare >1e8 Msun groups this feature targets. Compiles and links cleanly.
+
+**Files modified:** `libgadget/fof.c`
+
+## 2026-06-14 16:20 (UTC-4) — secFOF: bound-star restriction for massive groups (SeedSeedFOFMassiveBoundStar)
+
+Added a new int parameter `SeedSeedFOFMassiveBoundStar` (default 0), used with `SeedSecFOFcomSample=1`. When set to 1, any secondary-FOF group whose unseeded star-cluster mass Σ(m·Γ) exceeds the 1e8 Msun threshold is restricted to the unseeded star particles that are gravitationally bound to the secFOF (softened potential summed over all members, rest frame = deepest-potential member's velocity) before seeding; only the bound unseeded stars' Σ(m·Γ) and stellar mass feed the combined sampler, so the seed decision and the seed mass (under `BHseedMassScaleMsc=1`) use the bound subset. Groups below the threshold and runs with the feature off are unchanged. Incompatible with `SeedSecFOFcomSampleParticle=1` (hard error); requires `SeedSecFOFcomSample=1`. Compiles cleanly.
+
+**Files modified:** `gadget/params.c`, `libgadget/fof.c`, `libgadget/fof.h`, `libgadget/secondfof.c`, `libgadget/secondfof.h`, `libgadget/run.c`
+
 ## 2026-06-09 16:58 (UTC-5) — analysis notebook axis conversion warning fix
 
 Updated the analysis notebook plotting conversion so age/redshift axis mapping is consistent and no longer triggers the astropy bracketing warning during figure rendering.

@@ -29,6 +29,7 @@
 #include "physconst.h"
 #include "sfr_eff.h"
 #include "gravity.h"
+#include "cosmology.h"
 /*! \file fof.c
  *  \brief parallel FoF group finder
  */
@@ -67,6 +68,9 @@ struct FOFParams
     int SeedSecFOFcomSample; /* combined per-secFOF star-cluster sampling for BH seeding */
     int SeedSecFOFcomSampleParticle; /* per-star-particle sampling variant of SeedSecFOFcomSample */
     int SeedInSecFOFMultipleSeeds; /* if 1, seed multiple BHs in a secFOF group with M_SC > 1e8 Msun */
+    /* if 1, a secFOF group with unseeded Sum(m*Gamma) > 1e8 Msun is restricted to
+     * the gravitationally bound unseeded stars before SeedSecFOFcomSample seeding */
+    int SeedSeedFOFMassiveBoundStar;
     int BHseedMassScaleMsc;
     double MinMscForBHseed;
     int FOFPotentialMin;
@@ -101,6 +105,7 @@ void set_fof_params(ParameterSet * ps)
         fof_params.SeedSecFOFcomSample = param_get_int(ps, "SeedSecFOFcomSample");
         fof_params.SeedSecFOFcomSampleParticle = param_get_int(ps, "SeedSecFOFcomSampleParticle");
         fof_params.SeedInSecFOFMultipleSeeds = param_get_int(ps, "SeedInSecFOFMultipleSeeds");
+        fof_params.SeedSeedFOFMassiveBoundStar = param_get_int(ps, "SeedSeedFOFMassiveBoundStar");
         fof_params.BHseedMassScaleMsc = param_get_int(ps, "BHseedMassScaleMsc");
         fof_params.MinMscForBHseed = param_get_double(ps, "MinMscForBHseed");
 
@@ -2270,9 +2275,298 @@ static void fof_secfof_particle_sample(FOFGroups * fof, const RandTable * const 
     myfree(recv_counts);
 }
 
+/* One gathered secFOF member record used by fof_secfof_bound_massive_restrict.
+ * ALL member types are gathered (the softened potential uses every member); only
+ * unseeded stars carry mGamma > 0 / is_unseeded_star = 1. */
+struct bound_member {
+    int64_t  GrNr;
+    double   Pos[3];
+    double   Vel[3];
+    double   Mass;
+    double   mGamma;            /* STARP(i).ClusterMass if unseeded star, else 0 */
+    MyIDType ID;                /* particle ID (becomes SeedStarID if chosen as seed) */
+    int      OrigTask;          /* rank that owns this particle */
+    int      OrigIndex;         /* local index of this particle on OrigTask */
+    int      is_unseeded_star;  /* 1 if Type==4 && !STARP.Seeded, else 0 */
+};
+
+static int cmp_bound_member_grnr(const void * a, const void * b)
+{
+    const struct bound_member * pa = (const struct bound_member *) a;
+    const struct bound_member * pb = (const struct bound_member *) b;
+    if(pa->GrNr < pb->GrNr) return -1;
+    if(pa->GrNr > pb->GrNr) return 1;
+    return 0;
+}
+
+/* Binary search: is key present in the sorted unique array arr[0..n)? */
+static int bm_grnr_in_set(const int64_t * arr, int64_t n, int64_t key)
+{
+    int64_t lo = 0, hi = n;
+    while(lo < hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        if(arr[mid] < key) lo = mid + 1;
+        else hi = mid;
+    }
+    return (lo < n && arr[lo] == key);
+}
+
+/* SeedSeedFOFMassiveBoundStar: for every secFOF group whose UNSEEDED star-cluster
+ * mass Sum(m*Gamma) (= StarClusterMassUnseeded) exceeds the 1e8-Msun threshold,
+ * restrict the group to the unseeded stars that are gravitationally bound to the
+ * secFOF, and overwrite StarClusterMassUnseeded (-> bound Sum(m*Gamma)) and
+ * SCcomMcut (-> bound Sum(m_star)) in place so the downstream combined sampler,
+ * the seed decision, and the seed mass all use the bound subset.
+ *
+ * The seed location is also moved to the largest-m*Gamma BOUND star: seed_index_star,
+ * seed_task_star and SeedStarID (location + RNG seed) are repointed to that one bound
+ * particle so the BH is never seeded at an unbound star. If no unseeded star is bound,
+ * the seed is dropped (seed_index_star = seed_task_star = -1); Gate 1 also drops the
+ * group since StarClusterMassUnseeded becomes 0.
+ *
+ * Boundedness (matching check_grav_bound / stats.c conventions): the softened
+ * potential magnitude pot_mag(i) = Sum_{j!=i} m_j / sqrt(r_ij^2 + eps^2) is summed
+ * over ALL members (comoving separations, code masses); the rest frame is the
+ * velocity of the deepest-potential member; star i is bound iff
+ *   0.5*|Vel_i - Vref|^2 <= atime * G * pot_mag(i).
+ *
+ * Distributed via the Allgatherv pattern from secondfof_compute_sizes, keyed on
+ * P[i].GrNr (= secondary group id at this point, written by fof_fof in
+ * secondfof_seed). Each group is overwritten only by its owning rank. The gather
+ * and the O(N^2) potential are restricted to the (rare) > 1e8-Msun groups.
+ *
+ * TODO(perf): the per-group potential is O(N^2); a tree/Barnes-Hut potential is
+ * the natural optimization for very large complexes (deferred, correctness-first). */
+static void
+fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP, MPI_Comm Comm)
+{
+    int NTask, ThisTask;
+    MPI_Comm_size(Comm, &NTask);
+    MPI_Comm_rank(Comm, &ThisTask);
+    const double BoxSize = PartManager->BoxSize;
+    const double thresh = get_msc_multiseed_thresh_code();
+    const double G = CP->GravInternal;
+    const double eps = FORCE_SOFTENING() / 2.8;   /* Plummer-equivalent, comoving */
+    const double eps2 = eps * eps;
+    int i, g;
+
+    if(thresh <= 0)
+        return;   /* no threshold -> feature is a no-op */
+
+    /* ---- Step 0: global set of qualifying group numbers (Sum(m*Gamma) > thresh). ---- */
+    int n_local_qual = 0;
+    for(g = 0; g < fof->Ngroups; g++)
+        if(fof->Group[g].StarClusterMassUnseeded > thresh)
+            n_local_qual++;
+
+    int * q_counts = (int *) mymalloc2("BMqc", sizeof(int) * NTask);
+    MPI_Allgather(&n_local_qual, 1, MPI_INT, q_counts, 1, MPI_INT, Comm);
+    int64_t total_qual = 0;
+    int * q_displs = (int *) mymalloc2("BMqd", sizeof(int) * NTask);
+    for(i = 0; i < NTask; i++) {
+        q_displs[i] = total_qual;
+        total_qual += q_counts[i];
+    }
+    if(total_qual == 0) {   /* no massive group anywhere: nothing to do (LIFO frees) */
+        myfree(q_displs);
+        myfree(q_counts);
+        return;
+    }
+
+    int64_t * local_qual = (int64_t *) mymalloc2("BMlq",
+            sizeof(int64_t) * (n_local_qual > 0 ? n_local_qual : 1));
+    {
+        int k = 0;
+        for(g = 0; g < fof->Ngroups; g++)
+            if(fof->Group[g].StarClusterMassUnseeded > thresh)
+                local_qual[k++] = fof->Group[g].base.GrNr;
+    }
+    int64_t * qual_grnr = (int64_t *) mymalloc2("BMqg", sizeof(int64_t) * total_qual);
+    int * qc_bytes = (int *) mymalloc2("BMqcb", sizeof(int) * NTask);
+    int * qd_bytes = (int *) mymalloc2("BMqdb", sizeof(int) * NTask);
+    for(i = 0; i < NTask; i++) {
+        qc_bytes[i] = q_counts[i] * (int) sizeof(int64_t);
+        qd_bytes[i] = q_displs[i] * (int) sizeof(int64_t);
+    }
+    MPI_Allgatherv(local_qual, n_local_qual * (int) sizeof(int64_t), MPI_BYTE,
+                   qual_grnr, qc_bytes, qd_bytes, MPI_BYTE, Comm);
+    myfree(qd_bytes);
+    myfree(qc_bytes);
+    /* GrNr are globally unique per group -> qual_grnr is duplicate-free; sort for search. */
+    qsort(qual_grnr, total_qual, sizeof(int64_t), cmp_int64_asc);
+
+    /* ---- Step 1: pack local members (ALL types) of qualifying groups. ---- */
+    int64_t n_pack = 0;
+    for(i = 0; i < PartManager->NumPart; i++) {
+        if(P[i].GrNr < 0) continue;
+        if(!bm_grnr_in_set(qual_grnr, total_qual, P[i].GrNr)) continue;
+        n_pack++;
+    }
+    struct bound_member * bm_local = (struct bound_member *) mymalloc2("BMlocal",
+            sizeof(struct bound_member) * (n_pack > 0 ? n_pack : 1));
+    {
+        int64_t k = 0;
+        for(i = 0; i < PartManager->NumPart; i++) {
+            if(P[i].GrNr < 0) continue;
+            if(!bm_grnr_in_set(qual_grnr, total_qual, P[i].GrNr)) continue;
+            struct bound_member * m = &bm_local[k++];
+            m->GrNr = P[i].GrNr;
+            int d;
+            for(d = 0; d < 3; d++) {
+                m->Pos[d] = P[i].Pos[d];
+                m->Vel[d] = P[i].Vel[d];
+            }
+            m->Mass = P[i].Mass;
+            m->ID = P[i].ID;
+            m->OrigTask = ThisTask;
+            m->OrigIndex = i;
+            if(P[i].Type == 4 && !STARP(i).Seeded) {
+                m->mGamma = STARP(i).ClusterMass;
+                m->is_unseeded_star = 1;
+            } else {
+                m->mGamma = 0;
+                m->is_unseeded_star = 0;
+            }
+        }
+    }
+
+    /* ---- Step 2: Allgatherv the member records to all ranks. ---- */
+    int n_pack_int = (int) n_pack;
+    int * p_counts = (int *) mymalloc2("BMpc", sizeof(int) * NTask);
+    MPI_Allgather(&n_pack_int, 1, MPI_INT, p_counts, 1, MPI_INT, Comm);
+    int64_t total_members = 0;
+    int * p_displs = (int *) mymalloc2("BMpd", sizeof(int) * NTask);
+    for(i = 0; i < NTask; i++) {
+        p_displs[i] = total_members;
+        total_members += p_counts[i];
+    }
+    struct bound_member * bm_global = (struct bound_member *) mymalloc2("BMglobal",
+            sizeof(struct bound_member) * (total_members > 0 ? total_members : 1));
+    int * pc_bytes = (int *) mymalloc2("BMpcb", sizeof(int) * NTask);
+    int * pd_bytes = (int *) mymalloc2("BMpdb", sizeof(int) * NTask);
+    for(i = 0; i < NTask; i++) {
+        pc_bytes[i] = p_counts[i] * (int) sizeof(struct bound_member);
+        pd_bytes[i] = p_displs[i] * (int) sizeof(struct bound_member);
+    }
+    MPI_Allgatherv(bm_local, n_pack_int * (int) sizeof(struct bound_member), MPI_BYTE,
+                   bm_global, pc_bytes, pd_bytes, MPI_BYTE, Comm);
+    myfree(pd_bytes);
+    myfree(pc_bytes);
+
+    /* ---- Step 3: sort by GrNr; process each owned qualifying group. ---- */
+    qsort(bm_global, total_members, sizeof(struct bound_member), cmp_bound_member_grnr);
+
+    for(g = 0; g < fof->Ngroups; g++) {
+        if(fof->Group[g].StarClusterMassUnseeded <= thresh)
+            continue;   /* not qualifying: leave whole-structure values untouched */
+        int64_t grNr = fof->Group[g].base.GrNr;
+
+        /* Binary search for this group's contiguous block [start, end). */
+        int64_t lo = 0, hi = total_members;
+        while(lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            if(bm_global[mid].GrNr < grNr) lo = mid + 1;
+            else hi = mid;
+        }
+        int64_t start = lo;
+        while(lo < total_members && bm_global[lo].GrNr == grNr)
+            lo++;
+        int64_t end = lo;
+        int64_t N = end - start;
+        if(N <= 0) {
+            /* No members gathered (should not happen for a qualifying group). */
+            fof->Group[g].StarClusterMassUnseeded = 0;
+            fof->Group[g].SCcomMcut = 0;
+            fof->Group[g].seed_index_star = -1;
+            fof->Group[g].seed_task_star  = -1;
+            continue;
+        }
+
+        /* Pass A: softened potential magnitude at each member. The members are
+         * read-only and each iteration writes only its own potmag[a], so the outer
+         * loop is parallelized; the inner sum order is fixed, so potmag[] is bitwise
+         * identical regardless of thread scheduling (reproducible). */
+        double * potmag = (double *) mymalloc2("BMpot", sizeof(double) * N);
+        int64_t a, b;
+        #pragma omp parallel for schedule(dynamic) private(b)
+        for(a = 0; a < N; a++) {
+            const struct bound_member * pa = &bm_global[start + a];
+            double sum = 0;
+            for(b = 0; b < N; b++) {
+                if(b == a) continue;
+                const struct bound_member * pb = &bm_global[start + b];
+                double dx = NEAREST(pa->Pos[0] - pb->Pos[0], BoxSize);
+                double dy = NEAREST(pa->Pos[1] - pb->Pos[1], BoxSize);
+                double dz = NEAREST(pa->Pos[2] - pb->Pos[2], BoxSize);
+                sum += pb->Mass / sqrt(dx * dx + dy * dy + dz * dz + eps2);
+            }
+            potmag[a] = sum;
+        }
+        /* Deepest-potential member -> rest frame (serial argmax: cheap, deterministic). */
+        int64_t kstar = 0;
+        double potmax = -1.0;
+        for(a = 0; a < N; a++)
+            if(potmag[a] > potmax) { potmax = potmag[a]; kstar = a; }
+        const double Vref0 = bm_global[start + kstar].Vel[0];
+        const double Vref1 = bm_global[start + kstar].Vel[1];
+        const double Vref2 = bm_global[start + kstar].Vel[2];
+
+        /* Pass B: over UNSEEDED stars, sum the bound ones and track the bound star
+         * with the largest m*Gamma (ties broken by smaller ID for reproducibility)
+         * as the new seed location.
+         * Bound iff 0.5*|Vel - Vref|^2 <= atime * G * pot_mag (E <= 0 marginally bound). */
+        double M_bound_mGamma = 0, M_bound_starmass = 0;
+        double best_mGamma = -1.0;
+        const struct bound_member * best = NULL;
+        for(a = 0; a < N; a++) {
+            const struct bound_member * pa = &bm_global[start + a];
+            if(!pa->is_unseeded_star) continue;
+            double dvx = pa->Vel[0] - Vref0;
+            double dvy = pa->Vel[1] - Vref1;
+            double dvz = pa->Vel[2] - Vref2;
+            double ke = 0.5 * (dvx * dvx + dvy * dvy + dvz * dvz);
+            double pe = atime * G * potmag[a];
+            if(ke <= pe) {
+                M_bound_mGamma += pa->mGamma;
+                M_bound_starmass += pa->Mass;
+                if(pa->mGamma > best_mGamma ||
+                   (best && pa->mGamma == best_mGamma && pa->ID < best->ID)) {
+                    best_mGamma = pa->mGamma;
+                    best = pa;
+                }
+            }
+        }
+        fof->Group[g].StarClusterMassUnseeded = M_bound_mGamma;
+        fof->Group[g].SCcomMcut = M_bound_starmass;
+        /* Repoint the seed to the largest-m*Gamma BOUND star (location + RNG seed +
+         * ID stay one coherent particle). If no unseeded star is bound, drop the seed
+         * so the group cannot seed at an unbound star (Gate 1 also drops it since
+         * StarClusterMassUnseeded is now 0). */
+        if(best) {
+            fof->Group[g].seed_index_star = best->OrigIndex;
+            fof->Group[g].seed_task_star  = best->OrigTask;
+            fof->Group[g].SeedStarID      = best->ID;
+        } else {
+            fof->Group[g].seed_index_star = -1;
+            fof->Group[g].seed_task_star  = -1;
+        }
+        myfree(potmag);   /* topmost on the stack each iteration */
+    }
+
+    /* ---- Step 4: strict LIFO frees (reverse allocation order). ---- */
+    myfree(bm_global);
+    myfree(p_displs);
+    myfree(p_counts);
+    myfree(bm_local);
+    myfree(qual_grnr);
+    myfree(local_qual);
+    myfree(q_displs);
+    myfree(q_counts);
+}
+
 void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double atime, const RandTable * const rnd,
               int64_t ** seeded_grnr_out, int * n_seeded_out,
-              double ** seeded_totmsc_out, double ** seeded_mcut_out, MPI_Comm Comm)
+              double ** seeded_totmsc_out, double ** seeded_mcut_out, Cosmology * CP, MPI_Comm Comm)
 {
     int i, j, n, ntot;
 
@@ -2355,6 +2649,11 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
      * SeedSecFOFcomSampleParticle is on — tot_msc_fof summed from per-star draws,
      * computed collectively first by fof_secfof_particle_sample(). */
     if(fof_params.SeedSecFOFcomSample && fof_params.BlackHoleSeedStarCluster) {
+        /* Restrict massive (> 1e8 Msun) groups to their gravitationally bound
+         * unseeded stars BEFORE the sampler/gates run; overwrites the two input
+         * fields (StarClusterMassUnseeded, SCcomMcut) in place. */
+        if(fof_params.SeedSeedFOFMassiveBoundStar)
+            fof_secfof_bound_massive_restrict(fof, atime, CP, Comm);
         if(fof_params.SeedSecFOFcomSampleParticle)
             fof_secfof_particle_sample(fof, rnd, Comm);
         for(i = 0; i < fof->Ngroups; i++) {
