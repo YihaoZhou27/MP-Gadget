@@ -99,6 +99,7 @@ struct star_particle_data
     float VDisp; /* 1D DM Velocity dispersion on creation for the winds*/
     float BirthDensity;       /*!< Density of gas particle at star formation. */
     MyFloat BirthInternalEnergy; /*!< Internal energy of gas particle at star formation. */
+    MyFloat BirthMetallicity; /*!< Total metallicity of the parent gas at star formation. Frozen: set once at formation, never modified. */
     float FormationTime;      /*!< formation time of star particle */
     MyFloat ClusterFormationEfficiency; /*!< Cluster formation efficiency of star particle */
     MyFloat ClusterMass; /*!< Mass of the cluster formed from this star particle (kept as a record after BH seeding; the star is flagged via Seeded instead) */

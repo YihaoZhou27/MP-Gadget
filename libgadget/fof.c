@@ -843,18 +843,23 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
         if(STARP(index).Seeded) {
             gdst->SCMass_seeded += STARP(index).ClusterMass;
         } else {
-            gdst->StarClusterMassUnseeded += STARP(index).ClusterMass;
+            /* Metallicity-dependent seeding factor f(Z) scales the per-star
+             * cluster mass that drives seeding (ClusterMass = Gamma*m_star is kept
+             * raw). The sampled mass StarClusterMass_sample already carries f(Z)
+             * (its Poisson rate was scaled at formation), so it is not rescaled. */
+            double fseed = get_seed_metallicity_factor(STARP(index).BirthMetallicity);
+            gdst->StarClusterMassUnseeded += fseed * STARP(index).ClusterMass;
             gdst->StarClusterMassSampleUnseeded += STARP(index).StarClusterMass_sample;
             gdst->SCcomMcut += P[index].Mass;
             gdst->NStarUnseeded++;
 
-            /* Track the unseeded star with the largest ClusterMass (or
-             * StarClusterMass_sample when StarClusterSampling=1) as the seed
+            /* Track the unseeded star with the largest (f(Z)-scaled) ClusterMass
+             * (or StarClusterMass_sample when StarClusterSampling=1) as the seed
              * particle for star-cluster BH seeding in secondary FOF. For
-             * SeedSecFOFcomSample use ClusterMass and record its ID as the RNG
+             * SeedSecFOFcomSample use f(Z)*ClusterMass and record its ID as the RNG
              * seed for the combined draw. */
             MyFloat scm = (fof_params.StarClusterSampling && !fof_params.SeedSecFOFcomSample) ?
-                STARP(index).StarClusterMass_sample : STARP(index).ClusterMass;
+                STARP(index).StarClusterMass_sample : fseed * STARP(index).ClusterMass;
             if(scm > gdst->MaxStarClusterMass) {
                 gdst->MaxStarClusterMass = scm;
                 gdst->seed_index_star = index;
@@ -2009,7 +2014,8 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
         double dz = NEAREST(P[i].Pos[2] - msg[c].seed1pos[2], box);
         if(dx * dx + dy * dy + dz * dz <= sep2) continue;
         elig[e].GrNr = P[i].GrNr;
-        elig[e].mGamma = STARP(i).ClusterMass;
+        /* Rank extra-seed candidates by the f(Z)-scaled cluster mass. */
+        elig[e].mGamma = get_seed_metallicity_factor(STARP(i).BirthMetallicity) * STARP(i).ClusterMass;
         elig[e].ID = (uint64_t) P[i].ID;
         elig[e].pos[0] = P[i].Pos[0];
         elig[e].pos[1] = P[i].Pos[1];
@@ -2228,8 +2234,10 @@ static void fof_secfof_particle_sample(FOFGroups * fof, const RandTable * const 
         /* allow_cap = 0: the cap is applied below on the group-summed tot_msc_fof,
          * not on each per-star draw (whose cutoff is the per-star m_cut). */
         double full = 0;
+        /* Scale the per-star Poisson rate (sum_mGamma = Gamma*m_star) by f(Z). */
+        double fseed = get_seed_metallicity_factor(STARP(i).BirthMetallicity);
         double msc_star = starcluster_combined_bhseed_msc(
-                m_cut, STARP(i).ClusterMass, (uint64_t) P[i].ID, rnd, &full, 0);
+                m_cut, fseed * STARP(i).ClusterMass, (uint64_t) P[i].ID, rnd, &full, 0);
         part_tot[c] += msc_star;
         part_full[c] += full;
     }
@@ -2421,7 +2429,9 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
             m->OrigTask = ThisTask;
             m->OrigIndex = i;
             if(P[i].Type == 4 && !STARP(i).Seeded) {
-                m->mGamma = STARP(i).ClusterMass;
+                /* f(Z)-scaled cluster mass: the bound sum overwrites
+                 * StarClusterMassUnseeded below, so apply f(Z) here too. */
+                m->mGamma = get_seed_metallicity_factor(STARP(i).BirthMetallicity) * STARP(i).ClusterMass;
                 m->is_unseeded_star = 1;
             } else {
                 m->mGamma = 0;

@@ -292,6 +292,8 @@ create_gadget_parameter_set()
     param_declare_int(ps, "SCgasVDisp", OPTIONAL, 0, "Enable gas and stellar velocity dispersion calculation for gas particles at every PM step.");
     param_declare_int(ps, "BHseedMassScaleMsc", OPTIONAL, 0, "When star-cluster bh seeding formation is enabled, whether the seed mass is scaled by the star cluster mass. If so, parameter SeedBlackHoleMass is in unit of Msc. If not, it is in mass unit.");
     param_declare_double(ps, "MinMscForBHseed", OPTIONAL, 0.0001, "When star-cluster bh seeding formation is enabled, the minimum star cluster mass for seeding black hole. Only used when BHseedMassScaleMsc = 1.");
+    param_declare_double(ps, "StarClusterSeedMetallicityMin", OPTIONAL, 0, "Metallicity-dependent seeding factor f(Z): lower log10(Z/Zsun) threshold (Zsun=0.0134). For log10(Z/Zsun) <= this, f=1. Z is the star BirthMetallicity. If StarClusterSeedMetallicityMin == StarClusterSeedMetallicityMax (default both 0), the metallicity dependence is disabled (f=1 always).");
+    param_declare_double(ps, "StarClusterSeedMetallicityMax", OPTIONAL, 0, "Metallicity-dependent seeding factor f(Z): upper log10(Z/Zsun) threshold (Zsun=0.0134). For log10(Z/Zsun) >= this, f=0; log-linear decline from 1 to 0 between Min and Max. Only used when Max > Min.");
     param_declare_int(ps, "StarClusterBHDyn", OPTIONAL, 0, "If 1, include star cluster mass in BH dynamical mass P[i].Mass; BH+SC treated as one body for dynamics. Requires StarClusterOn=1. If 0, P[i].Mass = max(Mtrack, SeedBHDynMass) without star cluster contribution.");
     param_declare_int(ps, "StarClusterEvolution", OPTIONAL, 0, "Enable stellar evolution (mass and metal return) for star clusters on BH particles. Only used when StarClusterOn = 1.");
 

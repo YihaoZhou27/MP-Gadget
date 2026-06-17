@@ -1,5 +1,21 @@
 # MP-Gadget Development Log
 
+## 2026-06-17 — BirthMetallicity restart fallback for older snapshots
+
+On restart, if a snapshot lacks the 4/BirthMetallicity block (written before that feature existed), a warning is printed and each star's BirthMetallicity falls back to its current Metallicity instead of being left uninitialized. The missing block is detected from the snapshot read status.
+
+**Files modified:** `libgadget/petaio.c`
+
+---
+
+## 2026-06-17 — metallicity-dependent star-cluster BH seeding factor f(Z)
+
+Added a metallicity-dependent suppression factor f(Z) that multiplies the per-star cluster mass (Gamma*m_star) used for star-cluster BH seeding, based on the star's frozen BirthMetallicity. f(Z) = 1 below a lower threshold, 0 above an upper threshold, with a log-linear decline in between (thresholds given as log10(Z/Zsun), Zsun=0.0134). New parameters StarClusterSeedMetallicityMin/Max (default both 0 = feature disabled). The factor is applied across all star-cluster seeding paths: it scales the Poisson cluster-count rate at star formation (sampled mode), the unseeded seeding sums and seed-particle pick (primary/secondary FOF), the combined-sample per-particle and per-group draws, the bound-massive restriction, the multi-seed eligibility ranking, and the per-star BlackholeSeedSCparticle path. The stored per-star ClusterMass remains the raw Gamma*m_star.
+
+**Files modified:** `gadget/params.c`, `libgadget/sfr_eff.c`, `libgadget/sfr_eff.h`, `libgadget/fof.c`, `libgadget/blackhole.c`
+
+---
+
 ## 2026-06-16 14:47 (UTC-4) — analysis notebook star-cluster mass toggle for mass-radius comparison
 
 Updated the subfind/secFOF mass-vs-radius analysis notebook cell with a new switch that can plot either stellar-mass blocks (existing behavior) or star-cluster mass blocks (bound or total) for both catalogs.
@@ -560,6 +576,14 @@ Made the post-seeding bookkeeping in secondary-FOF BH seeding consistent across 
 Fixed a memory-allocator (LIFO) crash that aborted multi-seeding runs when BH slots had to grow during seeding. The live gas/BH force tree from the main loop sits on the allocator's bottom stack above the slots block, so growing the slots violated LIFO. The seeding routines now temporarily relocate the force tree (and active-particle list) off the bottom stack around the slot growth and restore it afterwards — the same pattern already used by star formation. Also tightened the multi-seed BH-slot pre-reservation so it no longer over-counts by the full number of member stars (now capped per group at the actual number of extra seeds), avoiding unnecessary slot growth. The tree stays valid because seeding only converts particles in place.
 
 **Files modified:** `libgadget/fof.c`, `libgadget/fof.h`, `libgadget/secondfof.c`, `libgadget/secondfof.h`, `libgadget/blackhole.c`, `libgadget/blackhole.h`, `libgadget/run.c`
+
+---
+
+## 2026-06-16 — add frozen BirthMetallicity to star particles
+
+Added a new per-star-particle property `BirthMetallicity` that records the total metallicity of the parent gas at the moment of star formation. It is set once when the star forms and is never modified afterwards (frozen), so it preserves the natal metallicity even as other quantities evolve. The field is written to the output catalogs as the `4/BirthMetallicity` block and appears in PART, PIG, and SecPIG snapshots.
+
+**Files modified:** `libgadget/slotsmanager.h`, `libgadget/sfr_eff.c`, `libgadget/petaio.c`
 
 ---
 

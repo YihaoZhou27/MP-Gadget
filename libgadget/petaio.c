@@ -322,6 +322,8 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
         }
     }
 
+    /* Set when an older snapshot is missing the (non-fatal) 4/BirthMetallicity block. */
+    int birthmet_missing = 0;
     for(i = 0; i < IOTable->used; i ++) {
         /* only process the particle blocks */
         char blockname[128];
@@ -354,9 +356,25 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
         }
         sprintf(blockname, "%d/%s", ptype, IOTable->ent[i].name);
         petaio_alloc_buffer(&array, &IOTable->ent[i], header->NLocal[ptype]);
-        if(0 == petaio_read_block(&bf, blockname, &array, IOTable->ent[i].required))
+        int blockfound = (0 == petaio_read_block(&bf, blockname, &array, IOTable->ent[i].required));
+        if(blockfound)
             petaio_readout_buffer(&array, &IOTable->ent[i], &conv, PartManager, SlotsManager);
+        else if(ptype == 4 && 0 == strcmp(IOTable->ent[i].name, "BirthMetallicity"))
+            birthmet_missing = 1;
         petaio_destroy_buffer(&array);
+    }
+
+    /* Backward compatibility: older snapshots lack the 4/BirthMetallicity block, so
+     * its setter never ran. Warn and fall back to each star's current Metallicity
+     * (already read above). Skipped for ICs, which do not read the Metallicity block. */
+    if(birthmet_missing && !ic) {
+        message(0, "WARNING: snapshot has no 4/BirthMetallicity block; "
+                   "setting each star's BirthMetallicity to its current Metallicity.\n");
+        #pragma omp parallel for
+        for(i = 0; i < PartManager->NumPart; i++) {
+            if(P[i].Type == 4)
+                STARP(i).BirthMetallicity = STARP(i).Metallicity;
+        }
     }
     destroy_io_blocks(IOTable);
 
@@ -841,6 +859,7 @@ SIMPLE_PROPERTY_PI(DelayTime, DelayTime, float, 1, struct sph_particle_data)
 SIMPLE_PROPERTY_TYPE_PI(StarFormationTime, 4, FormationTime, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(BirthDensity, BirthDensity, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(BirthInternalEnergy, BirthInternalEnergy, float, 1, struct star_particle_data)
+SIMPLE_PROPERTY_PI(BirthMetallicity, BirthMetallicity, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(ClusterFormationEfficiency, ClusterFormationEfficiency, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(ClusterMass, ClusterMass, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(Mcstar, Mcstar, float, 1, struct star_particle_data)
@@ -1067,6 +1086,7 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
 
     IO_REG_NONFATAL(BirthDensity, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(BirthInternalEnergy, "f4", 1, 4, IOTable);
+    IO_REG_NONFATAL(BirthMetallicity, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(ClusterFormationEfficiency, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(ClusterMass, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(initClusterMass, "f4", 1, 4, IOTable);

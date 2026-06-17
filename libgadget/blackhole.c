@@ -1505,8 +1505,11 @@ blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime
             int pi = NewStars[i];
             if(P[pi].Type != 4 || STARP(pi).Seeded)
                 continue;
+            /* Non-sampled cluster mass is scaled by the metallicity-dependent
+             * seeding factor f(Z); the sampled mass already carries f(Z). */
             MyFloat sc_mass = blackhole_params.StarClusterSampling ?
-                STARP(pi).StarClusterMass_sample : STARP(pi).ClusterMass;
+                STARP(pi).StarClusterMass_sample :
+                get_seed_metallicity_factor(STARP(pi).BirthMetallicity) * STARP(pi).ClusterMass;
             if(sc_mass >= MinMsc)
                 Nseed++;
         }
@@ -1516,7 +1519,8 @@ blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime
             if(P[i].Type != 4 || STARP(i).Seeded)
                 continue;
             MyFloat sc_mass = blackhole_params.StarClusterSampling ?
-                STARP(i).StarClusterMass_sample : STARP(i).ClusterMass;
+                STARP(i).StarClusterMass_sample :
+                get_seed_metallicity_factor(STARP(i).BirthMetallicity) * STARP(i).ClusterMass;
             if(sc_mass >= MinMsc)
                 Nseed++;
         }
@@ -1594,7 +1598,8 @@ blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime
         if(P[pi].Type != 4 || STARP(pi).Seeded)
             continue;
         MyFloat sc_mass = blackhole_params.StarClusterSampling ?
-            STARP(pi).StarClusterMass_sample : STARP(pi).ClusterMass;
+            STARP(pi).StarClusterMass_sample :
+            get_seed_metallicity_factor(STARP(pi).BirthMetallicity) * STARP(pi).ClusterMass;
         if(sc_mass < MinMsc)
             continue;
 

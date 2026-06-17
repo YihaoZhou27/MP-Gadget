@@ -63,6 +63,11 @@ static struct SFRParams
     int StarClusterSampling; /* if star cluster mass sampling is enabled (requires StarClusterOn) */
     int SeedSecFOFcomSample; /* combined per-secFOF cluster sampling for BH seeding; skips per-star sampling */
     int SCmasscapSecFOFstarmass; /* if 1, cap the combined-sampled SC mass at the group's unseeded stellar mass */
+    /* Metallicity-dependent seeding factor f(Z) thresholds, as log10(Z/Zsun) (Zsun=0.0134).
+     * f=1 for log10(Z/Zsun) <= Min, f=0 for >= Max, log-linear decline between.
+     * If Max <= Min (default both 0) the feature is disabled (f=1). */
+    double StarClusterSeedMetallicityMin;
+    double StarClusterSeedMetallicityMax;
     /*!< may be used to set a floor for the gas temperature */
     double MinGasTemp;
     /* Precomputed constants for M_cstar calculation (in code units) */
@@ -195,6 +200,11 @@ void set_sfr_params(ParameterSet * ps)
         if(sfr_params.SeedSecFOFcomSample && !sfr_params.StarClusterOn)
             endrun(0, "SeedSecFOFcomSample = 1 requires StarClusterOn = 1\n");
         sfr_params.SCmasscapSecFOFstarmass = param_get_int(ps, "SCmasscapSecFOFstarmass");
+        sfr_params.StarClusterSeedMetallicityMin = param_get_double(ps, "StarClusterSeedMetallicityMin");
+        sfr_params.StarClusterSeedMetallicityMax = param_get_double(ps, "StarClusterSeedMetallicityMax");
+        if(sfr_params.StarClusterSeedMetallicityMax < sfr_params.StarClusterSeedMetallicityMin)
+            endrun(0, "StarClusterSeedMetallicityMax (%g) must be >= StarClusterSeedMetallicityMin (%g). Set them equal to disable the metallicity-dependent seeding factor.\n",
+                   sfr_params.StarClusterSeedMetallicityMax, sfr_params.StarClusterSeedMetallicityMin);
         if(sfr_params.StarClusterOn) {
             int GasTidalField = param_get_int(ps, "GasTidalField");
             int SCgasVDisp = param_get_int(ps, "SCgasVDisp");
@@ -739,6 +749,33 @@ static double msc_ave_from_cutoff(double Mcut)
     return 0;
 }
 
+/* Metallicity-dependent BH-seeding factor f(Z), applied to the per-star cluster
+ * mass (Gamma*m_star) used for star-cluster BH seeding. Z is the absolute star
+ * metallicity (mass fraction; the frozen BirthMetallicity), normalized to solar.
+ *   f = 1                                   for log10(Z/Zsun) <= Min
+ *   f = (Max - log10(Z/Zsun)) / (Max - Min) for Min < log10(Z/Zsun) < Max
+ *   f = 0                                   for log10(Z/Zsun) >= Max
+ * Min/Max are StarClusterSeedMetallicityMin/Max (log10 thresholds). When
+ * Max <= Min (default both 0) the feature is disabled and f = 1. */
+double get_seed_metallicity_factor(double Z)
+{
+    const double Zsun = 0.0134;
+    double zmin = sfr_params.StarClusterSeedMetallicityMin;
+    double zmax = sfr_params.StarClusterSeedMetallicityMax;
+    /* Disabled (also guards the degenerate zmax == zmin denominator). */
+    if(zmax <= zmin)
+        return 1.0;
+    /* Metal-free (or unset) gas: maximal seeding. Also avoids log10(0). */
+    if(Z <= 0)
+        return 1.0;
+    double logZ = log10(Z / Zsun);
+    if(logZ <= zmin)
+        return 1.0;
+    if(logZ >= zmax)
+        return 0.0;
+    return (zmax - logZ) / (zmax - zmin);
+}
+
 /* Combined per-secFOF star-cluster sampling for BH seeding (SeedSecFOFcomSample).
  * Draws ONE cluster population for a whole secFOF group:
  *   - mass function n(m) ~ m^-2 exp(-m/Mcut) on [1e2, 1e8] Msun, cutoff Mcut = group
@@ -968,9 +1005,13 @@ static int make_particle_star(int child, int parent, int placement, double Time,
             if(STARP(child).Msc_ave <= 0)
                 skip_sampling = 1;
 
-            /* Number of star clusters */
+            /* Number of star clusters. The Poisson rate is scaled by the
+             * metallicity-dependent seeding factor f(Z): N = f(Z)*Gamma*m_star/<m>.
+             * ClusterMass (= Gamma*m_star) itself is kept raw; only the sampled
+             * count/mass carry f(Z). oldslot.Metallicity == the star's BirthMetallicity. */
+            double fseed = get_seed_metallicity_factor(oldslot.Metallicity);
             if(STARP(child).Msc_ave > 0)
-                STARP(child).NumStarCluster = STARP(child).ClusterMass / STARP(child).Msc_ave;
+                STARP(child).NumStarCluster = fseed * STARP(child).ClusterMass / STARP(child).Msc_ave;
             else
                 STARP(child).NumStarCluster = 0;
 
@@ -1074,6 +1115,8 @@ static int make_particle_star(int child, int parent, int placement, double Time,
     STARP(child).VDisp = oldslot.VDisp;
     /*Copy metallicity*/
     STARP(child).Metallicity = oldslot.Metallicity;
+    /*Record the parent gas metallicity at formation. Frozen hereafter: never modified again.*/
+    STARP(child).BirthMetallicity = oldslot.Metallicity;
     int j;
     for(j = 0; j < NMETALS; j++)
         STARP(child).Metals[j] = oldslot.Metals[j];
