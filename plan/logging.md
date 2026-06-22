@@ -587,6 +587,14 @@ Added a new per-star-particle property `BirthMetallicity` that records the total
 
 ---
 
+## 2026-06-17 — add debug-only BHNgbAtSeeding black-hole property
+
+Added a new per-black-hole property `BHNgbAtSeeding` that records the number of black-hole particles already present in the host secondary-FOF group (or FOF halo) at the moment the black hole was seeded, excluding the seed itself. It is only populated for the secondary-FOF star-cluster seeding path (`SeedInSecFOFasStarCluster=1`); all other seeding paths record 0. The value is frozen at creation (never modified by mergers). It is a debug-only, write-only field: it appears as the `5/BHNgbAtSeeding` block in PART, PIG, and SecPIG snapshots only when `OutputDebugFields=1`, and is not read back on restart.
+
+**Files modified:** `libgadget/slotsmanager.h`, `libgadget/blackhole.h`, `libgadget/blackhole.c`, `libgadget/fof.c`, `libgadget/petaio.c`
+
+---
+
 ## TODO
 
 - Allow seeding in primary FOF and secondary FOF to be on in the same run.

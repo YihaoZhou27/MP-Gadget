@@ -94,7 +94,7 @@ void blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceT
  * and full mass): a gas particle (type 0) for gas/halo-based seeding, or a star
  * particle (type 4) for star-cluster seeding. The parent is consumed, and its
  * mass is carried over as the BH's initial Mtrack. */
-void blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals);
+void blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, int BHNgbAtSeeding, MyFloat StarClusterMetallicity, const float * StarClusterMetals);
 
 /* Seed black holes from individual star particles whose star cluster mass
  * exceeds MinMscForBHseed.  Called every PM step when BlackholeSeedSCparticle=1,

@@ -317,8 +317,9 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
         if(P[i].Type == 5) {
             BHP(i).init_Msc = 0;
             BHP(i).init_Msc_sample = 0;
-            /* Debug-only WRONLY field: not read back, so default to 0 on restart. */
+            /* Debug-only WRONLY fields: not read back, so default to 0 on restart. */
             BHP(i).CappedStarMass = 0;
+            BHP(i).BHNgbAtSeeding = 0;
         }
     }
 
@@ -1171,6 +1172,7 @@ SIMPLE_GETTER_PI(GTCurlVel, CurlVel, float, 1, struct sph_particle_data)
 SIMPLE_GETTER_PI(GTVelDisp, VDisp, float, 1, struct sph_particle_data)
 SIMPLE_GETTER_PI(GTBHVelDisp, VDisp, float, 1, struct bh_particle_data)
 SIMPLE_GETTER_PI(GTCappedStarMass, CappedStarMass, float, 1, struct bh_particle_data)
+SIMPLE_GETTER_PI(GTBHNgbAtSeeding, BHNgbAtSeeding, int, 1, struct bh_particle_data)
 SIMPLE_GETTER_PI(GTStarVelDisp, VDisp, float, 1, struct star_particle_data)
 SIMPLE_GETTER_PI(GTVDispGas, VDisp_gas, float, 1, struct sph_particle_data)
 SIMPLE_GETTER_PI(GTVDispStar, VDisp_star, float, 1, struct sph_particle_data)
@@ -1200,6 +1202,7 @@ void register_debug_io_blocks(struct IOTable * IOTable)
     IO_REG_WRONLY(VelDisp,       "f4", 1, 0, IOTable);
     IO_REG_WRONLY(BHVelDisp,       "f4", 1, 5, IOTable);
     IO_REG_WRONLY(CappedStarMass,  "f4", 1, 5, IOTable);
+    IO_REG_WRONLY(BHNgbAtSeeding,  "i4", 1, 5, IOTable);
     IO_REG_WRONLY(StarVelDisp,       "f4", 1, 4, IOTable);
     IO_REG_WRONLY(VDispGas,    "f4", 1, 0, IOTable);
     IO_REG_WRONLY(VDispStar,   "f4", 1, 0, IOTable);

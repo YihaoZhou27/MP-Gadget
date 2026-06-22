@@ -1379,7 +1379,7 @@ bh_powerlaw_seed_mass(const MyIDType ID, const RandTable * const rnd)
 }
 
 void
-blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, MyFloat StarClusterMetallicity, const float * StarClusterMetals) {
+blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, int BHNgbAtSeeding, MyFloat StarClusterMetallicity, const float * StarClusterMetals) {
     int child;
 
     /* Convert the parent particle in-place into a black hole, keeping its ID
@@ -1438,6 +1438,10 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
      * unseeded star particles (= Mcut, the SCmasscapSecFOFstarmass cap value).
      * Debug-only output; frozen at creation like init_Msc. */
     BHP(child).CappedStarMass = CappedStarMass;
+    /* SeedInSecFOFasStarCluster only (0 otherwise): number of BH particles already
+     * present in the host secFOF (or FOF halo) when this BH was seeded, excluding
+     * the seed itself.  Debug-only output; frozen at creation like init_Msc. */
+    BHP(child).BHNgbAtSeeding = BHNgbAtSeeding;
 
     /* Initialize MinPotPos to the current position to avoid drifting
      * to unknown locations (0,0,0) immediately after creation. */
@@ -1612,7 +1616,7 @@ blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime
 
         blackhole_make_one(pi, atime, rnd, 1, sc_mass, sc_mass,
                            STARP(pi).ClusterMass, STARP(pi).StarClusterMass_sample,
-                           0, sc_metallicity, sc_metals);
+                           0, 0, sc_metallicity, sc_metals);
 
         /* The parent star has been converted in-place into the BH (consumed):
          * it is now type 5, so it no longer participates in any seeding scan or

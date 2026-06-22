@@ -35,6 +35,7 @@
  */
 
 #include "fof.h"
+#include "secondfof.h"   /* get_seed_in_secfof(): gate BHNgbAtSeeding to the secFOF seed path */
 
 #define LARGE 1e29
 #define MAXITER 400
@@ -1701,7 +1702,11 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
         for(j = 0; j < NMETALS; j++)
             sc_metals[j] = g->StarClusterMetalElemMass[j] / g->StarClusterMass;
     }
-    blackhole_make_one(index, atime, rnd, seeded_by_starcluster, payload_mass, scaling_mass, init_msc, init_msc_sample, capped_star_mass, sc_metallicity, sc_metals);
+    /* Debug-only record: number of BH particles already in the host secFOF group
+     * at seeding (LenType[5], excludes this seed).  Only meaningful for the secFOF
+     * seed path (SeedInSecFOFasStarCluster); 0 for the primary-FOF seed path. */
+    int bh_ngb_at_seeding = get_seed_in_secfof() ? g->LenType[5] : 0;
+    blackhole_make_one(index, atime, rnd, seeded_by_starcluster, payload_mass, scaling_mass, init_msc, init_msc_sample, capped_star_mass, bh_ngb_at_seeding, sc_metallicity, sc_metals);
 }
 
 /* ===================== Per-secFOF multi-seeding (M_SC > 1e8 Msun) =====================
@@ -1753,6 +1758,7 @@ struct ms_group {
     double   per_init_msc;      /* init_Msc per extra seed */
     double   per_init_msc_sample; /* init_Msc_sample per extra seed */
     double   capped;            /* SCcomMcut (group; recorded as-is) */
+    int      bh_ngb;            /* BHNgbAtSeeding: BH count in the host secFOF (LenType[5]) */
     double   metallicity;       /* group mass-weighted metallicity */
     float    metals[NMETALS];
 };
@@ -1928,6 +1934,10 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
         m->seed_task_star = g->seed_task_star;
         m->seed_index_star = g->seed_index_star;
         m->SeedStarID = (uint64_t) g->SeedStarID;
+        /* BH count already in the host secFOF (excludes the seeds placed here).
+         * Always the secFOF path here (multi-seed requires SeedInSecFOFasStarCluster);
+         * gated for consistency with fof_seed_make_one. */
+        m->bh_ngb = get_seed_in_secfof() ? g->LenType[5] : 0;
         /* Per-extra-seed (rank>=2) masses; all extras are uniform under the
          * "first capped, rest equal" scheme (seed 1 is handled separately). */
         double Msc, payload, init_msc, init_msc_sample;
@@ -2091,7 +2101,7 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
                 blackhole_make_one(cc->local_index, atime, rnd, 1,
                                    (MyFloat) m->per_payload, (MyFloat) m->per_scaling,
                                    (MyFloat) m->per_init_msc, (MyFloat) m->per_init_msc_sample,
-                                   (MyFloat) m->capped, (MyFloat) m->metallicity, m->metals);
+                                   (MyFloat) m->capped, m->bh_ngb, (MyFloat) m->metallicity, m->metals);
                 n_conv_local++;
             }
             message(0, "    seed %d ID=%lu pos=(%.5g, %.5g, %.5g)\n",
