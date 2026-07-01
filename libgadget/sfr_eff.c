@@ -61,6 +61,7 @@ static struct SFRParams
     int BHFeedbackUseTcool;
     int StarClusterOn; /* if star cluster bh seeding formation is enabled */
     int StarClusterSampling; /* if star cluster mass sampling is enabled (requires StarClusterOn) */
+    int StarClusterICMFcutoff; /* if 1, ICMF has exp(-m/Mcut) cutoff; if 0, pure power law m^-2 on [1e2,1e8] */
     int SeedSecFOFcomSample; /* combined per-secFOF cluster sampling for BH seeding; skips per-star sampling */
     int SCmasscapSecFOFstarmass; /* if 1, cap the combined-sampled SC mass at the group's unseeded stellar mass */
     /* Metallicity-dependent seeding factor f(Z) thresholds, as log10(Z/Zsun) (Zsun=0.0134).
@@ -76,6 +77,7 @@ static struct SFRParams
     /* Mass limits for msc_ave calculation (in code mass units) */
     double msc_min_code; /* 1e2 Msun in code mass */
     double msc_max_code; /* 1e8 Msun in code mass */
+    double msc_ave_powerlaw_code; /* precomputed <m> of the pure power law m^-2 on [msc_min,msc_max] (StarClusterICMFcutoff=0); cutoff-independent constant */
     double msc_seed_thresh_code; /* 1e4 Msun in code mass: "massive cluster" cutoff for bhseed_msc */
     double msc_multiseed_thresh_code; /* 1e8 Msun in code mass: per-secFOF multi-seed threshold (M_SC>this seeds floor(M_SC/1e8) BHs) */
 
@@ -196,6 +198,7 @@ void set_sfr_params(ParameterSet * ps)
         sfr_params.StarClusterSampling = param_get_int(ps, "StarClusterSampling");
         if(sfr_params.StarClusterSampling && !sfr_params.StarClusterOn)
             endrun(0, "StarClusterSampling = 1 requires StarClusterOn = 1\n");
+        sfr_params.StarClusterICMFcutoff = param_get_int(ps, "StarClusterICMFcutoff");
         sfr_params.SeedSecFOFcomSample = param_get_int(ps, "SeedSecFOFcomSample");
         if(sfr_params.SeedSecFOFcomSample && !sfr_params.StarClusterOn)
             endrun(0, "SeedSecFOFcomSample = 1 requires StarClusterOn = 1\n");
@@ -730,14 +733,44 @@ static double safe_expint_E1(double x)
     return result.val;
 }
 
+/* Average cluster mass <m> of the pure power law n(m) ~ m^-2 on [msc_min, msc_max]
+ * (StarClusterICMFcutoff = 0), in code mass units. Independent of any cutoff:
+ *   <m> = ln(m_max/m_min) / (1/m_min - 1/m_max). */
+static double msc_ave_powerlaw(void)
+{
+    double m_min = sfr_params.msc_min_code;
+    double m_max = sfr_params.msc_max_code;
+    double denom = 1.0 / m_min - 1.0 / m_max;
+    if(denom > 0)
+        return log(m_max / m_min) / denom;
+    return 0;
+}
+
+/* Inverse-CDF draw of one cluster mass from the pure power law n(m) ~ m^-2 on
+ * [msc_min, msc_max] (StarClusterICMFcutoff = 0), given a uniform deviate u in
+ * [0,1). Closed form, no cutoff and no bisection:
+ *   CDF(m) = (1/m_min - 1/m) / (1/m_min - 1/m_max)
+ *   => m = 1 / (1/m_min - u*(1/m_min - 1/m_max)). */
+static double msc_sample_powerlaw(double u)
+{
+    double inv_min = 1.0 / sfr_params.msc_min_code;
+    double inv_max = 1.0 / sfr_params.msc_max_code;
+    return 1.0 / (inv_min - u * (inv_min - inv_max));
+}
+
 /* Average cluster mass <m> of n(m) ~ m^-2 exp(-m/Mcut) over [msc_min, msc_max],
  * in code mass units. Returns 0 if Mcut <= 0 or the normalisation is non-positive.
  *   <m> = Mcut * [E1(x_min) - E1(x_max)] /
- *         [exp(-x_min)/x_min - exp(-x_max)/x_max + E1(x_max) - E1(x_min)],   x = m/Mcut. */
+ *         [exp(-x_min)/x_min - exp(-x_max)/x_max + E1(x_max) - E1(x_min)],   x = m/Mcut.
+ * When StarClusterICMFcutoff = 0 the exponential cutoff is dropped and the pure
+ * power-law average (a cutoff-independent constant precomputed at init) is
+ * returned instead. */
 static double msc_ave_from_cutoff(double Mcut)
 {
     if(Mcut <= 0)
         return 0;
+    if(!sfr_params.StarClusterICMFcutoff)
+        return sfr_params.msc_ave_powerlaw_code;
     double x_min = sfr_params.msc_min_code / Mcut;
     double x_max = sfr_params.msc_max_code / Mcut;
     double E1_min = safe_expint_E1(x_min);
@@ -831,33 +864,45 @@ double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
     if(N <= 0)
         return 0;
 
-    /* Sample N cluster masses from n(m) ~ m^-2 exp(-m/Mcut) via inverse-CDF
-     * bisection, summing those above the massive-cluster threshold (1e4 Msun).
-     * CDF(x) ∝ e^{-x_min}/x_min - e^{-x}/x + E1(x) - E1(x_min),  x = m/Mcut.
-     * RNG offsets +300+s, matching the per-star sampler. */
-    double x_min_s = sfr_params.msc_min_code / Mcut;
-    double x_max_s = sfr_params.msc_max_code / Mcut;
-    double E1_xmin = safe_expint_E1(x_min_s);
-    double emxmin_over_xmin = exp(-x_min_s) / x_min_s;
-    double g_norm = emxmin_over_xmin - exp(-x_max_s) / x_max_s
-                  + safe_expint_E1(x_max_s) - E1_xmin;
+    /* Sample N cluster masses from the ICMF, summing those above the massive-cluster
+     * threshold (1e4 Msun). RNG offsets +300+s, matching the per-star sampler.
+     * StarClusterICMFcutoff = 1: n(m) ~ m^-2 exp(-m/Mcut), inverse-CDF via bisection,
+     *   CDF(x) ∝ e^{-x_min}/x_min - e^{-x}/x + E1(x) - E1(x_min),  x = m/Mcut.
+     * StarClusterICMFcutoff = 0: pure power law n(m) ~ m^-2 on [1e2,1e8] (closed-form
+     *   inverse-CDF, cutoff-independent). */
+    int use_cutoff = sfr_params.StarClusterICMFcutoff;
+    double x_min_s = 0, x_max_s = 0, E1_xmin = 0, emxmin_over_xmin = 0, g_norm = 0;
+    if(use_cutoff) {
+        x_min_s = sfr_params.msc_min_code / Mcut;
+        x_max_s = sfr_params.msc_max_code / Mcut;
+        E1_xmin = safe_expint_E1(x_min_s);
+        emxmin_over_xmin = exp(-x_min_s) / x_min_s;
+        g_norm = emxmin_over_xmin - exp(-x_max_s) / x_max_s
+               + safe_expint_E1(x_max_s) - E1_xmin;
+    }
 
     double bhseed_msc = 0;
     double total_sampled = 0;
     for(int s = 0; s < N; s++) {
         double u_s = get_random_number(rand_id + 300 + (uint64_t)s, rnd);
-        double target = u_s * g_norm;
-        double lo = x_min_s, hi = x_max_s;
-        for(int iter = 0; iter < 50; iter++) {
-            double mid = 0.5 * (lo + hi);
-            double g_mid = emxmin_over_xmin - exp(-mid) / mid
-                         + safe_expint_E1(mid) - E1_xmin;
-            if(g_mid < target)
-                lo = mid;
-            else
-                hi = mid;
+        double mass;
+        if(use_cutoff) {
+            double target = u_s * g_norm;
+            double lo = x_min_s, hi = x_max_s;
+            for(int iter = 0; iter < 50; iter++) {
+                double mid = 0.5 * (lo + hi);
+                double g_mid = emxmin_over_xmin - exp(-mid) / mid
+                             + safe_expint_E1(mid) - E1_xmin;
+                if(g_mid < target)
+                    lo = mid;
+                else
+                    hi = mid;
+            }
+            mass = Mcut * 0.5 * (lo + hi);
         }
-        double mass = Mcut * 0.5 * (lo + hi);
+        else {
+            mass = msc_sample_powerlaw(u_s);
+        }
         total_sampled += mass;
         if(mass > sfr_params.msc_seed_thresh_code)
             bhseed_msc += mass;
@@ -879,6 +924,117 @@ double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
     if(total_sampled_out)
         *total_sampled_out = total_sampled;
     return bhseed_msc;
+}
+
+/* Descending comparator for doubles (largest first). */
+static int cmp_double_desc(const void * a, const void * b)
+{
+    double x = *(const double *) a, y = *(const double *) b;
+    return (x < y) - (x > y);
+}
+
+/* SeedInSecFOFRandomStarParticle: see sfr_eff.h. Draws the same Poisson cluster
+ * population and individual cluster masses as starcluster_combined_bhseed_msc (identical
+ * RNG offsets and StarClusterICMFcutoff-aware mass function), but instead of summing the
+ * masses > 1e4 Msun it returns the count of clusters >= min_seed_mass and the largest
+ * min(n_qualify, cap) of those masses (descending). The SCmasscapSecFOFstarmass cap does
+ * not apply here (it caps a summed mass; individual cluster masses are used directly). */
+int starcluster_combined_seed_masslist(double Mcut, double sum_mGamma,
+                                       uint64_t rand_id, const RandTable * const rnd,
+                                       double min_seed_mass, double * out_masses, int cap)
+{
+    if(Mcut <= 0 || sum_mGamma <= 0)
+        return 0;
+    double m_ave = msc_ave_from_cutoff(Mcut);
+    if(m_ave <= 0)
+        return 0;
+    double lambda = sum_mGamma / m_ave;
+
+    /* Poisson sample N (same scheme and RNG offsets +10,+11/+10.. as the summed sampler). */
+    int N = 0;
+    if(lambda > 30) {
+        double u1 = get_random_number(rand_id + 10, rnd);
+        double u2 = get_random_number(rand_id + 11, rnd);
+        if(u1 < 1e-20)
+            u1 = 1e-20;
+        double z = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+        int sample = (int)(lambda + sqrt(lambda) * z + 0.5);
+        N = sample > 0 ? sample : 0;
+    }
+    else if(lambda > 0) {
+        const int max_iter = 200;
+        double L = exp(-lambda);
+        double p = 1.0;
+        int k = 0;
+        uint64_t seed = rand_id + 10;
+        do {
+            k++;
+            p *= get_random_number(seed, rnd);
+            seed++;
+            if(k > max_iter)
+                endrun(7775, "Random-seed Poisson sampling exceeded %d iterations for lambda=%g, rand_id=%ld\n",
+                       max_iter, lambda, (long)rand_id);
+        } while(p > L);
+        N = k - 1;
+    }
+    if(N <= 0)
+        return 0;
+
+    /* Sample N cluster masses (same inverse-CDF draw and RNG offsets +300+s as the
+     * summed sampler), collecting those >= min_seed_mass. When collecting, all qualifying
+     * masses are buffered and sorted once (O(N + n_qualify log n_qualify)); the count-only
+     * path (out_masses == NULL or cap <= 0, used for the slot upper bound) allocates
+     * nothing. The RNG draw sequence is identical either way, so both calls agree. */
+    int use_cutoff = sfr_params.StarClusterICMFcutoff;
+    double x_min_s = 0, x_max_s = 0, E1_xmin = 0, emxmin_over_xmin = 0, g_norm = 0;
+    if(use_cutoff) {
+        x_min_s = sfr_params.msc_min_code / Mcut;
+        x_max_s = sfr_params.msc_max_code / Mcut;
+        E1_xmin = safe_expint_E1(x_min_s);
+        emxmin_over_xmin = exp(-x_min_s) / x_min_s;
+        g_norm = emxmin_over_xmin - exp(-x_max_s) / x_max_s
+               + safe_expint_E1(x_max_s) - E1_xmin;
+    }
+
+    int collecting = (out_masses != NULL && cap > 0);
+    double * qual = collecting ? (double *) mymalloc("SeedMassQual", (size_t)N * sizeof(double)) : NULL;
+
+    int n_qualify = 0;
+    for(int s = 0; s < N; s++) {
+        double u_s = get_random_number(rand_id + 300 + (uint64_t)s, rnd);
+        double mass;
+        if(use_cutoff) {
+            double target = u_s * g_norm;
+            double lo = x_min_s, hi = x_max_s;
+            for(int iter = 0; iter < 50; iter++) {
+                double mid = 0.5 * (lo + hi);
+                double g_mid = emxmin_over_xmin - exp(-mid) / mid
+                             + safe_expint_E1(mid) - E1_xmin;
+                if(g_mid < target)
+                    lo = mid;
+                else
+                    hi = mid;
+            }
+            mass = Mcut * 0.5 * (lo + hi);
+        }
+        else {
+            mass = msc_sample_powerlaw(u_s);
+        }
+        if(mass >= min_seed_mass) {
+            if(collecting)
+                qual[n_qualify] = mass;
+            n_qualify++;
+        }
+    }
+
+    if(collecting) {
+        qsort(qual, n_qualify, sizeof(double), cmp_double_desc);
+        int n_copy = (n_qualify < cap) ? n_qualify : cap;
+        if(n_copy > 0)
+            memcpy(out_masses, qual, (size_t)n_copy * sizeof(double));
+        myfree(qual);
+    }
+    return n_qualify;
 }
 
 /* Whether the combined-sampled SC mass is capped at the group's unseeded stellar
@@ -1054,38 +1210,49 @@ static int make_particle_star(int child, int parent, int placement, double Time,
                 STARP(child).Nsc_sample = 0;
             }
 
-            /* Sample Nsc_sample cluster masses from n(m) ~ m^-2 exp(-m/Mcstar)
-             * on [m_min, m_max] using inverse CDF with bisection.
-             * CDF(x) = [e^{-x_min}/x_min - e^{-x}/x + E1(x) - E1(x_min)] / norm
-             * where x = m / Mcstar. Bisection has fixed iteration count (no while loop).
-             * Random seed offsets: ID + 300 + s (s = 0..Nsc_sample-1). */
+            /* Sample Nsc_sample cluster masses from the ICMF.
+             * Random seed offsets: ID + 300 + s (s = 0..Nsc_sample-1).
+             * StarClusterICMFcutoff = 1: n(m) ~ m^-2 exp(-m/Mcstar) on [m_min, m_max],
+             *   inverse CDF with bisection (fixed iteration count, no while loop),
+             *   CDF(x) = [e^{-x_min}/x_min - e^{-x}/x + E1(x) - E1(x_min)] / norm, x = m/Mcstar.
+             * StarClusterICMFcutoff = 0: pure power law n(m) ~ m^-2 on [1e2,1e8]
+             *   (closed-form inverse CDF, cutoff-independent). */
             double total_sample_mass = 0;
             int Nsc = STARP(child).Nsc_sample;
             if(Nsc > 0 && Mcstar > 0) {
-                double x_min_s = sfr_params.msc_min_code / Mcstar;
-                double x_max_s = sfr_params.msc_max_code / Mcstar;
-                double E1_xmin = safe_expint_E1(x_min_s);
-                double emxmin_over_xmin = exp(-x_min_s) / x_min_s;
-                /* CDF normalization */
-                double g_norm = emxmin_over_xmin - exp(-x_max_s) / x_max_s
-                              + safe_expint_E1(x_max_s) - E1_xmin;
+                int use_cutoff = sfr_params.StarClusterICMFcutoff;
+                double x_min_s = 0, x_max_s = 0, E1_xmin = 0, emxmin_over_xmin = 0, g_norm = 0;
+                if(use_cutoff) {
+                    x_min_s = sfr_params.msc_min_code / Mcstar;
+                    x_max_s = sfr_params.msc_max_code / Mcstar;
+                    E1_xmin = safe_expint_E1(x_min_s);
+                    emxmin_over_xmin = exp(-x_min_s) / x_min_s;
+                    /* CDF normalization */
+                    g_norm = emxmin_over_xmin - exp(-x_max_s) / x_max_s
+                           + safe_expint_E1(x_max_s) - E1_xmin;
+                }
 
                 for(int s = 0; s < Nsc; s++) {
                     double u_s = get_random_number(P[child].ID + 300 + (uint64_t)s, rnd);
-                    double target = u_s * g_norm;
+                    if(use_cutoff) {
+                        double target = u_s * g_norm;
 
-                    /* Bisection: find x in [x_min_s, x_max_s] such that g(x) = target */
-                    double lo = x_min_s, hi = x_max_s;
-                    for(int iter = 0; iter < 50; iter++) {
-                        double mid = 0.5 * (lo + hi);
-                        double g_mid = emxmin_over_xmin - exp(-mid) / mid
-                                     + safe_expint_E1(mid) - E1_xmin;
-                        if(g_mid < target)
-                            lo = mid;
-                        else
-                            hi = mid;
+                        /* Bisection: find x in [x_min_s, x_max_s] such that g(x) = target */
+                        double lo = x_min_s, hi = x_max_s;
+                        for(int iter = 0; iter < 50; iter++) {
+                            double mid = 0.5 * (lo + hi);
+                            double g_mid = emxmin_over_xmin - exp(-mid) / mid
+                                         + safe_expint_E1(mid) - E1_xmin;
+                            if(g_mid < target)
+                                lo = mid;
+                            else
+                                hi = mid;
+                        }
+                        total_sample_mass += Mcstar * 0.5 * (lo + hi);
                     }
-                    total_sample_mass += Mcstar * 0.5 * (lo + hi);
+                    else {
+                        total_sample_mass += msc_sample_powerlaw(u_s);
+                    }
                 }
             }
             STARP(child).StarClusterMass_sample = total_sample_mass;
@@ -1387,6 +1554,10 @@ void init_cooling_and_star_formation(int CoolingOn, int StarformationOn, Cosmolo
     /* Mass limits for msc_ave: 1e2 and 1e8 solar masses in code mass units */
     sfr_params.msc_min_code = 1e2 * SOLAR_MASS / units.UnitMass_in_g;
     sfr_params.msc_max_code = 1e8 * SOLAR_MASS / units.UnitMass_in_g;
+    /* Mean cluster mass of the pure power law (StarClusterICMFcutoff=0) is a fixed
+     * constant (independent of any cutoff), so precompute it once here instead of
+     * recomputing the log() per seeding event. */
+    sfr_params.msc_ave_powerlaw_code = msc_ave_powerlaw();
     /* "Massive cluster" threshold for combined-sample seeding: 1e4 solar masses */
     sfr_params.msc_seed_thresh_code = 1e4 * SOLAR_MASS / units.UnitMass_in_g;
     /* Per-secFOF multi-seed threshold: 1e8 solar masses. When the seeding cluster

@@ -69,6 +69,7 @@ struct FOFParams
     int SeedSecFOFcomSample; /* combined per-secFOF star-cluster sampling for BH seeding */
     int SeedSecFOFcomSampleParticle; /* per-star-particle sampling variant of SeedSecFOFcomSample */
     int SeedInSecFOFMultipleSeeds; /* if 1, seed multiple BHs in a secFOF group with M_SC > 1e8 Msun */
+    int SeedInSecFOFRandomStarParticle; /* if 1, seed one BH per sampled cluster >= MinMscForBHseed at a random unseeded star */
     /* if 1, a secFOF group with unseeded Sum(m*Gamma) > 1e8 Msun is restricted to
      * the gravitationally bound unseeded stars before SeedSecFOFcomSample seeding */
     int SeedSeedFOFMassiveBoundStar;
@@ -106,12 +107,26 @@ void set_fof_params(ParameterSet * ps)
         fof_params.SeedSecFOFcomSample = param_get_int(ps, "SeedSecFOFcomSample");
         fof_params.SeedSecFOFcomSampleParticle = param_get_int(ps, "SeedSecFOFcomSampleParticle");
         fof_params.SeedInSecFOFMultipleSeeds = param_get_int(ps, "SeedInSecFOFMultipleSeeds");
+        fof_params.SeedInSecFOFRandomStarParticle = param_get_int(ps, "SeedInSecFOFRandomStarParticle");
         fof_params.SeedSeedFOFMassiveBoundStar = param_get_int(ps, "SeedSeedFOFMassiveBoundStar");
         fof_params.BHseedMassScaleMsc = param_get_int(ps, "BHseedMassScaleMsc");
         fof_params.MinMscForBHseed = param_get_double(ps, "MinMscForBHseed");
 
         if(fof_params.BlackHoleSeedStarCluster && fof_params.BHseedMassScaleMsc && fof_params.MinMscForBHseed <= 0)
             endrun(1, "MinMscForBHseed must be > 0 when BlackHoleSeedStarCluster and BHseedMassScaleMsc are enabled.\n");
+        /* SeedInSecFOFRandomStarParticle is a self-contained multi-seed mechanism on the
+         * combined per-secFOF draw; it is mutually exclusive with the other secFOF
+         * sampling-variant / multi-seed flags. */
+        if(fof_params.SeedInSecFOFRandomStarParticle) {
+            if(!fof_params.SeedSecFOFcomSample)
+                endrun(1, "SeedInSecFOFRandomStarParticle=1 requires SeedSecFOFcomSample=1.\n");
+            if(fof_params.SeedSecFOFcomSampleParticle)
+                endrun(1, "SeedInSecFOFRandomStarParticle=1 is incompatible with SeedSecFOFcomSampleParticle=1.\n");
+            if(fof_params.SeedInSecFOFMultipleSeeds)
+                endrun(1, "SeedInSecFOFRandomStarParticle=1 is incompatible with SeedInSecFOFMultipleSeeds=1.\n");
+            if(fof_params.SeedSeedFOFMassiveBoundStar)
+                endrun(1, "SeedInSecFOFRandomStarParticle=1 is incompatible with SeedSeedFOFMassiveBoundStar=1.\n");
+        }
         fof_params.FOFPotentialMin = param_get_int(ps, "FOFPotentialMin");
     }
     MPI_Bcast(&fof_params, sizeof(struct FOFParams), MPI_BYTE, 0, MPI_COMM_WORLD);
@@ -2130,6 +2145,384 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
     myfree(rc);
 }
 
+/* ===================== SeedInSecFOFRandomStarParticle =====================
+ * Combined per-secFOF draw, but every sampled cluster with mass >= MinMscForBHseed
+ * seeds its OWN BH (mass SeedBlackHoleMass*m_sc when BHseedMassScaleMsc=1, else
+ * SeedBlackHoleMass), each hosted on a randomly chosen distinct unseeded star of the
+ * group.  Mutually exclusive with the other secFOF multi-seed / sampling-variant flags
+ * (checked in set_fof_params).  Distributed exactly like fof_secfof_extra_seeds: the
+ * per-group cluster-mass lists and the unseeded candidate stars are gathered to every
+ * rank, the selection is identical everywhere, and each rank converts only its own
+ * stars. */
+
+/* A group eligible for random-star multi-seeding: passes Gate 1 and holds >= 1 unseeded
+ * star.  Evaluated on the group's owner (reduced properties are complete there). */
+static int secfof_random_group_eligible(const struct Group * g)
+{
+    if(!fof_params.SeedInSecFOFRandomStarParticle || !fof_params.BlackHoleSeedStarCluster)
+        return 0;
+    if(g->NStarUnseeded < 1)
+        return 0;
+    if(g->StarClusterMassUnseeded < fof_params.MinMscForBHseed)  /* Gate 1 */
+        return 0;
+    return 1;
+}
+
+/* Whether particle i can HOST a random-star BH seed: an unseeded type-4 star (in a group)
+ * with a positive metallicity-dependent seeding factor f(Z). The group sampling mass is
+ * Sum(f(Z)*ClusterMass), so f(Z)=0 stars contribute nothing and must not host a seed; the
+ * host pool, seed-cap and Seeded-flagging are all restricted to f(Z)>0 stars to match. */
+static int secfof_random_seedable_star(int64_t i)
+{
+    return P[i].Type == 4 && P[i].GrNr >= 0 && !STARP(i).Seeded
+        && get_seed_metallicity_factor(STARP(i).BirthMetallicity) > 0;
+}
+
+/* One random-seed group, gathered to every rank. */
+struct rs_group {
+    int64_t  GrNr;
+    int      n_request;     /* seeds to place = min(n_qualify, NStarUnseeded) */
+    int      n_qualify;     /* uncapped count of clusters >= MinMscForBHseed (for the shortage message) */
+    int      mass_offset;   /* offset into the gathered mass array (filled after gather) */
+    uint64_t SeedStarID;    /* RNG seed for the combined draw */
+    double   capped;        /* SCcomMcut (group unseeded stellar mass) */
+    int      bh_ngb;        /* BHNgbAtSeeding = host secFOF LenType[5] */
+};
+static int cmp_rs_group_grnr(const void * a, const void * b)
+{
+    int64_t x = ((const struct rs_group *) a)->GrNr, y = ((const struct rs_group *) b)->GrNr;
+    return (x > y) - (x < y);
+}
+
+/* One unseeded candidate star for random-star seeding. */
+struct rs_cand {
+    int64_t  GrNr;
+    double   key;               /* reproducible random ordering key in [0,1) */
+    uint64_t ID;
+    float    metallicity;       /* host star's frozen BirthMetallicity */
+    float    metals[NMETALS];   /* species mass fractions, rescaled to sum to metallicity */
+    int      owner_task;
+    int      local_index;
+};
+/* Order: GrNr asc, then random key asc, then ID asc (deterministic across ranks). */
+static int cmp_rs_cand(const void * a, const void * b)
+{
+    const struct rs_cand * x = (const struct rs_cand *) a;
+    const struct rs_cand * y = (const struct rs_cand *) b;
+    if(x->GrNr != y->GrNr) return (x->GrNr > y->GrNr) - (x->GrNr < y->GrNr);
+    if(x->key  != y->key)  return (x->key  > y->key)  - (x->key  < y->key);
+    return (x->ID > y->ID) - (x->ID < y->ID);
+}
+
+/* Reproducible random ordering key for a star (mix the ID, then draw from the table). */
+static double rs_star_key(uint64_t id, const RandTable * const rnd)
+{
+    uint64_t h = id * 6364136223846793005ULL + 1442695040888963407ULL;
+    return get_random_number(h, rnd);
+}
+
+/* Upper bound on the number of random-star seeds this rank will convert, used to
+ * pre-reserve BH slots.  Builds the global (GrNr, n_request) set (n_request from the
+ * same deterministic draw used at placement) and counts local unseeded member stars in
+ * those groups, capped at n_request per group.  All scratch freed in LIFO order. */
+static int64_t secfof_count_random_seed_ub(FOFGroups * fof, const RandTable * const rnd, MPI_Comm Comm)
+{
+    if(!fof_params.SeedInSecFOFRandomStarParticle || !fof_params.BlackHoleSeedStarCluster)
+        return 0;
+    int NTask;
+    MPI_Comm_size(Comm, &NTask);
+    int64_t i;
+    int t;
+
+    int n_local = 0;
+    for(i = 0; i < fof->Ngroups; i++)
+        if(secfof_random_group_eligible(&fof->Group[i]))
+            n_local++;
+
+    int * rc = (int *) mymalloc("RSubRC", NTask * sizeof(int));
+    MPI_Allgather(&n_local, 1, MPI_INT, rc, 1, MPI_INT, Comm);
+    int n_tot = 0;
+    for(t = 0; t < NTask; t++) n_tot += rc[t];
+    if(n_tot == 0) { myfree(rc); return 0; }
+
+    int * bc = (int *) mymalloc("RSubBC", NTask * sizeof(int));
+    int * bd = (int *) mymalloc("RSubBD", NTask * sizeof(int));
+    int boff = 0;
+    for(t = 0; t < NTask; t++) { bc[t] = rc[t] * (int) sizeof(struct ms_seed_cap); bd[t] = boff; boff += bc[t]; }
+
+    struct ms_seed_cap * local_g = (struct ms_seed_cap *) mymalloc("RSubLocal",
+            (n_local > 0 ? n_local : 1) * sizeof(struct ms_seed_cap));
+    int k = 0;
+    for(i = 0; i < fof->Ngroups; i++)
+        if(secfof_random_group_eligible(&fof->Group[i])) {
+            int n_qual = starcluster_combined_seed_masslist(
+                    fof->Group[i].SCcomMcut, fof->Group[i].StarClusterMassUnseeded,
+                    (uint64_t) fof->Group[i].SeedStarID, rnd, fof_params.MinMscForBHseed, NULL, 0);
+            int nreq = (n_qual > fof->Group[i].NStarUnseeded) ? fof->Group[i].NStarUnseeded : n_qual;
+            local_g[k].GrNr   = fof->Group[i].base.GrNr;
+            local_g[k].Nseed  = nreq;   /* reuse field: n_request (NOT Nseed-1; all seeds are "extra" here) */
+            local_g[k].placed = 0;
+            k++;
+        }
+    struct ms_seed_cap * all_g = (struct ms_seed_cap *) mymalloc("RSubAll", n_tot * sizeof(struct ms_seed_cap));
+    MPI_Allgatherv(local_g, n_local * (int) sizeof(struct ms_seed_cap), MPI_BYTE,
+                   all_g, bc, bd, MPI_BYTE, Comm);
+    qsort(all_g, n_tot, sizeof(struct ms_seed_cap), cmp_ms_seed_cap_grnr);
+
+    int64_t cnt = 0;
+    for(i = 0; i < PartManager->NumPart; i++) {
+        if(!secfof_random_seedable_star(i)) continue;   /* host pool: unseeded & f(Z)>0 */
+        int lo = 0, hi = n_tot, found = -1;
+        int64_t key = P[i].GrNr;
+        while(lo < hi) {
+            int mid = lo + (hi - lo) / 2;
+            if(all_g[mid].GrNr == key) { found = mid; break; }
+            else if(all_g[mid].GrNr < key) lo = mid + 1;
+            else hi = mid;
+        }
+        if(found >= 0 && all_g[found].placed < all_g[found].Nseed) {
+            all_g[found].placed++;
+            cnt++;
+        }
+    }
+    myfree(all_g);
+    myfree(local_g);
+    myfree(bd);
+    myfree(bc);
+    myfree(rc);
+    return cnt;
+}
+
+/* Place the random-star seeds.  BH slots were pre-reserved by the caller.  Collective:
+ * every rank participates.  All scratch is mymalloc (low stack), freed in LIFO order. */
+static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTable * const rnd, MPI_Comm Comm)
+{
+    if(!fof_params.SeedInSecFOFRandomStarParticle || !fof_params.BlackHoleSeedStarCluster)
+        return;
+    int NTask, ThisTask;
+    MPI_Comm_size(Comm, &NTask);
+    MPI_Comm_rank(Comm, &ThisTask);
+    int64_t i;
+    int t;
+    const int bhdyn = get_starcluster_bhdyn_on();
+
+    /* ---- Phase 1: per-owned-group draw -> (rs_group, descending mass list). ---- */
+    int n_local = 0;
+    int64_t ub_mass = 0;    /* upper bound on local masses = sum of NStarUnseeded */
+    for(i = 0; i < fof->Ngroups; i++)
+        if(secfof_random_group_eligible(&fof->Group[i])) {
+            n_local++;
+            ub_mass += fof->Group[i].NStarUnseeded;
+        }
+
+    int * rc = (int *) mymalloc("RSrc", NTask * sizeof(int));
+    MPI_Allgather(&n_local, 1, MPI_INT, rc, 1, MPI_INT, Comm);
+    int n_msg = 0;
+    for(t = 0; t < NTask; t++) n_msg += rc[t];
+    if(n_msg == 0) { myfree(rc); return; }
+
+    int * gbc = (int *) mymalloc("RSgbc", NTask * sizeof(int));
+    int * gbd = (int *) mymalloc("RSgbd", NTask * sizeof(int));
+    int boff = 0;
+    for(t = 0; t < NTask; t++) { gbc[t] = rc[t] * (int) sizeof(struct rs_group); gbd[t] = boff; boff += gbc[t]; }
+
+    struct rs_group * local_rsg = (struct rs_group *) mymalloc("RSlocal",
+            (n_local > 0 ? n_local : 1) * sizeof(struct rs_group));
+    double * masses_local = (double *) mymalloc("RSmassloc",
+            (ub_mass > 0 ? ub_mass : 1) * sizeof(double));
+    int k = 0;
+    int64_t off = 0;
+    for(i = 0; i < fof->Ngroups; i++) {
+        struct Group * g = &fof->Group[i];
+        if(!secfof_random_group_eligible(g)) continue;
+        int cap_stars = g->NStarUnseeded;
+        int n_qual = starcluster_combined_seed_masslist(
+                g->SCcomMcut, g->StarClusterMassUnseeded, (uint64_t) g->SeedStarID,
+                rnd, fof_params.MinMscForBHseed, &masses_local[off], cap_stars);
+        int n_req = (n_qual > cap_stars) ? cap_stars : n_qual;   /* = number of masses filled */
+        struct rs_group * m = &local_rsg[k++];
+        m->GrNr = g->base.GrNr;
+        m->n_request = n_req;
+        m->n_qualify = n_qual;
+        m->mass_offset = 0;     /* set after gather */
+        m->SeedStarID = (uint64_t) g->SeedStarID;
+        m->capped = g->SCcomMcut;
+        m->bh_ngb = get_seed_in_secfof() ? g->LenType[5] : 0;
+        off += n_req;
+    }
+    int64_t nmass_local = off;
+
+    struct rs_group * all_rsg = (struct rs_group *) mymalloc("RSG", n_msg * sizeof(struct rs_group));
+    MPI_Allgatherv(local_rsg, n_local * (int) sizeof(struct rs_group), MPI_BYTE,
+                   all_rsg, gbc, gbd, MPI_BYTE, Comm);
+
+    /* Gather the per-group mass blocks (same rank/group order as all_rsg). */
+    int * mrc = (int *) mymalloc("RSmrc", NTask * sizeof(int));
+    int nmass_local_i = (int) nmass_local;
+    MPI_Allgather(&nmass_local_i, 1, MPI_INT, mrc, 1, MPI_INT, Comm);
+    int n_mass_tot = 0;
+    for(t = 0; t < NTask; t++) n_mass_tot += mrc[t];
+    int * mbc = (int *) mymalloc("RSmbc", NTask * sizeof(int));
+    int * mbd = (int *) mymalloc("RSmbd", NTask * sizeof(int));
+    int moff = 0;
+    for(t = 0; t < NTask; t++) { mbc[t] = mrc[t] * (int) sizeof(double); mbd[t] = moff; moff += mbc[t]; }
+    double * all_masses = (double *) mymalloc("RSmass",
+            (n_mass_tot > 0 ? n_mass_tot : 1) * sizeof(double));
+    MPI_Allgatherv(masses_local, nmass_local_i * (int) sizeof(double), MPI_BYTE,
+                   all_masses, mbc, mbd, MPI_BYTE, Comm);
+
+    /* Mass offsets: prefix-sum n_request over the gathered (pre-sort) order, which is
+     * aligned with all_masses.  The offset then travels with each group through the sort. */
+    {
+        int acc = 0;
+        for(i = 0; i < n_msg; i++) { all_rsg[i].mass_offset = acc; acc += all_rsg[i].n_request; }
+    }
+    qsort(all_rsg, n_msg, sizeof(struct rs_group), cmp_rs_group_grnr);
+
+    /* ---- Phase 2: gather unseeded candidate stars of the random-seed groups. ----
+     * Single NumPart pass: size elig at the O(1) upper bound (local type-4 count) and
+     * shrink to the exact candidate count afterwards (the allocate-UB-then-myrealloc
+     * idiom used for NewStars in sfr_eff.c), avoiding a second pass just to pre-count. */
+    int64_t n_star_local = SlotsManager->info[4].size;
+    struct rs_cand * elig = (struct rs_cand *) mymalloc("RScand",
+            (n_star_local > 0 ? n_star_local : 1) * sizeof(struct rs_cand));
+    int e = 0;
+    for(i = 0; i < PartManager->NumPart; i++) {
+        if(!secfof_random_seedable_star(i)) continue;   /* host pool: unseeded & f(Z)>0 */
+        int lo = 0, hi = n_msg, found = -1; int64_t key = P[i].GrNr;
+        while(lo < hi) { int mid = lo + (hi - lo) / 2; if(all_rsg[mid].GrNr == key) { found = mid; break; } else if(all_rsg[mid].GrNr < key) lo = mid + 1; else hi = mid; }
+        if(found < 0) continue;
+        elig[e].GrNr = P[i].GrNr;
+        elig[e].key = rs_star_key((uint64_t) P[i].ID, rnd);
+        elig[e].ID = (uint64_t) P[i].ID;
+        /* Host-star metallicity: frozen BirthMetallicity for the scalar; species mass
+         * fractions taken from the star's current Metals[] but rescaled so they sum to
+         * BirthMetallicity (keeps the scalar/array pair consistent). */
+        float zbirth = STARP(i).BirthMetallicity;
+        double zcur = STARP(i).Metallicity;
+        double mass = P[i].Mass;
+        elig[e].metallicity = zbirth;
+        int j;
+        for(j = 0; j < NMETALS; j++) {
+            double frac = (mass > 0) ? STARP(i).Metals[j] / mass : 0;
+            elig[e].metals[j] = (zcur > 0) ? (float)(frac * (zbirth / zcur)) : 0;
+        }
+        elig[e].owner_task = ThisTask;
+        elig[e].local_index = (int) i;
+        e++;
+    }
+    /* Pre-truncate locally to at most n_request per group (lowest random key first):
+     * the global top-n_request by key is a subset of the per-rank top-n_request. */
+    qsort(elig, e, sizeof(struct rs_cand), cmp_rs_cand);
+    int n_keep = 0;
+    {
+        int c = 0;
+        while(c < e) {
+            int64_t gr = elig[c].GrNr;
+            int gi = -1;
+            { int lo = 0, hi = n_msg; while(lo < hi) { int mid = lo + (hi - lo) / 2; if(all_rsg[mid].GrNr == gr) { gi = mid; break; } else if(all_rsg[mid].GrNr < gr) lo = mid + 1; else hi = mid; } }
+            int limit = (gi >= 0) ? all_rsg[gi].n_request : 0;
+            int taken = 0;
+            while(c < e && elig[c].GrNr == gr) {
+                if(taken < limit) { elig[n_keep++] = elig[c]; taken++; }
+                c++;
+            }
+        }
+    }
+    /* Shrink the candidate buffer (still the top of the bottom stack) to the kept count,
+     * reclaiming the upper-bound slack before the gather/select allocations below. */
+    elig = (struct rs_cand *) myrealloc(elig, (n_keep > 0 ? n_keep : 1) * sizeof(struct rs_cand));
+
+    int * crc = (int *) mymalloc("RScrc", NTask * sizeof(int));
+    MPI_Allgather(&n_keep, 1, MPI_INT, crc, 1, MPI_INT, Comm);
+    int n_call = 0;
+    for(t = 0; t < NTask; t++) n_call += crc[t];
+    int * cbc = (int *) mymalloc("RScbc", NTask * sizeof(int));
+    int * cbd = (int *) mymalloc("RScbd", NTask * sizeof(int));
+    int coff = 0;
+    for(t = 0; t < NTask; t++) { cbc[t] = crc[t] * (int) sizeof(struct rs_cand); cbd[t] = coff; coff += cbc[t]; }
+    struct rs_cand * allc = (struct rs_cand *) mymalloc("RSallc",
+            (n_call > 0 ? n_call : 1) * sizeof(struct rs_cand));
+    MPI_Allgatherv(elig, n_keep * (int) sizeof(struct rs_cand), MPI_BYTE,
+                   allc, cbc, cbd, MPI_BYTE, Comm);
+    qsort(allc, n_call, sizeof(struct rs_cand), cmp_rs_cand);
+
+    /* ---- Phase 3: identical selection on every rank; each converts its own stars. ---- */
+    int64_t n_placed = 0, n_short = 0, n_conv_local = 0;
+    int ac = 0;
+    for(i = 0; i < n_msg; i++) {
+        struct rs_group * m = &all_rsg[i];
+        while(ac < n_call && allc[ac].GrNr < m->GrNr) ac++;
+        int bstart = ac;
+        while(ac < n_call && allc[ac].GrNr == m->GrNr) ac++;
+        int navail = ac - bstart;
+        int nsel = (m->n_request < navail) ? m->n_request : navail;
+
+        int s;
+        for(s = 0; s < nsel; s++) {
+            struct rs_cand * cc = &allc[bstart + s];
+            double m_sc = all_masses[m->mass_offset + s];   /* descending; arbitrary->random star */
+            if(cc->owner_task == ThisTask) {
+                MyFloat payload = bhdyn ? (MyFloat) m_sc : 0;   /* StarClusterMass (dynamics + evolution) */
+                blackhole_make_one(cc->local_index, atime, rnd, 1,
+                                   payload, (MyFloat) m_sc,
+                                   (MyFloat) m_sc, (MyFloat) m_sc,
+                                   (MyFloat) m->capped, m->bh_ngb,
+                                   (MyFloat) cc->metallicity, cc->metals);
+                n_conv_local++;
+            }
+            n_placed++;
+        }
+        /* Shortage: more eligible clusters than unseeded stars available. */
+        if(m->n_qualify > nsel) {
+            n_short++;
+            message(0, "secFOF random-seed group GrNr=%ld: %d eligible cluster(s) >= MinMscForBHseed "
+                       "but only %d unseeded f(Z)>0 host star(s); seeded %d, skipped %d.\n",
+                    (long) m->GrNr, m->n_qualify, navail, nsel, m->n_qualify - nsel);
+        }
+    }
+
+    message(0, "secFOF random-seed: %d group(s); placed %ld BH seed(s); %ld group(s) short of unseeded stars.\n",
+            n_msg, n_placed, n_short);
+    (void) n_conv_local;
+
+    /* Flag every remaining seedable star (unseeded & f(Z)>0) of a seeded group (n_request >= 1)
+     * as Seeded=1. The group's Sum(f(Z)*ClusterMass) fed the combined draw, so its seedable
+     * population is consumed regardless of how many BHs were placed (matching the single-seed
+     * combined path, which marks these via secondfof_seed's seeded_grnr_out list; random-mode
+     * groups are absent from that list, so they are marked here). f(Z)=0 stars never participate
+     * and are left untouched; stars already converted to BHs are type 5 and skipped. */
+    int64_t n_flag = 0;
+    #pragma omp parallel for reduction(+:n_flag)
+    for(i = 0; i < PartManager->NumPart; i++) {
+        if(!secfof_random_seedable_star(i)) continue;   /* unseeded & f(Z)>0 */
+        int64_t key = P[i].GrNr;
+        int lo = 0, hi = n_msg, found = -1;
+        while(lo < hi) { int mid = lo + (hi - lo) / 2; if(all_rsg[mid].GrNr == key) { found = mid; break; } else if(all_rsg[mid].GrNr < key) lo = mid + 1; else hi = mid; }
+        if(found >= 0 && all_rsg[found].n_request >= 1) { STARP(i).Seeded = 1; n_flag++; }
+    }
+    int64_t n_flag_tot = 0;
+    MPI_Allreduce(&n_flag, &n_flag_tot, 1, MPI_INT64, MPI_SUM, Comm);
+    message(0, "secFOF random-seed: flagged Seeded=1 for %ld star(s) in seeded groups.\n", n_flag_tot);
+
+    /* Free all scratch in reverse allocation order. */
+    myfree(allc);
+    myfree(cbd);
+    myfree(cbc);
+    myfree(crc);
+    myfree(elig);
+    myfree(all_masses);
+    myfree(mbd);
+    myfree(mbc);
+    myfree(mrc);
+    myfree(all_rsg);
+    myfree(masses_local);
+    myfree(local_rsg);
+    myfree(gbd);
+    myfree(gbc);
+    myfree(rc);
+}
+
 /* --- SeedSecFOFcomSampleParticle: per-star-particle star-cluster sampling ---
  * One candidate secFOF group (passed Gate 1), broadcast to all ranks so each rank
  * can sample the local member stars it holds. */
@@ -2668,7 +3061,8 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
      * BHSeedMsc is the single combined per-group draw, or — when
      * SeedSecFOFcomSampleParticle is on — tot_msc_fof summed from per-star draws,
      * computed collectively first by fof_secfof_particle_sample(). */
-    if(fof_params.SeedSecFOFcomSample && fof_params.BlackHoleSeedStarCluster) {
+    if(fof_params.SeedSecFOFcomSample && fof_params.BlackHoleSeedStarCluster
+       && !fof_params.SeedInSecFOFRandomStarParticle) {
         /* Restrict massive (> 1e8 Msun) groups to their gravitationally bound
          * unseeded stars BEFORE the sampler/gates run; overwrites the two input
          * fields (StarClusterMassUnseeded, SCcomMcut) in place. */
@@ -2763,9 +3157,15 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
     int64_t ntot_extra = 0;
     MPI_Allreduce(&n_extra_ub, &ntot_extra, 1, MPI_INT64, MPI_SUM, Comm);
 
+    /* SeedInSecFOFRandomStarParticle places all its seeds in fof_secfof_random_seeds
+     * (none go through the single-seed Nimport path), so reserve an upper bound here too. */
+    int64_t n_random_ub = secfof_count_random_seed_ub(fof, rnd, Comm);   /* local upper bound */
+    int64_t ntot_random = 0;
+    MPI_Allreduce(&n_random_ub, &ntot_random, 1, MPI_INT64, MPI_SUM, Comm);
+
     /* Do we have enough black hole slots to create this many black holes?
      * If not, allocate more slots. */
-    if(Nimport + n_extra_ub + SlotsManager->info[5].size > SlotsManager->info[5].maxsize)
+    if(Nimport + n_extra_ub + n_random_ub + SlotsManager->info[5].size > SlotsManager->info[5].maxsize)
     {
         /* The live force tree (gasTree from run.c) and act->ActiveParticle both sit
          * on the MAIN bottom stack ABOVE SlotsBase.  slots_reserve grows SlotsBase via
@@ -2796,7 +3196,7 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
         int64_t i;
         for(i = 0; i < 6; i++)
             atleast[i] = SlotsManager->info[i].maxsize;
-        atleast[5] += (ntot + ntot_extra)*1.1;
+        atleast[5] += (ntot + ntot_extra + ntot_random)*1.1;
         slots_reserve(1, atleast, SlotsManager);
 
         /*And now we need our memory back in the right place (reverse allocation order)*/
@@ -2832,6 +3232,11 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
      * groups now that seed 1 exists.  Uses pre-reserved BH slots; converts the chosen
      * stars in place.  Collective (every rank participates). */
     fof_secfof_extra_seeds(fof, atime, rnd, Comm);
+
+    /* SeedInSecFOFRandomStarParticle: place one BH per sampled cluster >= MinMscForBHseed
+     * on a random unseeded star.  Self-contained multi-seed pass (mutually exclusive with
+     * the paths above); uses pre-reserved BH slots.  Collective (every rank participates). */
+    fof_secfof_random_seeds(fof, atime, rnd, Comm);
 
     /* Optionally return the GrNr (and, for SeedSecFOFcomSampleParticle, the
      * per-group tot_msc_fof = BHSeedMsc and unseeded stellar mass = SCcomMcut) of

@@ -1,5 +1,21 @@
 # MP-Gadget Development Log
 
+## 2026-06-25 — SeedInSecFOFRandomStarParticle: one BH per sampled cluster at a random star
+
+Added a new parameter `SeedInSecFOFRandomStarParticle` (default 0), only used with `SeedSecFOFcomSample=1` (and mutually exclusive with `SeedSecFOFcomSampleParticle`, `SeedInSecFOFMultipleSeeds`, and `SeedSeedFOFMassiveBoundStar`, enforced at startup). When on, the combined per-secFOF cluster draw is no longer summed into a single seed; instead every sampled cluster with mass >= MinMscForBHseed seeds its own BH (mass SeedBlackHoleMass*m_sc when BHseedMassScaleMsc=1, else SeedBlackHoleMass), each hosted on a randomly chosen distinct unseeded star of the group with a positive metallicity-dependent seeding factor f(Z) (the host pool, seed-cap and Seeded-flagging all require f(Z)>0, consistent with the group sampling mass Sum(f(Z)*ClusterMass); f(Z)=0 stars never host). If the eligible clusters outnumber the group's seedable (f(Z)>0) stars, a message is printed and the remaining (smallest) clusters in that group are skipped. The whole group is then flagged as seeded. Seed placement is distributed across MPI ranks (per-group cluster-mass lists and candidate stars gathered to all ranks, deterministic random selection keyed by star ID). Each BH carries m_sc as its star-cluster mass and the host star's BirthMetallicity. BH slots are pre-reserved via an upper-bound count before placement.
+
+**Files modified:** `gadget/params.c`, `libgadget/sfr_eff.c`, `libgadget/sfr_eff.h`, `libgadget/fof.c`
+
+---
+
+## 2026-06-25 — StarClusterICMFcutoff: optional pure power-law cluster mass function
+
+Added a new parameter `StarClusterICMFcutoff` (default 1) controlling the shape of the star-cluster initial cluster mass function used for BH seeding (only relevant under star-cluster-based seeding). When 1 (default, unchanged behavior), the mass function keeps the exponential cutoff n(m) ~ m^-2 exp(-m/Mcut). When 0, the exponential cutoff is dropped and a pure power law p(M) ~ M^-2 is used over the fixed [1e2, 1e8] Msun range, independent of any cutoff mass. The flag affects both the mean-mass (Poisson rate) and the mass draws in the per-star sampler and the combined per-secFOF sampler. Because the power-law mean cluster mass is a cutoff-independent constant, it is precomputed once at init rather than recomputed per seeding event.
+
+**Files modified:** `gadget/params.c`, `libgadget/sfr_eff.c`
+
+---
+
 ## 2026-06-17 — BirthMetallicity restart fallback for older snapshots
 
 On restart, if a snapshot lacks the 4/BirthMetallicity block (written before that feature existed), a warning is printed and each star's BirthMetallicity falls back to its current Metallicity instead of being left uninitialized. The missing block is detected from the snapshot read status.

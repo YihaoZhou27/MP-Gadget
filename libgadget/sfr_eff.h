@@ -74,6 +74,17 @@ double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
                                        uint64_t rand_id, const RandTable * const rnd,
                                        double * total_sampled_out, int allow_cap);
 
+/* SeedInSecFOFRandomStarParticle: draw the combined per-secFOF cluster population
+ * (same Poisson + inverse-CDF draw and RNG offsets as starcluster_combined_bhseed_msc)
+ * and return the INDIVIDUAL cluster masses >= min_seed_mass. Fills out_masses with the
+ * largest min(n_qualify, cap) such masses, sorted descending, and returns n_qualify =
+ * the TOTAL number of clusters >= min_seed_mass (which may exceed cap, so the caller can
+ * detect a shortage of unseeded stars). out_masses may be NULL when cap == 0. All masses
+ * in code units. Serial only (uses the global GSL error handler). */
+int starcluster_combined_seed_masslist(double Mcut, double sum_mGamma,
+                                       uint64_t rand_id, const RandTable * const rnd,
+                                       double min_seed_mass, double * out_masses, int cap);
+
 /* Metallicity-dependent BH-seeding factor f(Z) in [0,1], applied to the per-star
  * cluster mass (Gamma*m_star) used for star-cluster BH seeding. Z is the absolute
  * star metallicity (BirthMetallicity). Returns 1 when the feature is disabled
