@@ -1,5 +1,117 @@
 # MP-Gadget Development Log
 
+## 2026-07-04 — SecFOFseedsumover: split the secFOF combined-draw seeding controls
+
+Reorganized the features previously bundled in `SeedInSecFOFRandomStarParticle` into two parameters. New int parameter `SecFOFseedsumover` (default 1, only used with `SeedSecFOFcomSample=1`) controls the seed aggregation: 1 = the combined per-secFOF draw is summed into ONE BH seed per group (former `SeedInSecFOFRandomStarParticle=0` behavior); 0 = per-cluster seeding, one BH per sampled cluster >= MinMscForBHseed (former `=1` behavior). `SeedInSecFOFRandomStarParticle` now only selects the host stars of the per-cluster mode: 1 = randomly sampled distinct unseeded stars (as before); 0 = NEW behavior, the N unseeded stars with the largest f(Z)-scaled cluster-forming mass f(Z)*ClusterMass host the N seeds (generalizing the sum-over mode's largest-f(Z)*ClusterMass host pick). It is ignored (with a startup message) when `SecFOFseedsumover=1`. The mutual-exclusion checks moved to the new parameter, and `MbhMscRelationCWmodel=1` now requires `SeedSecFOFcomSample=1` and `SecFOFseedsumover=0` (either host-star mode is allowed). NOTE: existing parameter files that used `SeedInSecFOFRandomStarParticle=1` for per-cluster seeding must now also set `SecFOFseedsumover=0`. Compiles and links cleanly.
+
+**Files modified:** `gadget/params.c`, `libgadget/fof.c`, `libgadget/sfr_eff.c`, `libgadget/sfr_eff.h`, `libgadget/scinfo.h` (last three: comments only)
+
+---
+
+## 2026-07-04 — CW model: mean-density cap with 1%-of-cluster-mass seeding
+
+Added the mean-density system exclusion of the Williams et al. 2026 model (scmodel.py `rho_mean_cap`, paper Table 1) to the CW seed-mass path: a cluster whose mean density inside r_max, rho_mean = M/(4/3 pi r_max^3), is at or above 6e7 Msun/pc^3 now bypasses the collision-inflow M_VMS calculation and directly gets a BH seed mass of 0.01 x the cluster mass. Clusters below the cap are unchanged. The high-density seed still passes through the existing SeedBlackHoleMass lower-limit check at the call site. Verified with a standalone test (above-cap clusters return exactly 0.01 M_cl; below-cap clusters reproduce the previous CW values); full code compiles and links cleanly.
+
+**Files modified:** `libgadget/cwmodel.c`, `libgadget/cwmodel.h`, `libgadget/fof.c` (comment only)
+
+---
+
+## 2026-07-03 — CWmodelMetallicity: per-cluster metallicity mode for the CW seed-mass model
+
+Added a new string parameter `CWmodelMetallicity` (default `"ave"`, only used with `MbhMscRelationCWmodel=1`) selecting the metallicity fed to the CW model for each sampled cluster. `"ave"` keeps the current behavior (host secFOF's unseeded-star metal mass ratio for every cluster). `"lognormal"` draws each cluster's log10(Z) from a normal distribution with the mean and standard deviation of the group's unseeded-star log10(BirthMetallicity) (equal weight per star, not mass-weighted; log10(Z) floored at -7 for pristine stars; the draw is clipped to the group's [min, max] log10(Z)). `"uniform"` draws log10(Z) uniformly between the group's min and max. Draws are keyed on the host star ID so they are reproducible across ranks/restarts. Any other value aborts at startup when `MbhMscRelationCWmodel=1`. The StarClusterDetails record's metallicity field now stores the Z actually fed to the CW model (unchanged in `"ave"` mode). Compiles and links cleanly.
+
+**Files modified:** `gadget/params.c`, `libgadget/fof.h`, `libgadget/fof.c`
+
+---
+
+## 2026-07-03 — StarClusterDetails: unseeded-star metallicity distribution
+
+Added six new fields to the StarClusterDetails record (`struct SCseedinfo`): the distribution of the host secFOF's unseeded-star BirthMetallicity (equal weight per star, absolute Z) — exact min and max, standard deviation, and the median / 25th / 75th percentiles. Min/max/std come from running per-group accumulators; the percentiles come from a fixed per-group log10(Z) histogram (64 bins, ~0.13 dex; validated against exact sorted percentiles to <0.01 dex), so everything folds into the existing additive group reduction with no new MPI communication and negligible cost. All six are 0 when the host group has no unseeded star. The on-disk record grew to 156 bytes (payload marker 100 -> 148); the raw->BigFile converter `script/scdetails_raw2bf.py` was updated to auto-detect the new layout (and still read the two older ones). Compiles and links cleanly.
+
+**Files modified:** `libgadget/fof.h`, `libgadget/fof.c`, `libgadget/scinfo.h`, `libgadget/scinfo.c` (+ `script/scdetails_raw2bf.py` in the analysis pipeline)
+
+---
+
+## 2026-07-03 — CWmodelAlpha: density profile index of the CW seed-mass model as an input
+
+Made the CW-model density power-law index alpha (rho ~ r^-alpha), previously hard-coded to 1.2, a new `double` parameter `CWmodelAlpha` (default 1.2, only used with `MbhMscRelationCWmodel=1`; aborts at startup if outside (0,3)). The Rose et al. 2020 eccentricity functions f1/f2, which depend on alpha and were frozen as alpha=1.2 constants, are now recomputed at runtime via a Gauss hypergeometric (2F1) implementation so the collision rate stays consistent for any alpha (verified against scipy.special.hyp2f1 to 10 digits; the default alpha=1.2 reproduces the old constants exactly). Eccentricity e stays fixed at 0.5. Compiles and links cleanly.
+
+**Files modified:** `gadget/params.c`, `libgadget/fof.c`, `libgadget/cwmodel.c`, `libgadget/cwmodel.h`
+
+---
+
+## 2026-07-02 — StarClusterFixReff: optional fixed effective radius for seeded clusters
+
+Added a new `double` parameter `StarClusterFixReff` (default 0, in pc). When > 0, every seeded star cluster in the `SeedInSecFOFRandomStarParticle=1` path is assigned this fixed effective radius instead of the size-mass relation (which is bypassed along with its 0.5 dex scatter); the fixed Reff feeds both the StarClusterDetails record and the CW seed-mass model. Default 0 preserves the size-mass relation. A negative value aborts at startup. Compiles cleanly.
+
+**Files modified:** `gadget/params.c`, `libgadget/sfr_eff.c`
+
+---
+
+## 2026-07-02 — StarClusterBHDyn=2: warn when MinMscForBHseed < DM particle mass
+
+Added a startup check: when `StarClusterBHDyn=2` and `MinMscForBHseed` is below the dark matter particle mass (header `MassTable[1]`), a warning is printed and the run continues (no abort). This flags the case where BH seeds can be lighter than the background DM particles. Compiles and links cleanly.
+
+**Files modified:** `libgadget/blackhole.c`, `libgadget/blackhole.h`, `libgadget/run.c`
+
+---
+
+## 2026-07-02 — MbhMscRelationCWmodel: disable the f(Z) seeding factor
+
+When `MbhMscRelationCWmodel=1`, the metallicity-dependent seeding factor f(Z) is now disabled at startup by forcing `StarClusterSeedMetallicityMax = StarClusterSeedMetallicityMin` (i.e. f(Z)=1 for all Z, everywhere the factor is used: cluster-formation rate, seeding sums, host-star eligibility). The CW model's own Vink-wind metallicity dependence of M_VMS supplies the Z scaling instead. A startup message is printed when user-set thresholds are overridden. Parameter help text updated. Compiles cleanly.
+
+**Files modified:** `gadget/params.c`, `libgadget/sfr_eff.c`
+
+---
+
+## 2026-07-02 — StarClusterBHDyn=2: frozen seed-cluster-mass dynamical floor
+
+Added mode 2 to `StarClusterBHDyn`. The BH dynamical mass becomes P.Mass = max(Mtrack, init_Msc): the star-cluster mass that seeded the BH acts as a frozen per-BH dynamical-mass floor replacing SeedBHDynMass, and Mtrack takes over once it grows above it. Unlike mode 1, no StarClusterMass payload is attached (no SC stellar evolution, metal return, or merger SC transfer — like mode 0), and the floor never changes: it uses init_Msc, which is frozen at seeding and kept by the accretor through mergers. Non-star-cluster seeds (init_Msc=0) keep the SeedBHDynMass floor. Applied at seeding and at the post-swallow dynamical-mass update; invalid values of StarClusterBHDyn now abort at startup. Parameter help text updated. Compiles cleanly.
+
+**Files modified:** `gadget/params.c`, `libgadget/blackhole.c`, `libgadget/blackhole.h`, `libgadget/bhinfo.c`
+
+---
+
+## 2026-07-02 — StarClusterDetails: Mbh_seed field (+ records for CW-skipped clusters)
+
+Added a `Mbh_seed` field to each StarClusterDetails record: the subgrid mass (code units) of the BH seeded inside that star cluster, read from the just-created BH at all three seeding record sites. When `MbhMscRelationCWmodel=1`, a record is now also written for each sampled cluster that seeds no BH because its M_VMS < SeedBlackHoleMass — there Mbh_seed = 0 and the record's ID/Pos refer to the candidate host star (which remains a star). The record grows from 100 to 108 bytes (payload marker 92 -> 100). The conversion script `script/scdetails_raw2bf.py` now writes the new Mbh_seed block and auto-detects the record layout from the shard payload marker, so detail files written before this change still convert (without the Mbh_seed block). Script verified on synthetic shards in both layouts. Compiles cleanly.
+
+**Files modified:** `libgadget/scinfo.c`, `libgadget/scinfo.h`, `libgadget/fof.c`, `script/scdetails_raw2bf.py` (in the SCmodel script folder)
+
+---
+
+## 2026-07-02 — MbhMscRelationCWmodel: SeedBlackHoleMass as lower seed-mass limit
+
+Follow-up to the `MbhMscRelationCWmodel` feature below. In this mode `BHseedMassScaleMsc` is now explicitly ignored, and `SeedBlackHoleMass` acts as the lower seed-mass limit instead of the seed mass: a BH is only seeded when the model's M_VMS >= SeedBlackHoleMass, so clusters whose VMS is lighter (including the previous M_VMS = 0 no-inflow case) seed no BH. The skipped clusters are counted in the seeding log message. When both `MbhMscRelationCWmodel=1` and `BHseedMassScaleMsc=1` are set, a startup message states that BHseedMassScaleMsc is ignored and the CW model applies. Parameter help text updated. Compiles cleanly.
+
+**Files modified:** `gadget/params.c`, `libgadget/fof.c`, `libgadget/blackhole.c`, `libgadget/blackhole.h`
+
+---
+
+## 2026-07-01 — MbhMscRelationCWmodel: Williams et al. 2026 VMS seed-mass model
+
+Added a new parameter `MbhMscRelationCWmodel` (default 0, requires `SeedInSecFOFRandomStarParticle=1`). When enabled, each sampled star cluster above `MinMscForBHseed` gets its BH seed mass from the Williams et al. 2026 stellar-collision VMS model (new module `libgadget/cwmodel.c`, a C port of `code_v2/WilliamModel/scmodel.py` with default parameters and the kappa=5 inflow normalization) instead of the `SeedBlackHoleMass(*m_sc)` prescription. Model inputs per cluster: the sampled cluster mass, the virial radius r_max = 1.4 * Reff from the size-mass relation, the host secFOF's unseeded-star metal mass ratio (Zsun=0.0134, Z/Zsun floored at 1e-4), and the age of the universe at seeding (simulation cosmology). M_VMS is capped at the cluster mass; clusters with no net inflow (M_VMS = 0) seed no BH (counted in the seeding log message). The C port was verified against the Python model to ~1e-11 relative accuracy. Compiles cleanly.
+
+**Files modified:** `gadget/params.c`, `libgadget/fof.c`, `libgadget/blackhole.c`, `libgadget/blackhole.h`, `libgadget/Makefile`; **added:** `libgadget/cwmodel.c`, `libgadget/cwmodel.h`
+
+---
+
+## 2026-07-01 — StarClusterDetails: effective-radius field
+
+Added an effective-radius (`Reff`, in pc) field to each StarClusterDetails record. When `SeedInSecFOFRandomStarParticle=1`, every seeded star cluster is assigned a radius sampled from the size-mass relation R_eff = 1.4 pc (M_cl/1e4 Msun)^0.25 with a 0.5 dex lognormal scatter, reproducibly keyed on the host star ID, with log10(R/pc) clipped to [-1, 2] (0.1-100 pc). The cluster mass is converted to solar masses using the same factor as the mass-function thresholds. For the other seeding paths (`SeedInSecFOFRandomStarParticle=0`) the recorded radius is 0.
+
+**Files modified:** `libgadget/sfr_eff.c`, `libgadget/sfr_eff.h`, `libgadget/scinfo.c`, `libgadget/scinfo.h`, `libgadget/fof.c`
+
+---
+
+## 2026-07-01 — StarClusterDetails: per-seeded-star-cluster detail files
+
+Added a new parameter `StarClusterDetails` (int, default 0). When it is 1 and a star-cluster BH seeding mode is active (`BlackHoleSeedStarCluster` / `SeedInSecFOFasStarCluster` / `SeedSecFOFcomSample`), the code writes one binary record for every seeded star cluster to per-rank files under `OutputDir/StarClusterDetails`, mirroring the BlackholeDetails mechanism (packed record with leading/trailing size guards). This captures seeding events that happen on steps between checkpoints and are therefore not present in the snapshots. Each record stores: the seed cluster mass (the sampled >1e4 Msun mass in the combined-sample mode, otherwise the mode's seeding SC mass), the seeding scale factor, the host group total star-cluster mass (sum of Gamma*m_star over all member stars), the host group's already-consumed cluster mass (SCMass_seeded, as-is at seed time), the unseeded-star metal mass ratio (mass-weighted BirthMetallicity), and the number of black holes already in the host group before the seed. Records are emitted from all three star-cluster seed paths (single per-group seed, the massive-group extra seeds, and the random-star seeds). All seed paths covered; the per-star `BlackholeSeedSCparticle` path (no host group) is not recorded.
+
+**Files modified:** `gadget/params.c`, `libgadget/stats.c`, `libgadget/stats.h`, `libgadget/fof.c`, `libgadget/fof.h`, `libgadget/Makefile`; **added:** `libgadget/scinfo.c`, `libgadget/scinfo.h`
+
+---
+
 ## 2026-06-25 — SeedInSecFOFRandomStarParticle: one BH per sampled cluster at a random star
 
 Added a new parameter `SeedInSecFOFRandomStarParticle` (default 0), only used with `SeedSecFOFcomSample=1` (and mutually exclusive with `SeedSecFOFcomSampleParticle`, `SeedInSecFOFMultipleSeeds`, and `SeedSeedFOFMassiveBoundStar`, enforced at startup). When on, the combined per-secFOF cluster draw is no longer summed into a single seed; instead every sampled cluster with mass >= MinMscForBHseed seeds its own BH (mass SeedBlackHoleMass*m_sc when BHseedMassScaleMsc=1, else SeedBlackHoleMass), each hosted on a randomly chosen distinct unseeded star of the group with a positive metallicity-dependent seeding factor f(Z) (the host pool, seed-cap and Seeded-flagging all require f(Z)>0, consistent with the group sampling mass Sum(f(Z)*ClusterMass); f(Z)=0 stars never host). If the eligible clusters outnumber the group's seedable (f(Z)>0) stars, a message is printed and the remaining (smallest) clusters in that group are skipped. The whole group is then flagged as seeded. Seed placement is distributed across MPI ranks (per-group cluster-mass lists and candidate stars gathered to all ranks, deterministic random selection keyed by star ID). Each BH carries m_sc as its star-cluster mass and the host star's BirthMetallicity. BH slots are pre-reserved via an upper-bound count before placement.

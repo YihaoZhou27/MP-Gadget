@@ -69,6 +69,9 @@ static struct SFRParams
      * If Max <= Min (default both 0) the feature is disabled (f=1). */
     double StarClusterSeedMetallicityMin;
     double StarClusterSeedMetallicityMax;
+    /* If > 0, use this fixed effective radius (in pc) for every seeded star cluster
+     * instead of the size-mass relation. Default 0 (use the size-mass relation). */
+    double StarClusterFixReff;
     /*!< may be used to set a floor for the gas temperature */
     double MinGasTemp;
     /* Precomputed constants for M_cstar calculation (in code units) */
@@ -208,6 +211,20 @@ void set_sfr_params(ParameterSet * ps)
         if(sfr_params.StarClusterSeedMetallicityMax < sfr_params.StarClusterSeedMetallicityMin)
             endrun(0, "StarClusterSeedMetallicityMax (%g) must be >= StarClusterSeedMetallicityMin (%g). Set them equal to disable the metallicity-dependent seeding factor.\n",
                    sfr_params.StarClusterSeedMetallicityMax, sfr_params.StarClusterSeedMetallicityMin);
+        /* MbhMscRelationCWmodel supplies its own metallicity dependence (the
+         * Vink-wind Z scaling of M_VMS), so the metallicity-dependent seeding
+         * factor f(Z) is disabled: force Max = Min, i.e. f(Z) = 1 for all Z. */
+        if(param_get_int(ps, "MbhMscRelationCWmodel")
+           && sfr_params.StarClusterSeedMetallicityMax > sfr_params.StarClusterSeedMetallicityMin) {
+            message(0, "MbhMscRelationCWmodel=1: disabling the metallicity-dependent seeding factor f(Z) "
+                       "(forcing StarClusterSeedMetallicityMax = StarClusterSeedMetallicityMin = %g); "
+                       "the CW model's Z dependence applies instead.\n",
+                    sfr_params.StarClusterSeedMetallicityMin);
+            sfr_params.StarClusterSeedMetallicityMax = sfr_params.StarClusterSeedMetallicityMin;
+        }
+        sfr_params.StarClusterFixReff = param_get_double(ps, "StarClusterFixReff");
+        if(sfr_params.StarClusterFixReff < 0)
+            endrun(0, "StarClusterFixReff (%g) must be >= 0.\n", sfr_params.StarClusterFixReff);
         if(sfr_params.StarClusterOn) {
             int GasTidalField = param_get_int(ps, "GasTidalField");
             int SCgasVDisp = param_get_int(ps, "SCgasVDisp");
@@ -933,7 +950,7 @@ static int cmp_double_desc(const void * a, const void * b)
     return (x < y) - (x > y);
 }
 
-/* SeedInSecFOFRandomStarParticle: see sfr_eff.h. Draws the same Poisson cluster
+/* Per-cluster secFOF seeding (SecFOFseedsumover=0): see sfr_eff.h. Draws the same Poisson cluster
  * population and individual cluster masses as starcluster_combined_bhseed_msc (identical
  * RNG offsets and StarClusterICMFcutoff-aware mass function), but instead of summing the
  * masses > 1e4 Msun it returns the count of clusters >= min_seed_mass and the largest
@@ -1050,6 +1067,39 @@ int get_scmasscap_secfof_starmass(void)
 double get_msc_multiseed_thresh_code(void)
 {
     return sfr_params.msc_multiseed_thresh_code;
+}
+
+/* Effective radius (in pc) of a seeded star cluster of code-unit mass mcl_code.
+ * If StarClusterFixReff > 0, that fixed radius (in pc) is returned for every cluster.
+ * Otherwise the median follows the size-mass relation R_eff = 1.4 pc * (M_cl/1e4 Msun)^0.25,
+ * with a 0.5 dex lognormal scatter drawn via Box-Muller. The scatter is keyed on rand_id (the
+ * host star ID) so the radius is reproducible across ranks/restarts; log10(R/pc) is
+ * clipped to [-1, 2] (0.1-100 pc). The cluster mass is converted to solar masses with
+ * the SAME factor as the mass-function thresholds (msc_min_code = 100 Msun) to stay
+ * consistent with the sampled cluster masses. */
+double starcluster_sample_reff_pc(double mcl_code, uint64_t rand_id, const RandTable * const rnd)
+{
+    if(mcl_code <= 0 || sfr_params.msc_min_code <= 0)
+        return 0;
+    /* StarClusterFixReff > 0: bypass the size-mass relation and use one fixed
+     * effective radius (in pc) for every star cluster. */
+    if(sfr_params.StarClusterFixReff > 0)
+        return sfr_params.StarClusterFixReff;
+    /* code mass -> solar mass: msc_min_code corresponds to 100 Msun. */
+    double mcl_solar = mcl_code / sfr_params.msc_min_code * 100.0;
+    double logR = 0.25 * log10(mcl_solar) + log10(1.4) - 1.0;   /* median log10(R/pc) */
+    /* 0.5 dex lognormal scatter: Box-Muller Gaussian. Mix the ID (as rs_star_key does)
+     * then offset by +700/+701 to stay clear of the mass sampler's RNG streams. */
+    uint64_t h = rand_id * 6364136223846793005ULL + 1442695040888963407ULL;
+    double u1 = get_random_number(h + 700, rnd);
+    double u2 = get_random_number(h + 701, rnd);
+    if(u1 < 1e-20)
+        u1 = 1e-20;
+    double z = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+    double logR_err = logR + 0.5 * z;
+    if(logR_err < -1.0) logR_err = -1.0;
+    if(logR_err >  2.0) logR_err =  2.0;
+    return pow(10.0, logR_err);
 }
 
 static int make_particle_star(int child, int parent, int placement, double Time, const double GravInternal, const RandTable * const rnd)

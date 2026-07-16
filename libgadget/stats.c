@@ -9,6 +9,7 @@
 #include "cooling.h"
 #include "slotsmanager.h"
 #include "stats.h"
+#include "scinfo.h"
 #include "walltime.h"
 #include "cooling_qso_lightup.h"
 #include "utils/endrun.h"
@@ -50,6 +51,7 @@ static struct stats_params
     int OutputEnergyDebug;
     int WriteBlackHoleDetails; /* write BH details every time step*/
     size_t MaxBlackHoleDetails; /* Max size of bh details file*/
+    int StarClusterDetails; /* write one record per seeded star cluster*/
 } StatsParams;
 
 void
@@ -63,6 +65,7 @@ set_stats_params(ParameterSet * ps)
         StatsParams.OutputEnergyDebug = param_get_int(ps, "OutputEnergyDebug");
         StatsParams.WriteBlackHoleDetails = param_get_int(ps,"WriteBlackHoleDetails");
         StatsParams.MaxBlackHoleDetails = 1024L*1024L*1024L*param_get_int(ps, "MaxBlackHoleDetails");
+        StatsParams.StarClusterDetails = param_get_int(ps, "StarClusterDetails");
     }
     MPI_Bcast(&StatsParams, sizeof(struct stats_params), MPI_BYTE, 0, MPI_COMM_WORLD);
 }
@@ -87,6 +90,7 @@ open_outputfiles(int RestartSnapNum, struct OutputFD * fds, const char * OutputD
     fds->FdBlackholeDetails = NULL;
     fds->TotalBHDetailsBytesWritten = 0;
     fds->BHDetailNumber = 0;
+    fds->FdStarClusterDetails = NULL;
     fds->FdHelium = NULL;
 
     if(RestartSnapNum != -1) {
@@ -103,6 +107,18 @@ open_outputfiles(int RestartSnapNum, struct OutputFD * fds, const char * OutputD
             endrun(1, "Failed to open blackhole detail %s\n", buf);
         myfree(buf);
     }
+
+    /* Per-seeded-star-cluster detail file (one per rank).  Recording is additionally
+     * gated by the seeding path itself, which only runs under a star-cluster seeding
+     * mode, so an empty file just means no star cluster was seeded on this rank. */
+    if(BlackHoleOn && StatsParams.StarClusterDetails){
+        buf = fastpm_strdup_printf("%s/%s%s/%06X", OutputDir,"StarClusterDetails",postfix,ThisTask);
+        fastpm_path_ensure_dirname(buf);
+        if(!(fds->FdStarClusterDetails = fopen(buf,"a")))
+            endrun(1, "Failed to open star cluster detail %s\n", buf);
+        myfree(buf);
+    }
+    scinfo_set_file(fds->FdStarClusterDetails);
 
     /* only the root processors writes to the log files */
     if(ThisTask != 0) {
@@ -208,6 +224,10 @@ close_outputfiles(struct OutputFD * fds)
         fclose(fds->FdBlackHoles);
     if(fds->FdBlackholeDetails)
         fclose(fds->FdBlackholeDetails);
+    if(fds->FdStarClusterDetails) {
+        fclose(fds->FdStarClusterDetails);
+        scinfo_set_file(NULL);
+    }
 }
 
 

@@ -289,6 +289,11 @@ begrun(const int RestartSnapNum, struct header_data * head)
     if(All.BlackHoleOn || head->NTotalInit[5] > 0)
         slots_set_enabled(5, sizeof(struct bh_particle_data), SlotsManager);
 
+    /* StarClusterBHDyn=2: warn (don't abort) if the minimum seeding cluster mass
+     * is below the dark matter particle mass (header MassTable[1]). */
+    if(All.BlackHoleOn)
+        blackhole_check_seed_dm_resolution(head->MassTable[1]);
+
     const struct UnitSystem units = get_unitsystem(head->UnitLength_in_cm, head->UnitMass_in_g, head->UnitVelocity_in_cm_per_s);
     /* convert some physical input parameters to internal units */
     init_cosmology(&All.CP, head->TimeIC, units);

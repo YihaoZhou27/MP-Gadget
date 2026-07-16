@@ -77,8 +77,17 @@ int get_bh_tidalfield_on(void);
 /* Returns the SeedBHDynMass parameter value */
 double get_bh_seed_dyn_mass(void);
 
-/* Returns 1 if StarClusterBHDyn is enabled (SC mass included in P.Mass) */
+/* Returns the SeedBlackHoleMass parameter value (code mass units) */
+double get_bh_seed_mass(void);
+
+/* Returns 1 only for StarClusterBHDyn=1 (evolving SC mass attached to the BH and
+ * included in P.Mass). Mode 2 returns 0: no SC payload is attached; the seed
+ * cluster mass (init_Msc) only sets a frozen per-BH dynamical-mass floor. */
 int get_starcluster_bhdyn_on(void);
+
+/* Warn (not abort) when StarClusterBHDyn=2 and MinMscForBHseed is below the dark
+ * matter particle mass (dm_particle_mass = header MassTable[1], code units). */
+void blackhole_check_seed_dm_resolution(double dm_particle_mass);
 
 /* Does the black hole feedback and accretion.
  * TimeNextSeedingCheck is the time of the BH next seeding check.
@@ -93,8 +102,11 @@ void blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceT
  * The parent particle is converted IN PLACE into the black hole (keeping its ID
  * and full mass): a gas particle (type 0) for gas/halo-based seeding, or a star
  * particle (type 4) for star-cluster seeding. The parent is consumed, and its
- * mass is carried over as the BH's initial Mtrack. */
-void blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, int BHNgbAtSeeding, MyFloat StarClusterMetallicity, const float * StarClusterMetals);
+ * mass is carried over as the BH's initial Mtrack.
+ * SeedMassOverride > 0 sets BHP.Mass directly (MbhMscRelationCWmodel: the
+ * Williams et al. 2026 VMS mass), bypassing the SeedBlackHoleMass /
+ * BHseedMassScaleMsc prescription; pass 0 for the normal seed-mass logic. */
+void blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, int BHNgbAtSeeding, MyFloat StarClusterMetallicity, const float * StarClusterMetals, MyFloat SeedMassOverride);
 
 /* Seed black holes from individual star particles whose star cluster mass
  * exceeds MinMscForBHseed.  Called every PM step when BlackholeSeedSCparticle=1,

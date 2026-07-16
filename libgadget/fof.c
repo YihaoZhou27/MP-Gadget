@@ -36,9 +36,17 @@
 
 #include "fof.h"
 #include "secondfof.h"   /* get_seed_in_secfof(): gate BHNgbAtSeeding to the secFOF seed path */
+#include "scinfo.h"      /* scinfo_record_seed(): per-seeded-star-cluster detail records */
+#include "cwmodel.h"     /* cw_final_vms_mass_msun(): Williams et al. 2026 VMS seed-mass model */
 
 #define LARGE 1e29
 #define MAXITER 400
+
+/* CWmodelMetallicity modes: how the per-cluster metallicity fed to the CW
+ * seed-mass model is chosen (see cw_sample_cluster_met). */
+#define CW_MET_AVE       0   /* host group's unseeded-star metal mass ratio (default) */
+#define CW_MET_LOGNORMAL 1   /* per-cluster Gaussian draw in log10(Z) (equal-weight mean/std) */
+#define CW_MET_UNIFORM   2   /* per-cluster uniform draw in log10(Z) on [min,max] */
 
 struct FOFParams
 {
@@ -69,7 +77,26 @@ struct FOFParams
     int SeedSecFOFcomSample; /* combined per-secFOF star-cluster sampling for BH seeding */
     int SeedSecFOFcomSampleParticle; /* per-star-particle sampling variant of SeedSecFOFcomSample */
     int SeedInSecFOFMultipleSeeds; /* if 1, seed multiple BHs in a secFOF group with M_SC > 1e8 Msun */
-    int SeedInSecFOFRandomStarParticle; /* if 1, seed one BH per sampled cluster >= MinMscForBHseed at a random unseeded star */
+    /* SeedSecFOFcomSample seed aggregation: 1 = the combined per-secFOF draw is
+     * summed into ONE BH seed per group; 0 = per-cluster seeding (every sampled
+     * cluster >= MinMscForBHseed seeds its own BH on a distinct unseeded star). */
+    int SecFOFseedsumover;
+    /* Host-star choice of the per-cluster mode (SecFOFseedsumover=0): 1 = random
+     * unseeded stars; 0 = the unseeded stars with the largest f(Z)-scaled
+     * cluster-forming mass f(Z)*ClusterMass. Ignored when SecFOFseedsumover=1. */
+    int SeedInSecFOFRandomStarParticle;
+    /* if 1, the per-cluster (SecFOFseedsumover=0) seed mass is M_VMS from the
+     * Williams et al. 2026 stellar-collision model (cwmodel.c).
+     * BHseedMassScaleMsc is ignored; SeedBlackHoleMass is the lower seed-mass
+     * limit: clusters with M_VMS < SeedBlackHoleMass seed no BH. */
+    int MbhMscRelationCWmodel;
+    /* density power-law index alpha (rho ~ r^-alpha) for the CW seed-mass model;
+     * only used when MbhMscRelationCWmodel=1 (default 1.2) */
+    double CWmodelAlpha;
+    /* CWmodelMetallicity: per-cluster metallicity mode of the CW seed-mass model
+     * (CW_MET_* below); -1 = unrecognised string (an error when
+     * MbhMscRelationCWmodel=1). Only used when MbhMscRelationCWmodel=1. */
+    int CWmodelMetallicity;
     /* if 1, a secFOF group with unseeded Sum(m*Gamma) > 1e8 Msun is restricted to
      * the gravitationally bound unseeded stars before SeedSecFOFcomSample seeding */
     int SeedSeedFOFMassiveBoundStar;
@@ -107,26 +134,54 @@ void set_fof_params(ParameterSet * ps)
         fof_params.SeedSecFOFcomSample = param_get_int(ps, "SeedSecFOFcomSample");
         fof_params.SeedSecFOFcomSampleParticle = param_get_int(ps, "SeedSecFOFcomSampleParticle");
         fof_params.SeedInSecFOFMultipleSeeds = param_get_int(ps, "SeedInSecFOFMultipleSeeds");
+        fof_params.SecFOFseedsumover = param_get_int(ps, "SecFOFseedsumover");
         fof_params.SeedInSecFOFRandomStarParticle = param_get_int(ps, "SeedInSecFOFRandomStarParticle");
+        fof_params.MbhMscRelationCWmodel = param_get_int(ps, "MbhMscRelationCWmodel");
+        fof_params.CWmodelAlpha = param_get_double(ps, "CWmodelAlpha");
+        /* CWmodelMetallicity: string -> mode; -1 keeps the unrecognised value an
+         * error below when the CW model is actually enabled. */
+        const char * cwmet = param_get_string(ps, "CWmodelMetallicity");
+        if(strcmp(cwmet, "ave") == 0)
+            fof_params.CWmodelMetallicity = CW_MET_AVE;
+        else if(strcmp(cwmet, "lognormal") == 0)
+            fof_params.CWmodelMetallicity = CW_MET_LOGNORMAL;
+        else if(strcmp(cwmet, "uniform") == 0)
+            fof_params.CWmodelMetallicity = CW_MET_UNIFORM;
+        else
+            fof_params.CWmodelMetallicity = -1;
         fof_params.SeedSeedFOFMassiveBoundStar = param_get_int(ps, "SeedSeedFOFMassiveBoundStar");
         fof_params.BHseedMassScaleMsc = param_get_int(ps, "BHseedMassScaleMsc");
         fof_params.MinMscForBHseed = param_get_double(ps, "MinMscForBHseed");
 
         if(fof_params.BlackHoleSeedStarCluster && fof_params.BHseedMassScaleMsc && fof_params.MinMscForBHseed <= 0)
             endrun(1, "MinMscForBHseed must be > 0 when BlackHoleSeedStarCluster and BHseedMassScaleMsc are enabled.\n");
-        /* SeedInSecFOFRandomStarParticle is a self-contained multi-seed mechanism on the
-         * combined per-secFOF draw; it is mutually exclusive with the other secFOF
+        /* SecFOFseedsumover=0 is a self-contained per-cluster multi-seed mechanism on
+         * the combined per-secFOF draw; it is mutually exclusive with the other secFOF
          * sampling-variant / multi-seed flags. */
-        if(fof_params.SeedInSecFOFRandomStarParticle) {
+        if(!fof_params.SecFOFseedsumover) {
             if(!fof_params.SeedSecFOFcomSample)
-                endrun(1, "SeedInSecFOFRandomStarParticle=1 requires SeedSecFOFcomSample=1.\n");
+                endrun(1, "SecFOFseedsumover=0 requires SeedSecFOFcomSample=1.\n");
             if(fof_params.SeedSecFOFcomSampleParticle)
-                endrun(1, "SeedInSecFOFRandomStarParticle=1 is incompatible with SeedSecFOFcomSampleParticle=1.\n");
+                endrun(1, "SecFOFseedsumover=0 is incompatible with SeedSecFOFcomSampleParticle=1.\n");
             if(fof_params.SeedInSecFOFMultipleSeeds)
-                endrun(1, "SeedInSecFOFRandomStarParticle=1 is incompatible with SeedInSecFOFMultipleSeeds=1.\n");
+                endrun(1, "SecFOFseedsumover=0 is incompatible with SeedInSecFOFMultipleSeeds=1.\n");
             if(fof_params.SeedSeedFOFMassiveBoundStar)
-                endrun(1, "SeedInSecFOFRandomStarParticle=1 is incompatible with SeedSeedFOFMassiveBoundStar=1.\n");
+                endrun(1, "SecFOFseedsumover=0 is incompatible with SeedSeedFOFMassiveBoundStar=1.\n");
         }
+        else if(fof_params.SeedInSecFOFRandomStarParticle)
+            message(0, "SecFOFseedsumover=1: SeedInSecFOFRandomStarParticle is ignored (it now only "
+                       "selects the host stars of the per-cluster mode SecFOFseedsumover=0).\n");
+        if(fof_params.MbhMscRelationCWmodel &&
+           (fof_params.SecFOFseedsumover || !fof_params.SeedSecFOFcomSample))
+            endrun(1, "MbhMscRelationCWmodel=1 requires SeedSecFOFcomSample=1 and SecFOFseedsumover=0.\n");
+        if(fof_params.MbhMscRelationCWmodel &&
+           (fof_params.CWmodelAlpha <= 0 || fof_params.CWmodelAlpha >= 3))
+            endrun(1, "CWmodelAlpha must be in (0, 3); got %g.\n", fof_params.CWmodelAlpha);
+        if(fof_params.MbhMscRelationCWmodel && fof_params.CWmodelMetallicity < 0)
+            endrun(1, "CWmodelMetallicity must be 'ave', 'lognormal' or 'uniform'; got '%s'.\n", cwmet);
+        if(fof_params.MbhMscRelationCWmodel && fof_params.BHseedMassScaleMsc)
+            message(0, "MbhMscRelationCWmodel=1: BHseedMassScaleMsc=1 is ignored; the seed mass is "
+                       "M_VMS from the CW model, with SeedBlackHoleMass as the lower seed-mass limit.\n");
         fof_params.FOFPotentialMin = param_get_int(ps, "FOFPotentialMin");
     }
     MPI_Bcast(&fof_params, sizeof(struct FOFParams), MPI_BYTE, 0, MPI_COMM_WORLD);
@@ -761,6 +816,19 @@ static void fof_reduce_group(void * pdst, void * psrc) {
     gdst->StarClusterMassSampleUnseeded += gsrc->StarClusterMassSampleUnseeded;
     gdst->SCMass_seeded += gsrc->SCMass_seeded;
     gdst->NStarUnseeded += gsrc->NStarUnseeded;
+    gdst->SCMetalMassUnseeded += gsrc->SCMetalMassUnseeded;
+    gdst->SCClusterMassUnseededInit += gsrc->SCClusterMassUnseededInit;
+    /* Unseeded-star metallicity distribution: min/max combine, sums/hist add. */
+    if(gsrc->SCMetUnseededMin < gdst->SCMetUnseededMin)
+        gdst->SCMetUnseededMin = gsrc->SCMetUnseededMin;
+    if(gsrc->SCMetUnseededMax > gdst->SCMetUnseededMax)
+        gdst->SCMetUnseededMax = gsrc->SCMetUnseededMax;
+    gdst->SCMetUnseededSum  += gsrc->SCMetUnseededSum;
+    gdst->SCMetUnseededSum2 += gsrc->SCMetUnseededSum2;
+    gdst->SCMetUnseededLogSum  += gsrc->SCMetUnseededLogSum;
+    gdst->SCMetUnseededLogSum2 += gsrc->SCMetUnseededLogSum2;
+    for(j = 0; j < SC_MET_HIST_NBIN; j++)
+        gdst->SCMetUnseededHist[j] += gsrc->SCMetUnseededHist[j];
     gdst->SCcomMcut += gsrc->SCcomMcut;
     gdst->GasMetalMass += gsrc->GasMetalMass;
     gdst->StellarMetalMass += gsrc->StellarMetalMass;
@@ -805,6 +873,76 @@ static void fof_reduce_group(void * pdst, void * psrc) {
 
 }
 
+/* Map an unseeded-star metallicity Z (absolute mass fraction) to its bin in the
+ * per-group SCMetUnseededHist.  Z<=0 (pristine) and Z below the floor land in the
+ * underflow bin 0; Z above the ceiling in the overflow bin NBIN-1. */
+static int sc_met_hist_bin(double Z)
+{
+    if(Z <= 0)
+        return 0;
+    double lz = log10(Z);
+    if(lz <= SC_MET_HIST_LOGMIN)
+        return 0;
+    if(lz >= SC_MET_HIST_LOGMAX)
+        return SC_MET_HIST_NBIN - 1;
+    const double dlog = (SC_MET_HIST_LOGMAX - SC_MET_HIST_LOGMIN) / (SC_MET_HIST_NBIN - 2);
+    int b = 1 + (int) ((lz - SC_MET_HIST_LOGMIN) / dlog);
+    if(b < 1) b = 1;
+    if(b > SC_MET_HIST_NBIN - 2) b = SC_MET_HIST_NBIN - 2;
+    return b;
+}
+
+/* Percentile p in [0,1] of the unseeded-star metallicity from the fixed log10(Z)
+ * histogram (N total stars); zmin/zmax are the exact tracked extrema used for the
+ * under/overflow bins.  Interior bins interpolate linearly in log-Z. */
+static double sc_met_hist_percentile(const float * hist, int64_t N,
+                                     double zmin, double zmax, double p)
+{
+    if(N <= 0)
+        return 0;
+    const double dlog = (SC_MET_HIST_LOGMAX - SC_MET_HIST_LOGMIN) / (SC_MET_HIST_NBIN - 2);
+    double target = p * (double) N;
+    double cum = 0;
+    int b;
+    for(b = 0; b < SC_MET_HIST_NBIN; b++) {
+        double c = hist[b];
+        if(cum + c >= target || b == SC_MET_HIST_NBIN - 1) {
+            if(b == 0)                      /* underflow (incl. pristine): exact min */
+                return zmin;
+            if(b == SC_MET_HIST_NBIN - 1)   /* overflow: exact max */
+                return zmax;
+            double frac = c > 0 ? (target - cum) / c : 0;   /* within-bin position */
+            double z = pow(10.0, SC_MET_HIST_LOGMIN + (b - 1 + frac) * dlog);
+            if(z < zmin) z = zmin;
+            if(z > zmax) z = zmax;
+            return z;
+        }
+        cum += c;
+    }
+    return zmax;
+}
+
+/* Fill the StarClusterDetails unseeded-star metallicity distribution (equal
+ * weight per star) from a fully reduced host group: exact min/max, standard
+ * deviation from the running sums, and 25/50/75 percentiles from the histogram.
+ * All zero when the group has no unseeded star. */
+static void sc_met_unseeded_stats(const struct Group * g, struct SCmetdist * md)
+{
+    int64_t N = g->NStarUnseeded;
+    if(N <= 0) {
+        memset(md, 0, sizeof(*md));
+        return;
+    }
+    md->min = g->SCMetUnseededMin;
+    md->max = g->SCMetUnseededMax;
+    double mean = g->SCMetUnseededSum / (double) N;
+    double var = g->SCMetUnseededSum2 / (double) N - mean * mean;
+    md->std = var > 0 ? sqrt(var) : 0;
+    md->p25    = sc_met_hist_percentile(g->SCMetUnseededHist, N, md->min, md->max, 0.25);
+    md->median = sc_met_hist_percentile(g->SCMetUnseededHist, N, md->min, md->max, 0.50);
+    md->p75    = sc_met_hist_percentile(g->SCMetUnseededHist, N, md->min, md->max, 0.75);
+}
+
 static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
 
     /* My local number of particles contributing to the full catalogue. */
@@ -817,6 +955,7 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
         gdst->seed_index_star = gdst->seed_task_star = -1;
         gdst->MaxStarClusterMass = 0;
         gdst->PotMin = 1e30;
+        gdst->SCMetUnseededMin = 1e30;   /* running min sentinel (Z>=0, so max starts at 0) */
     }
 
     gdst->Length ++;
@@ -868,6 +1007,30 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
             gdst->StarClusterMassSampleUnseeded += STARP(index).StarClusterMass_sample;
             gdst->SCcomMcut += P[index].Mass;
             gdst->NStarUnseeded++;
+
+            /* Unseeded-star metallicity for StarClusterDetails: metal mass (frozen
+             * BirthMetallicity * frozen initClusterMass) and the raw Gamma*m_star
+             * denominator (initClusterMass), both over unseeded stars only. */
+            gdst->SCMetalMassUnseeded += STARP(index).BirthMetallicity * STARP(index).initClusterMass;
+            gdst->SCClusterMassUnseededInit += STARP(index).initClusterMass;
+
+            /* Per-particle (equal-weight) BirthMetallicity distribution of the
+             * unseeded stars for StarClusterDetails: exact min/max, sums for the
+             * standard deviation, and a log10(Z) histogram for the quartiles. */
+            {
+                double zb = STARP(index).BirthMetallicity;
+                if(zb < gdst->SCMetUnseededMin) gdst->SCMetUnseededMin = zb;
+                if(zb > gdst->SCMetUnseededMax) gdst->SCMetUnseededMax = zb;
+                gdst->SCMetUnseededSum  += zb;
+                gdst->SCMetUnseededSum2 += zb * zb;
+                gdst->SCMetUnseededHist[sc_met_hist_bin(zb)] += 1;
+                /* log10(Z) sums (equal weight) for the CW-model 'lognormal'
+                 * metallicity draw; pristine/tiny Z floored like the histogram. */
+                double lzb = (zb > 0) ? log10(zb) : SC_MET_HIST_LOGMIN;
+                if(lzb < SC_MET_HIST_LOGMIN) lzb = SC_MET_HIST_LOGMIN;
+                gdst->SCMetUnseededLogSum  += lzb;
+                gdst->SCMetUnseededLogSum2 += lzb * lzb;
+            }
 
             /* Track the unseeded star with the largest (f(Z)-scaled) ClusterMass
              * (or StarClusterMass_sample when StarClusterSampling=1) as the seed
@@ -1721,7 +1884,23 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
      * at seeding (LenType[5], excludes this seed).  Only meaningful for the secFOF
      * seed path (SeedInSecFOFasStarCluster); 0 for the primary-FOF seed path. */
     int bh_ngb_at_seeding = get_seed_in_secfof() ? g->LenType[5] : 0;
-    blackhole_make_one(index, atime, rnd, seeded_by_starcluster, payload_mass, scaling_mass, init_msc, init_msc_sample, capped_star_mass, bh_ngb_at_seeding, sc_metallicity, sc_metals);
+    blackhole_make_one(index, atime, rnd, seeded_by_starcluster, payload_mass, scaling_mass, init_msc, init_msc_sample, capped_star_mass, bh_ngb_at_seeding, sc_metallicity, sc_metals, 0);
+
+    /* StarClusterDetails: one record per star-cluster seed (no-op unless enabled).
+     * scaling_mass is this seed's cluster mass (com: bhseed_msc; else the mode's
+     * seeding SC mass), already carrying the multi-seed share for seed 1. */
+    if(seeded_by_starcluster) {
+        double sc_met = g->SCClusterMassUnseededInit > 0 ?
+            g->SCMetalMassUnseeded / g->SCClusterMassUnseededInit : 0;
+        struct SCmetdist md;
+        sc_met_unseeded_stats(g, &md);
+        /* Reff = 0: not the per-cluster (SecFOFseedsumover=0) path.
+         * Mbh_seed = the just-made BH's subgrid mass (the particle at index was
+         * converted in place by blackhole_make_one). */
+        scinfo_record_seed(index, atime, scaling_mass, g->StarClusterMass,
+                           g->SCMass_seeded, sc_met, 0, BHP(index).Mass,
+                           g->LenType[5], g->base.GrNr, &md);
+    }
 }
 
 /* ===================== Per-secFOF multi-seeding (M_SC > 1e8 Msun) =====================
@@ -1776,6 +1955,11 @@ struct ms_group {
     int      bh_ngb;            /* BHNgbAtSeeding: BH count in the host secFOF (LenType[5]) */
     double   metallicity;       /* group mass-weighted metallicity */
     float    metals[NMETALS];
+    /* StarClusterDetails record fields (per host group). */
+    double   sc_mass_total;     /* group total Sum(Gamma*m_star) over all stars (StarClusterMass) */
+    double   scmass_seeded;     /* group consumed SC mass (SCMass_seeded, as-is) */
+    double   met_unseeded;      /* unseeded-star metal mass ratio (StarClusterDetails metallicity) */
+    struct SCmetdist metdist;   /* unseeded-star metallicity distribution (min/max/median/quartiles/std) */
 };
 
 static int cmp_ms_group_grnr(const void * a, const void * b)
@@ -1984,6 +2168,12 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
             for(j = 0; j < NMETALS; j++)
                 m->metals[j] = g->StarClusterMetalElemMass[j] / g->StarClusterMass;
         }
+        /* StarClusterDetails record fields (per host group). */
+        m->sc_mass_total = g->StarClusterMass;
+        m->scmass_seeded = g->SCMass_seeded;
+        m->met_unseeded = g->SCClusterMassUnseededInit > 0 ?
+            g->SCMetalMassUnseeded / g->SCClusterMassUnseededInit : 0;
+        sc_met_unseeded_stats(g, &m->metdist);
     }
     struct ms_group * msg = (struct ms_group *) mymalloc("MSG", n_msg * sizeof(struct ms_group));
     MPI_Allgatherv(local_msg, n_local * (int) sizeof(struct ms_group), MPI_BYTE,
@@ -2116,7 +2306,12 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
                 blackhole_make_one(cc->local_index, atime, rnd, 1,
                                    (MyFloat) m->per_payload, (MyFloat) m->per_scaling,
                                    (MyFloat) m->per_init_msc, (MyFloat) m->per_init_msc_sample,
-                                   (MyFloat) m->capped, m->bh_ngb, (MyFloat) m->metallicity, m->metals);
+                                   (MyFloat) m->capped, m->bh_ngb, (MyFloat) m->metallicity, m->metals, 0);
+                /* StarClusterDetails: this extra seed's cluster mass is per_scaling.
+                 * Reff = 0: not the per-cluster (SecFOFseedsumover=0) path. */
+                scinfo_record_seed(cc->local_index, atime, m->per_scaling, m->sc_mass_total,
+                                   m->scmass_seeded, m->met_unseeded, 0,
+                                   BHP(cc->local_index).Mass, m->bh_ngb, m->GrNr, &m->metdist);
                 n_conv_local++;
             }
             message(0, "    seed %d ID=%lu pos=(%.5g, %.5g, %.5g)\n",
@@ -2145,21 +2340,31 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
     myfree(rc);
 }
 
-/* ===================== SeedInSecFOFRandomStarParticle =====================
+/* ============== per-cluster secFOF seeding (SecFOFseedsumover=0) ==============
  * Combined per-secFOF draw, but every sampled cluster with mass >= MinMscForBHseed
  * seeds its OWN BH (mass SeedBlackHoleMass*m_sc when BHseedMassScaleMsc=1, else
- * SeedBlackHoleMass), each hosted on a randomly chosen distinct unseeded star of the
- * group.  Mutually exclusive with the other secFOF multi-seed / sampling-variant flags
- * (checked in set_fof_params).  Distributed exactly like fof_secfof_extra_seeds: the
+ * SeedBlackHoleMass), each hosted on a distinct unseeded star of the group chosen by
+ * SeedInSecFOFRandomStarParticle: 1 = randomly sampled; 0 = the stars with the
+ * largest f(Z)-scaled cluster-forming mass f(Z)*ClusterMass.  Mutually exclusive
+ * with the other secFOF multi-seed / sampling-variant flags (checked in
+ * set_fof_params).  Distributed exactly like fof_secfof_extra_seeds: the
  * per-group cluster-mass lists and the unseeded candidate stars are gathered to every
  * rank, the selection is identical everywhere, and each rank converts only its own
  * stars. */
 
-/* A group eligible for random-star multi-seeding: passes Gate 1 and holds >= 1 unseeded
+/* Per-cluster secFOF seeding active: the combined draw is NOT summed into one
+ * seed per group (SeedSecFOFcomSample=1 with SecFOFseedsumover=0). */
+static int secfof_percluster_seeding(void)
+{
+    return fof_params.BlackHoleSeedStarCluster && fof_params.SeedSecFOFcomSample
+        && !fof_params.SecFOFseedsumover;
+}
+
+/* A group eligible for per-cluster multi-seeding: passes Gate 1 and holds >= 1 unseeded
  * star.  Evaluated on the group's owner (reduced properties are complete there). */
 static int secfof_random_group_eligible(const struct Group * g)
 {
-    if(!fof_params.SeedInSecFOFRandomStarParticle || !fof_params.BlackHoleSeedStarCluster)
+    if(!secfof_percluster_seeding())
         return 0;
     if(g->NStarUnseeded < 1)
         return 0;
@@ -2168,7 +2373,7 @@ static int secfof_random_group_eligible(const struct Group * g)
     return 1;
 }
 
-/* Whether particle i can HOST a random-star BH seed: an unseeded type-4 star (in a group)
+/* Whether particle i can HOST a per-cluster BH seed: an unseeded type-4 star (in a group)
  * with a positive metallicity-dependent seeding factor f(Z). The group sampling mass is
  * Sum(f(Z)*ClusterMass), so f(Z)=0 stars contribute nothing and must not host a seed; the
  * host pool, seed-cap and Seeded-flagging are all restricted to f(Z)>0 stars to match. */
@@ -2187,6 +2392,16 @@ struct rs_group {
     uint64_t SeedStarID;    /* RNG seed for the combined draw */
     double   capped;        /* SCcomMcut (group unseeded stellar mass) */
     int      bh_ngb;        /* BHNgbAtSeeding = host secFOF LenType[5] */
+    /* StarClusterDetails record fields (per host group). */
+    double   sc_mass_total; /* group total Sum(Gamma*m_star) over all stars (StarClusterMass) */
+    double   scmass_seeded; /* group consumed SC mass (SCMass_seeded, as-is) */
+    double   met_unseeded;  /* unseeded-star metal mass ratio (StarClusterDetails metallicity) */
+    struct SCmetdist metdist; /* unseeded-star metallicity distribution (min/max/median/quartiles/std) */
+    /* Equal-weight mean/std of the unseeded stars' log10(BirthMetallicity)
+     * (floored at SC_MET_HIST_LOGMIN), for the CWmodelMetallicity 'lognormal'
+     * per-cluster draw; the 'uniform' bounds come from metdist.min/max. */
+    double   met_logmean;
+    double   met_logstd;
 };
 static int cmp_rs_group_grnr(const void * a, const void * b)
 {
@@ -2194,10 +2409,12 @@ static int cmp_rs_group_grnr(const void * a, const void * b)
     return (x > y) - (x < y);
 }
 
-/* One unseeded candidate star for random-star seeding. */
+/* One unseeded candidate star for per-cluster seeding. */
 struct rs_cand {
     int64_t  GrNr;
-    double   key;               /* reproducible random ordering key in [0,1) */
+    double   key;               /* ordering key: reproducible random in [0,1)
+                                 * (SeedInSecFOFRandomStarParticle=1) or
+                                 * -f(Z)*ClusterMass (=0, largest first) */
     uint64_t ID;
     float    metallicity;       /* host star's frozen BirthMetallicity */
     float    metals[NMETALS];   /* species mass fractions, rescaled to sum to metallicity */
@@ -2221,13 +2438,51 @@ static double rs_star_key(uint64_t id, const RandTable * const rnd)
     return get_random_number(h, rnd);
 }
 
-/* Upper bound on the number of random-star seeds this rank will convert, used to
+/* Per-cluster metallicity fed to the CW seed-mass model (CWmodelMetallicity):
+ *   'ave'       the host group's unseeded-star metal mass ratio (every cluster);
+ *   'lognormal' log10(Z) ~ Normal(met_logmean, met_logstd) of the group's
+ *               unseeded stars (equal weight per star), Box-Muller, clipped to
+ *               the group's [min,max] log10(Z);
+ *   'uniform'   log10(Z) ~ Uniform[log10(Zmin), log10(Zmax)] of the group.
+ * log10 bounds are floored at SC_MET_HIST_LOGMIN, matching the accumulated log
+ * sums (covers pristine Z=0).  The draw mixes the host star ID (as rs_star_key)
+ * with stream offsets +800/+801, clear of the mass sampler's and the reff
+ * sampler's (+700/+701) streams, so every rank computes the same Z for the same
+ * cluster. */
+static double cw_sample_cluster_met(const struct rs_group * m, uint64_t star_id,
+                                    const RandTable * const rnd)
+{
+    if(fof_params.CWmodelMetallicity == CW_MET_AVE)
+        return m->met_unseeded;
+    double lzmin = (m->metdist.min > 0) ? log10(m->metdist.min) : SC_MET_HIST_LOGMIN;
+    if(lzmin < SC_MET_HIST_LOGMIN) lzmin = SC_MET_HIST_LOGMIN;
+    double lzmax = (m->metdist.max > 0) ? log10(m->metdist.max) : SC_MET_HIST_LOGMIN;
+    if(lzmax < lzmin) lzmax = lzmin;
+    uint64_t h = star_id * 6364136223846793005ULL + 1442695040888963407ULL;
+    double lz;
+    if(fof_params.CWmodelMetallicity == CW_MET_LOGNORMAL) {
+        double u1 = get_random_number(h + 800, rnd);
+        double u2 = get_random_number(h + 801, rnd);
+        if(u1 < 1e-20)
+            u1 = 1e-20;
+        double gauss = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+        lz = m->met_logmean + m->met_logstd * gauss;
+        if(lz < lzmin) lz = lzmin;      /* clip to the group's actual Z range */
+        if(lz > lzmax) lz = lzmax;
+    }
+    else {                              /* CW_MET_UNIFORM */
+        lz = lzmin + (lzmax - lzmin) * get_random_number(h + 800, rnd);
+    }
+    return pow(10.0, lz);
+}
+
+/* Upper bound on the number of per-cluster seeds this rank will convert, used to
  * pre-reserve BH slots.  Builds the global (GrNr, n_request) set (n_request from the
  * same deterministic draw used at placement) and counts local unseeded member stars in
  * those groups, capped at n_request per group.  All scratch freed in LIFO order. */
 static int64_t secfof_count_random_seed_ub(FOFGroups * fof, const RandTable * const rnd, MPI_Comm Comm)
 {
-    if(!fof_params.SeedInSecFOFRandomStarParticle || !fof_params.BlackHoleSeedStarCluster)
+    if(!secfof_percluster_seeding())
         return 0;
     int NTask;
     MPI_Comm_size(Comm, &NTask);
@@ -2293,11 +2548,11 @@ static int64_t secfof_count_random_seed_ub(FOFGroups * fof, const RandTable * co
     return cnt;
 }
 
-/* Place the random-star seeds.  BH slots were pre-reserved by the caller.  Collective:
+/* Place the per-cluster seeds.  BH slots were pre-reserved by the caller.  Collective:
  * every rank participates.  All scratch is mymalloc (low stack), freed in LIFO order. */
-static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTable * const rnd, MPI_Comm Comm)
+static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTable * const rnd, Cosmology * CP, MPI_Comm Comm)
 {
-    if(!fof_params.SeedInSecFOFRandomStarParticle || !fof_params.BlackHoleSeedStarCluster)
+    if(!secfof_percluster_seeding())
         return;
     int NTask, ThisTask;
     MPI_Comm_size(Comm, &NTask);
@@ -2305,6 +2560,21 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
     int64_t i;
     int t;
     const int bhdyn = get_starcluster_bhdyn_on();
+    /* MbhMscRelationCWmodel: age of the universe at seeding (flat matter+Lambda
+     * closed form, simulation cosmology), the code<->Msun conversion, and the
+     * lower seed-mass limit, all shared by every seed of this call.
+     * thresh_code = 1e8 Msun in code units (same conversion convention as the
+     * sampled cluster masses).  In this mode SeedBlackHoleMass is not the seed
+     * mass (and BHseedMassScaleMsc is ignored) but the FLOOR: clusters whose
+     * model M_VMS falls below it seed no BH. */
+    const double thresh_code = get_msc_multiseed_thresh_code();
+    const double seed_mass_floor_code = get_bh_seed_mass();
+    double t_uni_sec = 0;
+    if(fof_params.MbhMscRelationCWmodel) {
+        const double H0_cgs = CP->HubbleParam * HUBBLE;   /* s^-1 */
+        t_uni_sec = 2.0 / (3.0 * H0_cgs * sqrt(CP->OmegaLambda))
+            * asinh(sqrt(CP->OmegaLambda / CP->Omega0) * pow(atime, 1.5));
+    }
 
     /* ---- Phase 1: per-owned-group draw -> (rs_group, descending mass list). ---- */
     int n_local = 0;
@@ -2348,6 +2618,23 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         m->SeedStarID = (uint64_t) g->SeedStarID;
         m->capped = g->SCcomMcut;
         m->bh_ngb = get_seed_in_secfof() ? g->LenType[5] : 0;
+        /* StarClusterDetails record fields (per host group). */
+        m->sc_mass_total = g->StarClusterMass;
+        m->scmass_seeded = g->SCMass_seeded;
+        m->met_unseeded = g->SCClusterMassUnseededInit > 0 ?
+            g->SCMetalMassUnseeded / g->SCClusterMassUnseededInit : 0;
+        sc_met_unseeded_stats(g, &m->metdist);
+        /* Equal-weight log10(Z) mean/std of the unseeded stars for the
+         * CWmodelMetallicity 'lognormal' per-cluster draw. */
+        if(g->NStarUnseeded > 0) {
+            double lmean = g->SCMetUnseededLogSum / (double) g->NStarUnseeded;
+            double lvar = g->SCMetUnseededLogSum2 / (double) g->NStarUnseeded - lmean * lmean;
+            m->met_logmean = lmean;
+            m->met_logstd = lvar > 0 ? sqrt(lvar) : 0;
+        } else {
+            m->met_logmean = SC_MET_HIST_LOGMIN;
+            m->met_logstd = 0;
+        }
         off += n_req;
     }
     int64_t nmass_local = off;
@@ -2393,7 +2680,15 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         while(lo < hi) { int mid = lo + (hi - lo) / 2; if(all_rsg[mid].GrNr == key) { found = mid; break; } else if(all_rsg[mid].GrNr < key) lo = mid + 1; else hi = mid; }
         if(found < 0) continue;
         elig[e].GrNr = P[i].GrNr;
-        elig[e].key = rs_star_key((uint64_t) P[i].ID, rnd);
+        /* Host-star ordering: SeedInSecFOFRandomStarParticle=1 draws a reproducible
+         * random key; =0 ranks by descending f(Z)-scaled cluster-forming mass
+         * (negated so the ascending key sort takes the largest first, generalizing
+         * the sum-over mode's largest-f(Z)*ClusterMass host pick). */
+        if(fof_params.SeedInSecFOFRandomStarParticle)
+            elig[e].key = rs_star_key((uint64_t) P[i].ID, rnd);
+        else
+            elig[e].key = -get_seed_metallicity_factor(STARP(i).BirthMetallicity)
+                * STARP(i).ClusterMass;
         elig[e].ID = (uint64_t) P[i].ID;
         /* Host-star metallicity: frozen BirthMetallicity for the scalar; species mass
          * fractions taken from the star's current Metals[] but rescaled so they sum to
@@ -2448,7 +2743,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
     qsort(allc, n_call, sizeof(struct rs_cand), cmp_rs_cand);
 
     /* ---- Phase 3: identical selection on every rank; each converts its own stars. ---- */
-    int64_t n_placed = 0, n_short = 0, n_conv_local = 0;
+    int64_t n_placed = 0, n_short = 0, n_conv_local = 0, n_novms = 0;
     int ac = 0;
     for(i = 0; i < n_msg; i++) {
         struct rs_group * m = &all_rsg[i];
@@ -2462,13 +2757,67 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         for(s = 0; s < nsel; s++) {
             struct rs_cand * cc = &allc[bstart + s];
             double m_sc = all_masses[m->mass_offset + s];   /* descending; arbitrary->random star */
+            /* Effective radius from the size-mass relation (0.5 dex scatter,
+             * reproducibly keyed on the host star ID): recorded in the
+             * StarClusterDetails seed record, and the cluster size input of the
+             * CW seed-mass model.  Deterministic, so every rank agrees. */
+            double reff_pc = starcluster_sample_reff_pc(m_sc, (uint64_t) cc->ID, rnd);
+            /* MbhMscRelationCWmodel: seed mass = M_VMS of the Williams et al.
+             * 2026 collision model for this cluster (mass, virial radius
+             * r_max=1.4*Reff, host-group unseeded-star metal mass ratio, age of
+             * the universe), capped at the cluster mass.  Clusters at or above
+             * the model's mean-density cap (rho_mean >= 6e7 Msun/pc^3 inside
+             * r_max) bypass the collision model and get 0.01*M_sc instead
+             * (handled inside cw_final_vms_mass_msun).  BHseedMassScaleMsc is
+             * ignored in this mode; SeedBlackHoleMass instead acts as the LOWER
+             * seed-mass limit: a cluster whose M_VMS < SeedBlackHoleMass (which
+             * covers M_VMS=0, no net inflow -> no VMS forms) seeds no BH, but
+             * is consumed like the seeded ones (its host star stays in the
+             * group's Seeded=1 marking below).  Computed identically on every
+             * rank. */
+            MyFloat seed_mass_override = 0;
+            /* Metallicity written to this cluster's StarClusterDetails record:
+             * the Z actually fed to the CW model (= met_unseeded in 'ave' mode
+             * and outside the CW model). */
+            double z_record = m->met_unseeded;
+            if(fof_params.MbhMscRelationCWmodel) {
+                /* Per-cluster CW-model metallicity (CWmodelMetallicity mode);
+                 * keyed on the host star ID, so every rank agrees. */
+                double z_cw = cw_sample_cluster_met(m, cc->ID, rnd);
+                z_record = z_cw;
+                double m_sc_msun = (thresh_code > 0) ? m_sc / thresh_code * 1e8 : 0;
+                double mvms_msun = cw_final_vms_mass_msun(m_sc_msun, 1.4 * reff_pc,
+                                                          z_cw, t_uni_sec,
+                                                          fof_params.CWmodelAlpha);
+                if(mvms_msun > m_sc_msun)     /* the VMS cannot exceed its host cluster */
+                    mvms_msun = m_sc_msun;
+                double mvms_code = mvms_msun / 1e8 * thresh_code;
+                if(mvms_code < seed_mass_floor_code) {
+                    n_novms++;
+                    /* StarClusterDetails: record the skipped cluster too, with
+                     * Mbh_seed = 0 (no BH seeded; the candidate star stays a
+                     * star and supplies the record's ID/Pos). */
+                    if(cc->owner_task == ThisTask)
+                        scinfo_record_seed(cc->local_index, atime, m_sc, m->sc_mass_total,
+                                           m->scmass_seeded, z_record, reff_pc,
+                                           0, m->bh_ngb, m->GrNr, &m->metdist);
+                    continue;
+                }
+                seed_mass_override = (MyFloat) mvms_code;
+            }
             if(cc->owner_task == ThisTask) {
                 MyFloat payload = bhdyn ? (MyFloat) m_sc : 0;   /* StarClusterMass (dynamics + evolution) */
                 blackhole_make_one(cc->local_index, atime, rnd, 1,
                                    payload, (MyFloat) m_sc,
                                    (MyFloat) m_sc, (MyFloat) m_sc,
                                    (MyFloat) m->capped, m->bh_ngb,
-                                   (MyFloat) cc->metallicity, cc->metals);
+                                   (MyFloat) cc->metallicity, cc->metals,
+                                   seed_mass_override);
+                /* StarClusterDetails: this seed's cluster mass is the sampled m_sc;
+                 * Mbh_seed is the just-made BH's subgrid mass. */
+                scinfo_record_seed(cc->local_index, atime, m_sc, m->sc_mass_total,
+                                   m->scmass_seeded, z_record, reff_pc,
+                                   BHP(cc->local_index).Mass, m->bh_ngb, m->GrNr, &m->metdist);
                 n_conv_local++;
             }
             n_placed++;
@@ -2476,14 +2825,19 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         /* Shortage: more eligible clusters than unseeded stars available. */
         if(m->n_qualify > nsel) {
             n_short++;
-            message(0, "secFOF random-seed group GrNr=%ld: %d eligible cluster(s) >= MinMscForBHseed "
+            message(0, "secFOF per-cluster seeding group GrNr=%ld: %d eligible cluster(s) >= MinMscForBHseed "
                        "but only %d unseeded f(Z)>0 host star(s); seeded %d, skipped %d.\n",
                     (long) m->GrNr, m->n_qualify, navail, nsel, m->n_qualify - nsel);
         }
     }
 
-    message(0, "secFOF random-seed: %d group(s); placed %ld BH seed(s); %ld group(s) short of unseeded stars.\n",
-            n_msg, n_placed, n_short);
+    if(fof_params.MbhMscRelationCWmodel)
+        message(0, "secFOF per-cluster seeding: %d group(s); placed %ld BH seed(s) (CW-model VMS masses); "
+                   "%ld cluster(s) skipped with M_VMS < SeedBlackHoleMass; %ld group(s) short of unseeded stars.\n",
+                n_msg, n_placed, n_novms, n_short);
+    else
+        message(0, "secFOF per-cluster seeding: %d group(s); placed %ld BH seed(s); %ld group(s) short of unseeded stars.\n",
+                n_msg, n_placed, n_short);
     (void) n_conv_local;
 
     /* Flag every remaining seedable star (unseeded & f(Z)>0) of a seeded group (n_request >= 1)
@@ -2503,7 +2857,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
     }
     int64_t n_flag_tot = 0;
     MPI_Allreduce(&n_flag, &n_flag_tot, 1, MPI_INT64, MPI_SUM, Comm);
-    message(0, "secFOF random-seed: flagged Seeded=1 for %ld star(s) in seeded groups.\n", n_flag_tot);
+    message(0, "secFOF per-cluster seeding: flagged Seeded=1 for %ld star(s) in seeded groups.\n", n_flag_tot);
 
     /* Free all scratch in reverse allocation order. */
     myfree(allc);
@@ -3062,7 +3416,7 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
      * SeedSecFOFcomSampleParticle is on — tot_msc_fof summed from per-star draws,
      * computed collectively first by fof_secfof_particle_sample(). */
     if(fof_params.SeedSecFOFcomSample && fof_params.BlackHoleSeedStarCluster
-       && !fof_params.SeedInSecFOFRandomStarParticle) {
+       && fof_params.SecFOFseedsumover) {
         /* Restrict massive (> 1e8 Msun) groups to their gravitationally bound
          * unseeded stars BEFORE the sampler/gates run; overwrites the two input
          * fields (StarClusterMassUnseeded, SCcomMcut) in place. */
@@ -3157,8 +3511,9 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
     int64_t ntot_extra = 0;
     MPI_Allreduce(&n_extra_ub, &ntot_extra, 1, MPI_INT64, MPI_SUM, Comm);
 
-    /* SeedInSecFOFRandomStarParticle places all its seeds in fof_secfof_random_seeds
-     * (none go through the single-seed Nimport path), so reserve an upper bound here too. */
+    /* Per-cluster seeding (SecFOFseedsumover=0) places all its seeds in
+     * fof_secfof_random_seeds (none go through the single-seed Nimport path), so
+     * reserve an upper bound here too. */
     int64_t n_random_ub = secfof_count_random_seed_ub(fof, rnd, Comm);   /* local upper bound */
     int64_t ntot_random = 0;
     MPI_Allreduce(&n_random_ub, &ntot_random, 1, MPI_INT64, MPI_SUM, Comm);
@@ -3233,10 +3588,12 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
      * stars in place.  Collective (every rank participates). */
     fof_secfof_extra_seeds(fof, atime, rnd, Comm);
 
-    /* SeedInSecFOFRandomStarParticle: place one BH per sampled cluster >= MinMscForBHseed
-     * on a random unseeded star.  Self-contained multi-seed pass (mutually exclusive with
-     * the paths above); uses pre-reserved BH slots.  Collective (every rank participates). */
-    fof_secfof_random_seeds(fof, atime, rnd, Comm);
+    /* Per-cluster seeding (SecFOFseedsumover=0): place one BH per sampled cluster
+     * >= MinMscForBHseed on its chosen unseeded host star (random or largest
+     * f(Z)*ClusterMass, per SeedInSecFOFRandomStarParticle).  Self-contained
+     * multi-seed pass (mutually exclusive with the paths above); uses pre-reserved
+     * BH slots.  Collective (every rank participates). */
+    fof_secfof_random_seeds(fof, atime, rnd, CP, Comm);
 
     /* Optionally return the GrNr (and, for SeedSecFOFcomSampleParticle, the
      * per-group tot_msc_fof = BHSeedMsc and unseeded stellar mass = SCcomMcut) of

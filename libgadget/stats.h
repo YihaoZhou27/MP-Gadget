@@ -15,6 +15,7 @@ struct OutputFD
     FILE *FdBlackholeDetails;  /*!< file handle for BlackholeDetails binary file. */
     size_t TotalBHDetailsBytesWritten; /* total number of bytes written to blackhole details*/
     int BHDetailNumber; /* Records how many times we opened a new BH details file in this run*/
+    FILE *FdStarClusterDetails;  /*!< file handle for StarClusterDetails binary file (per seeded star cluster). */
     FILE *FdHelium; /* < file handle for the Helium reionization log file helium.txt */
 };
 

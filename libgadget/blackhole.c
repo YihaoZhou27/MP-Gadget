@@ -57,7 +57,16 @@ struct BlackholeParams
     double MinMscForBHseed; /* Minimum star cluster mass for BH seeding */
     int BlackholeSeedSCparticle; /* If 1, seed BH from individual star particles with SC mass >= MinMscForBHseed */
     int BHseedEveryTimestep; /* If 1, seed BH from SC particles every timestep (not just PM steps). Requires BlackholeSeedSCparticle=1. */
-    int StarClusterBHDyn; /* If 1, include star cluster mass in BH dynamical mass P[i].Mass; BH+SC treated as one body for dynamics */
+    int StarClusterBHDyn; /* 0: P.Mass = max(Mtrack, SeedBHDynMass).
+                           * 1: include the evolving star cluster mass in the BH dynamical
+                           *    mass, P.Mass = max(Mtrack + StarClusterMass, SeedBHDynMass);
+                           *    BH+SC treated as one body for dynamics.
+                           * 2: the star-cluster mass that seeded the BH (init_Msc) acts as a
+                           *    FROZEN per-BH dynamical-mass floor replacing SeedBHDynMass:
+                           *    P.Mass = max(Mtrack, init_Msc).  No SC payload is attached
+                           *    (no SC evolution / merger SC transfer, like mode 0); the floor
+                           *    never changes (mergers keep the accretor's own init_Msc);
+                           *    non-star-cluster seeds keep the SeedBHDynMass floor. */
     int BlackholeTidalField; /* If 1, compute tidal field strength for BH particles every timestep */
     int GWRecoilVelocityKick; /* If 1, apply GW recoil velocity kick to BH merger remnants */
     int GWRecoilSCKick; /* If 1, check if GW kick ejects BH from star cluster and zero SC mass */
@@ -137,8 +146,11 @@ void set_blackhole_params(ParameterSet * ps)
         blackhole_params.BlackholeSeedSCparticle = param_get_int(ps, "BlackholeSeedSCparticle");
         blackhole_params.BHseedEveryTimestep = param_get_int(ps, "BHseedEveryTimestep");
         blackhole_params.StarClusterBHDyn = param_get_int(ps, "StarClusterBHDyn");
+        if(blackhole_params.StarClusterBHDyn < 0 || blackhole_params.StarClusterBHDyn > 2)
+            endrun(1, "StarClusterBHDyn must be 0, 1 or 2 (got %d).\n", blackhole_params.StarClusterBHDyn);
         if(!blackhole_params.StarClusterOn && blackhole_params.StarClusterBHDyn) {
-            message(0, "StarClusterBHDyn=1 requires StarClusterOn=1. Forcing StarClusterBHDyn=0.\n");
+            message(0, "StarClusterBHDyn=%d requires StarClusterOn=1. Forcing StarClusterBHDyn=0.\n",
+                    blackhole_params.StarClusterBHDyn);
             blackhole_params.StarClusterBHDyn = 0;
         }
         blackhole_params.BlackholeTidalField = param_get_int(ps, "BlackholeTidalField");
@@ -172,10 +184,36 @@ get_bh_seed_dyn_mass(void)
     return blackhole_params.SeedBHDynMass;
 }
 
+double
+get_bh_seed_mass(void)
+{
+    return blackhole_params.SeedBlackHoleMass;
+}
+
 int
 get_starcluster_bhdyn_on(void)
 {
-    return blackhole_params.StarClusterBHDyn;
+    /* True only for mode 1: the evolving StarClusterMass payload is attached to
+     * the BH and included in P.Mass.  Mode 2 attaches NO payload (like mode 0):
+     * the seed cluster mass only sets a frozen per-BH dynamical-mass floor via
+     * init_Msc (see blackhole_make_one). */
+    return blackhole_params.StarClusterBHDyn == 1;
+}
+
+/* Warn (do NOT abort) when StarClusterBHDyn=2 is used with a minimum seeding
+ * cluster mass below the dark matter particle mass.  In mode 2 the seed cluster
+ * mass (>= MinMscForBHseed) sets the per-BH dynamical-mass floor, so a
+ * MinMscForBHseed below the DM particle mass means BH seeds can be lighter than
+ * the background DM particles.  dm_particle_mass is the header MassTable[1], in
+ * the same internal mass units as MinMscForBHseed. */
+void
+blackhole_check_seed_dm_resolution(double dm_particle_mass)
+{
+    if(blackhole_params.StarClusterBHDyn == 2 &&
+       blackhole_params.MinMscForBHseed < dm_particle_mass)
+        message(0, "WARNING: StarClusterBHDyn=2 but MinMscForBHseed (%g) < dark matter particle mass (%g); "
+                   "BH seeds may be lighter than the background dark matter particles.\n",
+                blackhole_params.MinMscForBHseed, dm_particle_mass);
 }
 
 /* accretion routines */
@@ -1297,15 +1335,22 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
         const MyFloat dynaccmass = accmass - BH_GET_PRIV(tw)->BH_accreted_StarClusterMass[PI];
         BHP(n).Mtrack += dynaccmass;
     }
-    /* P.Mass = max(Mtrack [+ StarClusterMass], SeedBHDynMass).
-     * StarClusterMass is included only when StarClusterBHDyn is on.
-     * When SeedBHDynMass == 0, the max just returns Mtrack [+ SC]. */
+    /* P.Mass = max(Mtrack [+ StarClusterMass], floor).
+     * StarClusterMass is included only in mode StarClusterBHDyn=1.
+     * Mode 2: the floor is the accretor's OWN frozen seed cluster mass
+     * (init_Msc, never modified by mergers) instead of SeedBHDynMass; the
+     * victim's full dynamical mass entered Mtrack above (no SC payloads exist
+     * in mode 2 from the secFOF paths, so accreted_StarClusterMass = 0).
+     * When the floor is 0, the max just returns Mtrack [+ SC]. */
     {
         double target = BHP(n).Mtrack;
-        if(blackhole_params.StarClusterBHDyn)
+        double dynfloor = blackhole_params.SeedBHDynMass;
+        if(blackhole_params.StarClusterBHDyn == 1)
             target += BHP(n).StarClusterMass;
-        if(target < blackhole_params.SeedBHDynMass)
-            target = blackhole_params.SeedBHDynMass;
+        else if(blackhole_params.StarClusterBHDyn == 2 && BHP(n).init_Msc > 0)
+            dynfloor = BHP(n).init_Msc;
+        if(target < dynfloor)
+            target = dynfloor;
         P[n].Mass = target;
     }
 
@@ -1379,7 +1424,7 @@ bh_powerlaw_seed_mass(const MyIDType ID, const RandTable * const rnd)
 }
 
 void
-blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, int BHNgbAtSeeding, MyFloat StarClusterMetallicity, const float * StarClusterMetals) {
+blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, int BHNgbAtSeeding, MyFloat StarClusterMetallicity, const float * StarClusterMetals, MyFloat SeedMassOverride) {
     int child;
 
     /* Convert the parent particle in-place into a black hole, keeping its ID
@@ -1394,13 +1439,19 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
 
     /* The accretion mass should always be the seed black hole mass,
      * irrespective of the gravitational mass of the particle. */
-    if(blackhole_params.MaxSeedBlackHoleMass > 0)
-        BHP(child).Mass = bh_powerlaw_seed_mass(P[child].ID, rnd);
-    else
-        BHP(child).Mass = blackhole_params.SeedBlackHoleMass;
+    if(SeedMassOverride > 0) {
+        /* MbhMscRelationCWmodel: seed mass fixed by the caller (M_VMS of the
+         * Williams et al. 2026 collision model, cwmodel.c). */
+        BHP(child).Mass = SeedMassOverride;
+    } else {
+        if(blackhole_params.MaxSeedBlackHoleMass > 0)
+            BHP(child).Mass = bh_powerlaw_seed_mass(P[child].ID, rnd);
+        else
+            BHP(child).Mass = blackhole_params.SeedBlackHoleMass;
 
-    if(seeded_by_starcluster && blackhole_params.BHseedMassScaleMsc)
-        BHP(child).Mass *= ScalingMass;
+        if(seeded_by_starcluster && blackhole_params.BHseedMassScaleMsc)
+            BHP(child).Mass *= ScalingMass;
+    }
 
     BHP(child).Mseed = BHP(child).Mass;
     BHP(child).Mdot = 0;
@@ -1463,17 +1514,24 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
      * of its parent particle, so it starts at the parent mass: the gas mass for
      * gas-based seeding, the parent star mass for star-cluster seeding. */
     BHP(child).Mtrack = P[child].Mass;
-    /* P.Mass = max(Mtrack [+ SC if StarClusterBHDyn], SeedBHDynMass). */
+    /* P.Mass: mode 1 = max(Mtrack + StarClusterMass, SeedBHDynMass);
+     * mode 2 = max(Mtrack, init_Msc) for star-cluster seeds (the seed cluster
+     * mass is a frozen per-BH floor replacing SeedBHDynMass; non-SC seeds have
+     * init_Msc = 0 and keep the SeedBHDynMass floor);
+     * mode 0 = max(Mtrack, SeedBHDynMass). */
     {
         double target = BHP(child).Mtrack;
-        if(blackhole_params.StarClusterBHDyn)
+        double dynfloor = blackhole_params.SeedBHDynMass;
+        if(blackhole_params.StarClusterBHDyn == 1)
             target += BHP(child).StarClusterMass;
-        if(target < blackhole_params.SeedBHDynMass)
-            target = blackhole_params.SeedBHDynMass;
+        else if(blackhole_params.StarClusterBHDyn == 2 && init_Msc > 0)
+            dynfloor = init_Msc;
+        if(target < dynfloor)
+            target = dynfloor;
         P[child].Mass = target;
     }
 
-    double sc_in_dyn = blackhole_params.StarClusterBHDyn ? BHP(child).StarClusterMass : 0;
+    double sc_in_dyn = (blackhole_params.StarClusterBHDyn == 1) ? BHP(child).StarClusterMass : 0;
     if(P[child].Mass - sc_in_dyn < BHP(child).Mass ||
        P[child].Mass - sc_in_dyn < BHP(child).Mtrack)
         message(1, "WARNING: BH Mass (%g) for ID %ld is larger than particle mass (%g) or mtrack (%g)\n",
@@ -1616,7 +1674,7 @@ blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime
 
         blackhole_make_one(pi, atime, rnd, 1, sc_mass, sc_mass,
                            STARP(pi).ClusterMass, STARP(pi).StarClusterMass_sample,
-                           0, 0, sc_metallicity, sc_metals);
+                           0, 0, sc_metallicity, sc_metals, 0);
 
         /* The parent star has been converted in-place into the BH (consumed):
          * it is now type 5, so it no longer participates in any seeding scan or

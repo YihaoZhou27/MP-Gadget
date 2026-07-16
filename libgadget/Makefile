@@ -47,7 +47,7 @@ GADGET_OBJS =  \
 	 gdbtools.o hci.o\
 	 fof.o fofpetaio.o secondfof.o petaio.o \
 	 domain.o exchange.o slotsmanager.o partmanager.o \
-	 blackhole.o bhinfo.o bhdynfric.o \
+	 blackhole.o bhinfo.o bhdynfric.o scinfo.o cwmodel.o \
 	 timebinmgr.o \
 	 run.o drift.o stats.o \
 	 timestep.o init.o checkpoint.o \

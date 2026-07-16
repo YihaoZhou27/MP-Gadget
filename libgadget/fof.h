@@ -45,6 +45,17 @@ struct BaseGroup {
     float FirstPos[3];
 };
 
+/* Fixed log10(Z) histogram of the unseeded-star BirthMetallicity, per group,
+ * used to derive the StarClusterDetails metallicity quartiles/median without
+ * gathering per-particle values (the additive bin counts reduce like the other
+ * group sums).  Bin 0 is underflow (Z <= 10^LOGMIN, including pristine Z=0),
+ * bins 1..NBIN-2 are log-spaced across [LOGMIN,LOGMAX], bin NBIN-1 is overflow
+ * (Z > 10^LOGMAX).  With 62 interior bins the resolution is ~0.13 dex, far
+ * finer than the physical scatter. */
+#define SC_MET_HIST_NBIN   64
+#define SC_MET_HIST_LOGMIN (-7.0)
+#define SC_MET_HIST_LOGMAX (1.0)
+
 struct Group
 {
     struct BaseGroup base;
@@ -107,6 +118,26 @@ struct Group
     MyFloat StarClusterMassSampleUnseeded; /*!< Sum of StarClusterMass_sample over UNSEEDED stars (sampled seeding). */
     MyFloat SCMass_seeded;                 /*!< Sum of ClusterMass over SEEDED stars (catalogue output). */
     int NStarUnseeded;                     /*!< Count of UNSEEDED type-4 stars (caps the per-secFOF multi-seed number). */
+    /* Unseeded-star metallicity for the StarClusterDetails record: the metal mass
+     * ratio Sum(BirthMetallicity*initClusterMass) / Sum(initClusterMass) over UNSEEDED
+     * stars. Both sums accumulated separately (over Seeded==0 stars) and reduced. */
+    MyFloat SCMetalMassUnseeded;           /*!< Sum of BirthMetallicity*initClusterMass over UNSEEDED stars (metal mass). */
+    MyFloat SCClusterMassUnseededInit;     /*!< Sum of initClusterMass over UNSEEDED stars (metallicity denominator). */
+    /* Per-particle (equal-weight) BirthMetallicity distribution of UNSEEDED stars,
+     * recorded in the StarClusterDetails file: exact min/max, running sums for the
+     * standard deviation, and a fixed log10(Z) histogram for the median/quartiles.
+     * The count N is NStarUnseeded.  Min is initialised to a large sentinel in
+     * add_particle_to_group; all others start at 0 (memset). */
+    float   SCMetUnseededMin;              /*!< min BirthMetallicity over unseeded stars. */
+    float   SCMetUnseededMax;              /*!< max BirthMetallicity over unseeded stars. */
+    double  SCMetUnseededSum;              /*!< Sum of BirthMetallicity (equal weight; std numerator). */
+    double  SCMetUnseededSum2;             /*!< Sum of BirthMetallicity^2 (equal weight; std numerator). */
+    /* Equal-weight (per star, NOT mass-weighted) log10(BirthMetallicity) sums of
+     * UNSEEDED stars, floored at SC_MET_HIST_LOGMIN (covers pristine Z=0): the
+     * mean/std of log10(Z) for the CW-model 'lognormal' metallicity draw. */
+    double  SCMetUnseededLogSum;           /*!< Sum of log10(BirthMetallicity), floored (CWmodelMetallicity). */
+    double  SCMetUnseededLogSum2;          /*!< Sum of log10(BirthMetallicity)^2, floored (CWmodelMetallicity). */
+    float   SCMetUnseededHist[SC_MET_HIST_NBIN]; /*!< log10(Z) histogram (see SC_MET_HIST_* above). */
 
     /* SeedSecFOFcomSample (combined per-secFOF sampling). Accumulated over
      * UNSEEDED stars (STARP.Seeded==0) only. */
