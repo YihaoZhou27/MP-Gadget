@@ -1514,6 +1514,18 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
      * of its parent particle, so it starts at the parent mass: the gas mass for
      * gas-based seeding, the parent star mass for star-cluster seeding. */
     BHP(child).Mtrack = P[child].Mass;
+    /* Unless the seed mass is at or above the parent mass: then Mtrack would
+     * start below BH_Mass and the BH would stochastically swallow neighbouring
+     * gas to close the gap.  That deficit is typically a fraction of a gas
+     * particle while the smallest bite is a whole one, so the catch-up
+     * overshoots badly; start Mtrack at the seed mass instead.  This credits the
+     * BH with mass never removed from the simulation, hence the warning. */
+    if(BHP(child).Mass >= BHP(child).Mtrack) {
+        message(1, "WARNING: BH seed mass (%g) for ID %ld is >= its parent particle mass (%g); "
+                   "raising Mtrack to the seed mass (this mass is not taken from the gas).\n",
+                BHP(child).Mass, (long) P[child].ID, BHP(child).Mtrack);
+        BHP(child).Mtrack = BHP(child).Mass;
+    }
     /* P.Mass: mode 1 = max(Mtrack + StarClusterMass, SeedBHDynMass);
      * mode 2 = max(Mtrack, init_Msc) for star-cluster seeds (the seed cluster
      * mass is a frozen per-BH floor replacing SeedBHDynMass; non-SC seeds have

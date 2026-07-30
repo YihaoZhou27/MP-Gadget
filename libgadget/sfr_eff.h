@@ -85,6 +85,22 @@ int starcluster_combined_seed_masslist(double Mcut, double sum_mGamma,
                                        uint64_t rand_id, const RandTable * const rnd,
                                        double min_seed_mass, double * out_masses, int cap);
 
+/* Callback receiving one sampled star cluster: its mass (code units) and its index
+ * s in the group's draw sequence (used to key per-cluster random numbers). */
+typedef void (*sc_detail_cb)(double mass, int draw_index, void * data);
+
+/* StarClusterDetails full-population pass (MinMscForSCdetail). Redraws the SAME
+ * cluster population as starcluster_combined_seed_masslist for this group (identical
+ * Poisson count, identical per-cluster inverse-CDF and RNG offsets from rand_id) and
+ * hands every cluster with mass_lo <= m < mass_hi to cb, in draw order. Used to record
+ * the clusters that are too light to ever seed a BH, which are never buffered or
+ * communicated. No-op if cb is NULL or the mass window is empty.
+ * Serial only (uses the global GSL error handler). */
+void starcluster_seed_masslist_detail(double Mcut, double sum_mGamma,
+                                      uint64_t rand_id, const RandTable * const rnd,
+                                      double mass_lo, double mass_hi,
+                                      sc_detail_cb cb, void * cbdata);
+
 /* Metallicity-dependent BH-seeding factor f(Z) in [0,1], applied to the per-star
  * cluster mass (Gamma*m_star) used for star-cluster BH seeding. Z is the absolute
  * star metallicity (BirthMetallicity). Returns 1 when the feature is disabled

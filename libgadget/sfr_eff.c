@@ -826,6 +826,92 @@ double get_seed_metallicity_factor(double Z)
     return (zmax - logZ) / (zmax - zmin);
 }
 
+/* ---------------- shared ICMF draw (used by every star-cluster sampler) ----------------
+ * The three samplers below (summed seed mass, per-cluster mass list, and the
+ * StarClusterDetails full-population pass) MUST draw the identical cluster
+ * population from the same rand_id, so the Poisson draw and the per-cluster
+ * inverse-CDF live here in one place instead of being copied per sampler. */
+
+/* Poisson draw of the cluster count: normal approximation for large lambda,
+ * Knuth's product method otherwise. RNG offsets +10,+11 (and +10.. for Knuth).
+ * errcode identifies the caller in the (never-expected) runaway-iteration abort. */
+static int msc_poisson_draw(double lambda, uint64_t rand_id, const RandTable * const rnd, int errcode)
+{
+    if(lambda > 30) {
+        double u1 = get_random_number(rand_id + 10, rnd);
+        double u2 = get_random_number(rand_id + 11, rnd);
+        if(u1 < 1e-20)
+            u1 = 1e-20;
+        double z = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+        int sample = (int)(lambda + sqrt(lambda) * z + 0.5);
+        return sample > 0 ? sample : 0;
+    }
+    if(!(lambda > 0))       /* negated so a NaN lambda cannot enter the Knuth loop */
+        return 0;
+    const int max_iter = 200;
+    double L = exp(-lambda);
+    double p = 1.0;
+    int k = 0;
+    uint64_t seed = rand_id + 10;
+    do {
+        k++;
+        p *= get_random_number(seed, rnd);
+        seed++;
+        if(k > max_iter)
+            endrun(errcode, "Star-cluster Poisson sampling exceeded %d iterations for lambda=%g, rand_id=%ld\n",
+                   max_iter, lambda, (long)rand_id);
+    } while(p > L);
+    return k - 1;
+}
+
+/* Cutoff-dependent constants of the ICMF inverse-CDF, computed once per draw. */
+struct msc_icmf {
+    int    use_cutoff;          /* StarClusterICMFcutoff */
+    double Mcut;
+    double x_min, x_max;        /* msc_min/max in units of Mcut */
+    double E1_xmin;
+    double emxmin_over_xmin;
+    double g_norm;
+};
+
+/* StarClusterICMFcutoff = 1: n(m) ~ m^-2 exp(-m/Mcut), inverse-CDF via bisection,
+ *   CDF(x) prop. e^{-x_min}/x_min - e^{-x}/x + E1(x) - E1(x_min),  x = m/Mcut.
+ * StarClusterICMFcutoff = 0: pure power law n(m) ~ m^-2 on [1e2,1e8] Msun
+ *   (closed-form inverse-CDF, cutoff-independent), so nothing to precompute. */
+static void msc_icmf_init(struct msc_icmf * p, double Mcut)
+{
+    memset(p, 0, sizeof(*p));
+    p->use_cutoff = sfr_params.StarClusterICMFcutoff;
+    p->Mcut = Mcut;
+    if(!p->use_cutoff)
+        return;
+    p->x_min = sfr_params.msc_min_code / Mcut;
+    p->x_max = sfr_params.msc_max_code / Mcut;
+    p->E1_xmin = safe_expint_E1(p->x_min);
+    p->emxmin_over_xmin = exp(-p->x_min) / p->x_min;
+    p->g_norm = p->emxmin_over_xmin - exp(-p->x_max) / p->x_max
+              + safe_expint_E1(p->x_max) - p->E1_xmin;
+}
+
+/* One cluster mass (code units) from the uniform deviate u in [0,1). */
+static double msc_icmf_sample(const struct msc_icmf * p, double u)
+{
+    if(!p->use_cutoff)
+        return msc_sample_powerlaw(u);
+    double target = u * p->g_norm;
+    double lo = p->x_min, hi = p->x_max;
+    for(int iter = 0; iter < 50; iter++) {
+        double mid = 0.5 * (lo + hi);
+        double g_mid = p->emxmin_over_xmin - exp(-mid) / mid
+                     + safe_expint_E1(mid) - p->E1_xmin;
+        if(g_mid < target)
+            lo = mid;
+        else
+            hi = mid;
+    }
+    return p->Mcut * 0.5 * (lo + hi);
+}
+
 /* Combined per-secFOF star-cluster sampling for BH seeding (SeedSecFOFcomSample).
  * Draws ONE cluster population for a whole secFOF group:
  *   - mass function n(m) ~ m^-2 exp(-m/Mcut) on [1e2, 1e8] Msun, cutoff Mcut = group
@@ -850,76 +936,20 @@ double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
         return 0;
     double lambda = sum_mGamma / m_ave;
 
-    /* Poisson sample N: normal approximation for large lambda, Knuth otherwise.
-     * Mirrors the per-star sampler; RNG offsets +10,+11 (and +10.. for Knuth). */
-    int N = 0;
-    if(lambda > 30) {
-        double u1 = get_random_number(rand_id + 10, rnd);
-        double u2 = get_random_number(rand_id + 11, rnd);
-        if(u1 < 1e-20)
-            u1 = 1e-20;
-        double z = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
-        int sample = (int)(lambda + sqrt(lambda) * z + 0.5);
-        N = sample > 0 ? sample : 0;
-    }
-    else if(lambda > 0) {
-        const int max_iter = 200;
-        double L = exp(-lambda);
-        double p = 1.0;
-        int k = 0;
-        uint64_t seed = rand_id + 10;
-        do {
-            k++;
-            p *= get_random_number(seed, rnd);
-            seed++;
-            if(k > max_iter)
-                endrun(7774, "Combined Poisson sampling exceeded %d iterations for lambda=%g, rand_id=%ld\n",
-                       max_iter, lambda, (long)rand_id);
-        } while(p > L);
-        N = k - 1;
-    }
+    int N = msc_poisson_draw(lambda, rand_id, rnd, 7774);
     if(N <= 0)
         return 0;
 
     /* Sample N cluster masses from the ICMF, summing those above the massive-cluster
-     * threshold (1e4 Msun). RNG offsets +300+s, matching the per-star sampler.
-     * StarClusterICMFcutoff = 1: n(m) ~ m^-2 exp(-m/Mcut), inverse-CDF via bisection,
-     *   CDF(x) ∝ e^{-x_min}/x_min - e^{-x}/x + E1(x) - E1(x_min),  x = m/Mcut.
-     * StarClusterICMFcutoff = 0: pure power law n(m) ~ m^-2 on [1e2,1e8] (closed-form
-     *   inverse-CDF, cutoff-independent). */
-    int use_cutoff = sfr_params.StarClusterICMFcutoff;
-    double x_min_s = 0, x_max_s = 0, E1_xmin = 0, emxmin_over_xmin = 0, g_norm = 0;
-    if(use_cutoff) {
-        x_min_s = sfr_params.msc_min_code / Mcut;
-        x_max_s = sfr_params.msc_max_code / Mcut;
-        E1_xmin = safe_expint_E1(x_min_s);
-        emxmin_over_xmin = exp(-x_min_s) / x_min_s;
-        g_norm = emxmin_over_xmin - exp(-x_max_s) / x_max_s
-               + safe_expint_E1(x_max_s) - E1_xmin;
-    }
+     * threshold (1e4 Msun). RNG offsets +300+s, matching the per-star sampler. */
+    struct msc_icmf icmf;
+    msc_icmf_init(&icmf, Mcut);
 
     double bhseed_msc = 0;
     double total_sampled = 0;
     for(int s = 0; s < N; s++) {
         double u_s = get_random_number(rand_id + 300 + (uint64_t)s, rnd);
-        double mass;
-        if(use_cutoff) {
-            double target = u_s * g_norm;
-            double lo = x_min_s, hi = x_max_s;
-            for(int iter = 0; iter < 50; iter++) {
-                double mid = 0.5 * (lo + hi);
-                double g_mid = emxmin_over_xmin - exp(-mid) / mid
-                             + safe_expint_E1(mid) - E1_xmin;
-                if(g_mid < target)
-                    lo = mid;
-                else
-                    hi = mid;
-            }
-            mass = Mcut * 0.5 * (lo + hi);
-        }
-        else {
-            mass = msc_sample_powerlaw(u_s);
-        }
+        double mass = msc_icmf_sample(&icmf, u_s);
         total_sampled += mass;
         if(mass > sfr_params.msc_seed_thresh_code)
             bhseed_msc += mass;
@@ -967,33 +997,7 @@ int starcluster_combined_seed_masslist(double Mcut, double sum_mGamma,
         return 0;
     double lambda = sum_mGamma / m_ave;
 
-    /* Poisson sample N (same scheme and RNG offsets +10,+11/+10.. as the summed sampler). */
-    int N = 0;
-    if(lambda > 30) {
-        double u1 = get_random_number(rand_id + 10, rnd);
-        double u2 = get_random_number(rand_id + 11, rnd);
-        if(u1 < 1e-20)
-            u1 = 1e-20;
-        double z = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
-        int sample = (int)(lambda + sqrt(lambda) * z + 0.5);
-        N = sample > 0 ? sample : 0;
-    }
-    else if(lambda > 0) {
-        const int max_iter = 200;
-        double L = exp(-lambda);
-        double p = 1.0;
-        int k = 0;
-        uint64_t seed = rand_id + 10;
-        do {
-            k++;
-            p *= get_random_number(seed, rnd);
-            seed++;
-            if(k > max_iter)
-                endrun(7775, "Random-seed Poisson sampling exceeded %d iterations for lambda=%g, rand_id=%ld\n",
-                       max_iter, lambda, (long)rand_id);
-        } while(p > L);
-        N = k - 1;
-    }
+    int N = msc_poisson_draw(lambda, rand_id, rnd, 7775);
     if(N <= 0)
         return 0;
 
@@ -1002,16 +1006,8 @@ int starcluster_combined_seed_masslist(double Mcut, double sum_mGamma,
      * masses are buffered and sorted once (O(N + n_qualify log n_qualify)); the count-only
      * path (out_masses == NULL or cap <= 0, used for the slot upper bound) allocates
      * nothing. The RNG draw sequence is identical either way, so both calls agree. */
-    int use_cutoff = sfr_params.StarClusterICMFcutoff;
-    double x_min_s = 0, x_max_s = 0, E1_xmin = 0, emxmin_over_xmin = 0, g_norm = 0;
-    if(use_cutoff) {
-        x_min_s = sfr_params.msc_min_code / Mcut;
-        x_max_s = sfr_params.msc_max_code / Mcut;
-        E1_xmin = safe_expint_E1(x_min_s);
-        emxmin_over_xmin = exp(-x_min_s) / x_min_s;
-        g_norm = emxmin_over_xmin - exp(-x_max_s) / x_max_s
-               + safe_expint_E1(x_max_s) - E1_xmin;
-    }
+    struct msc_icmf icmf;
+    msc_icmf_init(&icmf, Mcut);
 
     int collecting = (out_masses != NULL && cap > 0);
     double * qual = collecting ? (double *) mymalloc("SeedMassQual", (size_t)N * sizeof(double)) : NULL;
@@ -1019,24 +1015,7 @@ int starcluster_combined_seed_masslist(double Mcut, double sum_mGamma,
     int n_qualify = 0;
     for(int s = 0; s < N; s++) {
         double u_s = get_random_number(rand_id + 300 + (uint64_t)s, rnd);
-        double mass;
-        if(use_cutoff) {
-            double target = u_s * g_norm;
-            double lo = x_min_s, hi = x_max_s;
-            for(int iter = 0; iter < 50; iter++) {
-                double mid = 0.5 * (lo + hi);
-                double g_mid = emxmin_over_xmin - exp(-mid) / mid
-                             + safe_expint_E1(mid) - E1_xmin;
-                if(g_mid < target)
-                    lo = mid;
-                else
-                    hi = mid;
-            }
-            mass = Mcut * 0.5 * (lo + hi);
-        }
-        else {
-            mass = msc_sample_powerlaw(u_s);
-        }
+        double mass = msc_icmf_sample(&icmf, u_s);
         if(mass >= min_seed_mass) {
             if(collecting)
                 qual[n_qualify] = mass;
@@ -1052,6 +1031,38 @@ int starcluster_combined_seed_masslist(double Mcut, double sum_mGamma,
         myfree(qual);
     }
     return n_qualify;
+}
+
+/* StarClusterDetails full-population pass (MinMscForSCdetail): see sfr_eff.h.
+ * Redraws exactly the population of starcluster_combined_seed_masslist (same Poisson
+ * count and same per-cluster inverse-CDF from the same rand_id) and streams every
+ * cluster with mass_lo <= m < mass_hi to the callback, in draw order. Nothing is
+ * buffered, so the (potentially very large) sub-seeding-threshold population costs no
+ * memory. Serial only (uses the global GSL error handler). */
+void starcluster_seed_masslist_detail(double Mcut, double sum_mGamma,
+                                      uint64_t rand_id, const RandTable * const rnd,
+                                      double mass_lo, double mass_hi,
+                                      sc_detail_cb cb, void * cbdata)
+{
+    if(!cb || Mcut <= 0 || sum_mGamma <= 0 || mass_lo >= mass_hi)
+        return;
+    double m_ave = msc_ave_from_cutoff(Mcut);
+    if(m_ave <= 0)
+        return;
+
+    int N = msc_poisson_draw(sum_mGamma / m_ave, rand_id, rnd, 7776);
+    if(N <= 0)
+        return;
+
+    struct msc_icmf icmf;
+    msc_icmf_init(&icmf, Mcut);
+
+    for(int s = 0; s < N; s++) {
+        double u_s = get_random_number(rand_id + 300 + (uint64_t)s, rnd);
+        double mass = msc_icmf_sample(&icmf, u_s);
+        if(mass >= mass_lo && mass < mass_hi)
+            cb(mass, s, cbdata);
+    }
 }
 
 /* Whether the combined-sampled SC mass is capped at the group's unseeded stellar
