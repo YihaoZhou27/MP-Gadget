@@ -1052,12 +1052,35 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential,
     for(i = 0; i < PartManager->NumPart; i++)
         P[i].SecGrNr = P[i].GrNr;
 
+    /* Step 5a: PotMinPos fallback.  Step 3 passed OutputPotential as the FOF
+     * PotentialMin flag, and both add_particle_to_group and fof_reduce_group gate the
+     * PotMin/PotMinPos update on it, so with OutputPotential = 0 PotMinPos is never
+     * written and keeps its memset value (0,0,0) -- the corner of the box.  This used
+     * to be repaired further down (old Step 8), but the bound pass below needs the
+     * group centre, so the fallback has to happen BEFORE it: centred on (0,0,0) every
+     * group would get box-scale radii, an Rmax up to half the box diagonal, and a DM
+     * lookup grid that collapses to a single cell.
+     * CM is a valid centre here: fof_compile_catalogue (inside fof_fof above) has
+     * already divided it by the group mass and periodic-wrapped it. */
+    if(!OutputPotential) {
+        int g;
+        for(g = 0; g < fof.Ngroups; g++) {
+            fof.Group[g].PotMin = 0;
+            int d;
+            for(d = 0; d < 3; d++)
+                fof.Group[g].PotMinPos[d] = fof.Group[g].CM[d];
+        }
+    }
+
     /* Step 5b: BHseedSecFOFbound -- fill the catalogue's SecBound* blocks.
      * Must happen HERE, while P[].GrNr still holds the secondary group number that
-     * fof_secfof_bound_restrict keys on (Step 6 restores the primary one).
+     * fof_secfof_bound_restrict keys on (Step 6 restores the primary one), and after
+     * the Step 5a centre fallback.
      * apply = 0: the seeding decision was taken at seeding time on its own FOF pass;
      * this call only measures the bound subset for the snapshot, so the catalogue's
-     * SCMass / MassByType / LengthByType keep describing ALL member stars. */
+     * SCMass / MassByType / LengthByType keep describing ALL member stars.
+     * (The seeding path is not affected by the OutputPotential issue above:
+     * secondfof_seed hardcodes PotentialMin = 1 in its own fof_set_params call.) */
     if(sfof_params.BHseedSecFOFbound)
         fof_secfof_bound_restrict(&fof, sfof_params.BHseedSecFOFbound, 0,
                                   atime, CP, Comm);
@@ -1081,17 +1104,13 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential,
 
     /* Step 8: Compute extra group properties.
      * PotMin/PotMinPos are already computed by fof_compile_catalogue
-     * inside add_particle_to_group / fof_reduce_group.
-     * If potential was not computed (OutputPotential == 0), fall back to CM. */
-    if(!OutputPotential) {
-        int g;
-        for(g = 0; g < result->fof.Ngroups; g++) {
-            result->fof.Group[g].PotMin = 0;
-            int d;
-            for(d = 0; d < 3; d++)
-                result->fof.Group[g].PotMinPos[d] = result->fof.Group[g].CM[d];
-        }
-    }
+     * inside add_particle_to_group / fof_reduce_group; the OutputPotential == 0
+     * fall-back to CM has already been applied at Step 5a, which has to run before
+     * the bound pass that consumes the centre.  result->fof aliases the same Group
+     * array, so nothing more is needed here.
+     *
+     * Everything below uses PotMinPos as the group centre:
+     * secondfof_compute_sizes (R50/R90/Rmax) and the SecPotMinPos output block. */
 
     /* Step 9: Build output array.
      * Allocate SecFOF_Output before SecFOF_Extra so that extra
