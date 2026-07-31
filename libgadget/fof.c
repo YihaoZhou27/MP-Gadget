@@ -3894,8 +3894,30 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
  * with one Allreduce.  Every rank therefore evaluates the same profile and each group
  * is written only by its owning rank, so the result is independent of the rank count.
  *
- * MEMORY: the DM histograms are SB_NBIN doubles per group, replicated
- * (TotNgroups * SB_NBIN * 8 bytes on every rank).
+ * MEMORY / SCALING CEILING: the group geometry and the member stars are replicated on
+ * every rank, so the per-rank cost is set by the GLOBAL counts and does not fall as
+ * ranks are added.  The star array dominates at sizeof(struct sb_star) = 112 B:
+ *
+ *     265k stars (z=9, Ng=512)  ->   0.03 GB/rank
+ *       5M stars                ->   0.52 GB/rank
+ *      19M stars                ->   1.98 GB/rank   <- hard limit, see below
+ *
+ * The hard limit is not memory but MPI: MPI_Allgatherv takes int counts and
+ * displacements, and the ones here are BYTE counts, so the ceiling is
+ * INT_MAX / sizeof(struct sb_star) ~ 19.2M member stars.  Beyond that a displacement
+ * wraps negative and MPI reads or writes outside the buffer, so both the local and the
+ * global count are checked below and the run aborts with a clear message instead.
+ * The DM histograms add TotNgroups * SB_NBIN * 8 bytes per rank on top.
+ *
+ * Raising the ceiling, cheapest first:
+ *   - shrink the record: store the position as a float offset from the group centre
+ *     (better conditioned than absolute coordinates) and demote Vel/Mass/mGamma/
+ *     msample/scm to float, which are only ever accumulated into doubles afterwards.
+ *     112 B -> ~72 B, i.e. ~30M stars.  A 1.6x reprieve, not a fix.
+ *   - replace the replication with a distributed gather: each group is processed by
+ *     its owning rank, which pulls only its own members.  That removes the ceiling
+ *     entirely but needs real point-to-point communication, and the load imbalance is
+ *     severe -- 93-96% of the member stars sit in ONE group.
  */
 
 /* Radial bins of the per-group DM profile.  The profile is only ever consumed
@@ -4025,6 +4047,14 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
         endrun(1, "BHseedSecFOFbound: %ld secFOF groups x %d radial bins overflows the "
                   "MPI_Allreduce count. Raise SecondFOFMinPrimaryLength or lower SB_NBIN.\n",
                   total_groups, SB_NBIN);
+    /* MPI_Allgatherv counts and displacements are `int`, and the ones below are BYTE
+     * counts, so the ceiling is INT_MAX / sizeof(record) -- not INT_MAX records.  An
+     * overflow here is silent (the displacement wraps negative and MPI reads or writes
+     * outside the buffer), so check rather than trust. */
+    if(total_groups > (int64_t) INT_MAX / (int64_t) sizeof(struct sb_group))
+        endrun(1, "BHseedSecFOFbound: %ld secFOF groups x %zu B exceeds the int byte range "
+                  "of MPI_Allgatherv (max %ld groups).\n", total_groups,
+                  sizeof(struct sb_group), (int64_t) INT_MAX / (int64_t) sizeof(struct sb_group));
 
     struct sb_group * sbg = (struct sb_group *)
         mymalloc2("SBgrp", sizeof(struct sb_group) * total_groups);
@@ -4059,6 +4089,17 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
         if(P[i].Type == 4 && P[i].GrNr >= 0)
             n_local_star++;
 
+    /* The gathered records are replicated on EVERY rank, so both the int byte range of
+     * MPI_Allgatherv and the per-rank memory scale with the GLOBAL star count and do
+     * not improve by adding ranks.  At sizeof(struct sb_star) = 112 B the int ceiling
+     * is ~19.2M member stars (~2.0 GB/rank, so the two limits bite at about the same
+     * point).  Guard the local count before it is narrowed to int, and the global one
+     * before any byte displacement is formed from it. */
+    const int64_t sb_star_max = (int64_t) INT_MAX / (int64_t) sizeof(struct sb_star);
+    if(n_local_star > sb_star_max)
+        endrun(1, "BHseedSecFOFbound: %ld member stars on this rank alone exceeds the int "
+                  "byte range of MPI_Allgatherv (max %ld).\n", n_local_star, sb_star_max);
+
     int * sc_counts = (int *) mymalloc2("SBsc", sizeof(int) * NTask);
     int n_local_star_int = (int) n_local_star;
     MPI_Allgather(&n_local_star_int, 1, MPI_INT, sc_counts, 1, MPI_INT, Comm);
@@ -4068,6 +4109,13 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
         sc_displs[i] = (int) total_stars;
         total_stars += sc_counts[i];
     }
+    if(total_stars > sb_star_max)
+        endrun(1, "BHseedSecFOFbound: %ld member stars x %zu B exceeds the int byte range "
+                  "of MPI_Allgatherv (max %ld stars, ~%.1f GB/rank replicated). The all-rank "
+                  "star replication has to be replaced by a distributed gather to go "
+                  "further; see the header comment on fof_secfof_bound_restrict.\n",
+                  total_stars, sizeof(struct sb_star), sb_star_max,
+                  sb_star_max * (double) sizeof(struct sb_star) / 1073741824.0);
 
     struct sb_star * sbs = (struct sb_star *)
         mymalloc2("SBstar", sizeof(struct sb_star) * (total_stars > 0 ? total_stars : 1));
