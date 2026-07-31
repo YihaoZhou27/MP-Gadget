@@ -176,6 +176,45 @@ void set_fof_params(ParameterSet * ps)
         if(fof_params.BHseedSecFOFbound && fof_params.SeedSeedFOFMassiveBoundStar)
             endrun(1, "BHseedSecFOFbound=%d is incompatible with SeedSeedFOFMassiveBoundStar=1 "
                       "(both restrict the seeding budget to bound stars).\n", fof_params.BHseedSecFOFbound);
+        /* The bound restriction acts at GROUP level: it rewrites the group's summed
+         * budget (StarClusterMassUnseeded / StarClusterMassSampleUnseeded / SCcomMcut)
+         * and repoints the single seed host to a bound star.  It carries no per-star
+         * bound flag, so any mode that afterwards re-scans the group's unseeded stars
+         * individually would still see the unbound ones and defeat (or mis-normalise)
+         * the restriction.  These are exactly the modes SeedSeedFOFMassiveBoundStar
+         * excludes for the same reason:
+         *
+         *  - SeedSecFOFcomSampleParticle: fof_secfof_particle_sample() draws a cluster
+         *    population for EVERY unseeded star, so unbound stars keep contributing to
+         *    tot_msc_fof; worse, secondfof_seed then redistributes that total as
+         *    totmsc * m_star / SCcomMcut over EVERY unseeded star while SCcomMcut is
+         *    now only the BOUND stellar mass, inflating the group sum by
+         *    M_unseeded / M_bound instead of conserving it.
+         *  - SeedInSecFOFMultipleSeeds: seeds 2..N are placed on the next-largest
+         *    unseeded stars without a boundedness test, so only seed 1 is guaranteed
+         *    bound.
+         *  - SecFOFseedsumover = 0 (per-cluster seeding): each cluster's host is drawn
+         *    from all unseeded stars, again with no boundedness test.
+         *
+         * Supporting these needs a per-star bound flag persisted from
+         * fof_secfof_bound_restrict() to those loops; until then, refuse the
+         * combination rather than silently produce a restriction that does not hold. */
+        if(fof_params.BHseedSecFOFbound) {
+            if(fof_params.SeedSecFOFcomSampleParticle)
+                endrun(1, "BHseedSecFOFbound=%d is incompatible with SeedSecFOFcomSampleParticle=1: "
+                          "the per-star sampler draws for every unseeded star (unbound included) and "
+                          "the redistribution would divide by the bound stellar mass while summing "
+                          "over all unseeded stars, inflating the group cluster mass.\n",
+                          fof_params.BHseedSecFOFbound);
+            if(fof_params.SeedInSecFOFMultipleSeeds)
+                endrun(1, "BHseedSecFOFbound=%d is incompatible with SeedInSecFOFMultipleSeeds=1: "
+                          "only the primary seed is placed on a bound star; the extra hosts are not "
+                          "boundedness-tested.\n", fof_params.BHseedSecFOFbound);
+            if(!fof_params.SecFOFseedsumover)
+                endrun(1, "BHseedSecFOFbound=%d is incompatible with SecFOFseedsumover=0: "
+                          "the per-cluster hosts are drawn from all unseeded stars with no "
+                          "boundedness test.\n", fof_params.BHseedSecFOFbound);
+        }
         fof_params.BHseedMassScaleMsc = param_get_int(ps, "BHseedMassScaleMsc");
         fof_params.MinMscForBHseed = param_get_double(ps, "MinMscForBHseed");
 
