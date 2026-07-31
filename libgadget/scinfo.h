@@ -12,9 +12,18 @@
                                * M_VMS < SeedBlackHoleMass, so no BH was seeded */
 #define SC_FLAG_BELOWSEED 2   /* cluster < MinMscForBHseed: never a seed candidate
                                * (recorded only when MinMscForSCdetail is lowered) */
-/* Only SC_FLAG_SEEDED records correspond to a BH particle in the simulation.  The other
- * two are model bookkeeping: their Mbh_seed is the mass the CW model predicts for that
- * cluster, but no BH was created and nothing in the run's dynamics saw it. */
+#define SC_FLAG_COMPENSATE 3  /* MinBHSeedInSC compensating seed: a BH particle that
+                               * stands in for the missed sub-floor seeds of its group,
+                               * not for one sampled cluster (see below) */
+/* SC_FLAG_SEEDED and SC_FLAG_COMPENSATE records correspond to a BH particle in the
+ * simulation; SC_FLAG_NOVMS and SC_FLAG_BELOWSEED are model bookkeeping, with Mbh_seed
+ * the mass the CW model predicts for that cluster even though no BH was created and
+ * nothing in the run's dynamics saw it.
+ * SC_FLAG_COMPENSATE is the odd one out: the BH exists, but it has no host cluster of
+ * its own.  Its Mbh_seed is SeedBlackHoleMass (the compensation quantum) and its
+ * StarClusterMass is the group's missed cluster mass shared evenly over the group's
+ * compensating seeds, so summing StarClusterMass over these records recovers the total
+ * cluster mass whose BH seeds fell below the floor. */
 
 /* Per-star-cluster detail record.
  * One record is written every time a star-cluster-based BH seed is created
@@ -66,7 +75,7 @@ struct __attribute__((__packed__)) SCseedinfo {
     double   MetUnseededP25;       /* 25th percentile. */
     double   MetUnseededP75;       /* 75th percentile. */
     double   MetUnseededStd;       /* standard deviation. */
-    int      Flag;                 /* record type: SC_FLAG_SEEDED / _NOVMS / _BELOWSEED. */
+    int      Flag;                 /* record type: SC_FLAG_SEEDED / _NOVMS / _BELOWSEED / _COMPENSATE. */
     int      size2;
 };
 

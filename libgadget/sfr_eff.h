@@ -114,6 +114,11 @@ int get_scmasscap_secfof_starmass(void);
 /* Per-secFOF multi-seed mass threshold (1e8 Msun) in code mass units. */
 double get_msc_multiseed_thresh_code(void);
 
+/* Lower limit of the cluster mass function (1e2 Msun) in code mass units. Used by
+ * fof.c to convert the 200 Msun VMS-collapse floor of MinBHSeedInSC into code units
+ * with the same conversion as the sampled cluster masses. */
+double get_msc_min_code(void);
+
 /* Sample an effective radius (in pc) for a seeded star cluster of code-unit mass
  * mcl_code, from the size-mass relation R_eff = 1.4 pc * (M_cl/1e4 Msun)^0.25 with a
  * 0.5 dex lognormal scatter (reproducibly keyed on the host star ID rand_id), and

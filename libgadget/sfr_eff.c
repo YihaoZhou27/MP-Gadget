@@ -1080,6 +1080,15 @@ double get_msc_multiseed_thresh_code(void)
     return sfr_params.msc_multiseed_thresh_code;
 }
 
+/* Lower mass limit of the cluster mass function (1e2 Msun) in code mass units.
+ * Exposed so fof.c can express a solar-mass constant (the 200 Msun VMS-collapse
+ * floor of MinBHSeedInSC) in code units with exactly the same conversion the
+ * sampled cluster masses use. Only valid after set_units/init has run. */
+double get_msc_min_code(void)
+{
+    return sfr_params.msc_min_code;
+}
+
 /* Effective radius (in pc) of a seeded star cluster of code-unit mass mcl_code.
  * If StarClusterFixReff > 0, that fixed radius (in pc) is returned for every cluster.
  * Otherwise the median follows the size-mass relation R_eff = 1.4 pc * (M_cl/1e4 Msun)^0.25,
@@ -1612,18 +1621,24 @@ void init_cooling_and_star_formation(int CoolingOn, int StarformationOn, Cosmolo
      * = UnitVelocity^3 / UnitLength. Divide by h factor from code_time. */
     sfr_params.phi_fb_code = 0.16 / (units.UnitVelocity_in_cm_per_s * units.UnitVelocity_in_cm_per_s
                                      / (units.UnitTime_in_s / CP->HubbleParam));
-    /* Mass limits for msc_ave: 1e2 and 1e8 solar masses in code mass units */
-    sfr_params.msc_min_code = 1e2 * SOLAR_MASS / units.UnitMass_in_g;
-    sfr_params.msc_max_code = 1e8 * SOLAR_MASS / units.UnitMass_in_g;
+    /* Mass limits for msc_ave: 1e2 and 1e8 solar masses in code mass units.
+     * The code mass unit is 1e10 Msun/h (UnitMass_in_g converts to g/h), so a
+     * PHYSICAL solar-mass constant carries an extra factor of h -- exactly as
+     * t_sn_code above carries one for a physical time. Every code<->Msun
+     * conversion in the star cluster model is a ratio against one of the four
+     * yardsticks set here (starcluster_sample_reff_pc, cw_seed_mass_code, the
+     * MinBHSeedInSC VMS floor), so all of them must carry it together. */
+    sfr_params.msc_min_code = 1e2 * SOLAR_MASS * CP->HubbleParam / units.UnitMass_in_g;
+    sfr_params.msc_max_code = 1e8 * SOLAR_MASS * CP->HubbleParam / units.UnitMass_in_g;
     /* Mean cluster mass of the pure power law (StarClusterICMFcutoff=0) is a fixed
      * constant (independent of any cutoff), so precompute it once here instead of
      * recomputing the log() per seeding event. */
     sfr_params.msc_ave_powerlaw_code = msc_ave_powerlaw();
     /* "Massive cluster" threshold for combined-sample seeding: 1e4 solar masses */
-    sfr_params.msc_seed_thresh_code = 1e4 * SOLAR_MASS / units.UnitMass_in_g;
+    sfr_params.msc_seed_thresh_code = 1e4 * SOLAR_MASS * CP->HubbleParam / units.UnitMass_in_g;
     /* Per-secFOF multi-seed threshold: 1e8 solar masses. When the seeding cluster
      * mass M_SC of a secondary-FOF group exceeds this, floor(M_SC/1e8) BHs are seeded. */
-    sfr_params.msc_multiseed_thresh_code = 1e8 * SOLAR_MASS / units.UnitMass_in_g;
+    sfr_params.msc_multiseed_thresh_code = 1e8 * SOLAR_MASS * CP->HubbleParam / units.UnitMass_in_g;
 
     init_cooling(sfr_params.TreeCoolFile, sfr_params.J21CoeffFile, sfr_params.MetalCoolFile, sfr_params.ReionHistFile, coolunits, CP);
 
