@@ -23,7 +23,10 @@ typedef struct SecondFOFResult SecondFOFResult;
 /* Run the second FOF: compute groups, set P[i].SecGrNr, compute extra properties.
  * Preserves the existing P[i].GrNr from the halo FOF.
  * Returns a handle that must be passed to secondfof_write() and then secondfof_finish(). */
-SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential, MPI_Comm Comm);
+/* atime / CP are needed only by the BHseedSecFOFbound pass that fills the
+ * catalogue's SecBound* blocks; they are otherwise unused. */
+SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential,
+                                double atime, Cosmology * CP, MPI_Comm Comm);
 
 /* Write the SecPIG catalog to disk. Call after checkpoint for I/O safety. */
 void secondfof_write(SecondFOFResult * result, const char * OutputDir, int snapnum,

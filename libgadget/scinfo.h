@@ -75,8 +75,33 @@ struct __attribute__((__packed__)) SCseedinfo {
     double   MetUnseededP25;       /* 25th percentile. */
     double   MetUnseededP75;       /* 75th percentile. */
     double   MetUnseededStd;       /* standard deviation. */
+    /* BHseedSecFOFbound: the gravitationally bound subset of the host group's member
+     * stars, i.e. the stars that actually contributed Gamma*m_star to this seed.
+     * StarClusterMassTotal / StellarMassTotal above are unaffected -- they still
+     * describe ALL member stars -- so BoundStarMass/StellarMassTotal is the bound
+     * fraction and BoundSCMass is the restricted seeding budget.
+     * All three are 0 when BHseedSecFOFbound = 0 (no bound selection was made). */
+    double   BoundStarMass;        /* Sum m_star over BOUND member stars (seeded + unseeded). */
+    double   BoundStarMassUnseeded;/* Sum m_star over BOUND UNSEEDED stars. */
+    double   BoundSCMass;          /* Sum f(Z)*Gamma*m_star over BOUND UNSEEDED stars. */
+    double   BoundRdm;             /* radius of the DM sphere used [comoving code units]. */
+    double   BoundDMMass;          /* DM mass inside BoundRdm [code units]. */
+    int      BoundStarNum;         /* count of BOUND member stars. */
+    int      BoundMode;            /* the BHseedSecFOFbound value in force (0/1/2). */
     int      Flag;                 /* record type: SC_FLAG_SEEDED / _NOVMS / _BELOWSEED / _COMPENSATE. */
     int      size2;
+};
+
+/* The host group's bound-star summary, passed to the scinfo_record_* functions.
+ * A NULL pointer records all-zero (BHseedSecFOFbound off, or no host group). */
+struct SCboundinfo {
+    double mass;          /* Sum m_star over BOUND member stars */
+    double mass_unseeded; /* Sum m_star over BOUND UNSEEDED stars */
+    double scmass;        /* Sum f(Z)*Gamma*m_star over BOUND UNSEEDED stars */
+    double rdm;           /* DM sphere radius [comoving] */
+    double mdm;           /* DM mass inside rdm */
+    int    num;           /* count of BOUND member stars */
+    int    mode;          /* BHseedSecFOFbound value */
 };
 
 /* Distribution stats of one host group's unseeded-star metallicity, passed to
@@ -108,7 +133,8 @@ void scinfo_flush(void);
 void scinfo_record_seed(int index, double atime, double SCmass, double SCMassTotal,
                         double StellarMassTotal, double SCMassSeeded, double metallicity,
                         double Reff, double Mbh_seed, int NBHInGroup, int64_t GrNr,
-                        const struct SCmetdist * metdist, int flag);
+                        const struct SCmetdist * metdist, const struct SCboundinfo * bound,
+                        int flag);
 
 /* Append one record for a sampled star cluster that has no host particle of its own
  * (MinMscForSCdetail): `id` and `pos` are the host group's reference star, `pos` in the
@@ -120,6 +146,7 @@ void scinfo_record_seed(int index, double atime, double SCmass, double SCMassTot
 void scinfo_record_cluster(MyIDType id, const double * pos, double atime, double SCmass,
                            double SCMassTotal, double StellarMassTotal, double SCMassSeeded,
                            double metallicity, double Reff, double Mbh_seed, int NBHInGroup,
-                           int64_t GrNr, const struct SCmetdist * metdist, int flag);
+                           int64_t GrNr, const struct SCmetdist * metdist,
+                           const struct SCboundinfo * bound, int flag);
 
 #endif

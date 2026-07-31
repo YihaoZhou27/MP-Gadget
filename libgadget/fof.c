@@ -8,6 +8,7 @@
 #include <inttypes.h>
 #include <math.h>
 #include <float.h>
+#include <limits.h>
 #include <omp.h>
 
 #include "utils/endrun.h"
@@ -101,6 +102,10 @@ struct FOFParams
     /* if 1, a secFOF group with unseeded Sum(m*Gamma) > 1e8 Msun is restricted to
      * the gravitationally bound unseeded stars before SeedSecFOFcomSample seeding */
     int SeedSeedFOFMassiveBoundStar;
+    /* BHseedSecFOFbound: 0 = off, 1 = keep only the stars bound to (member stars +
+     * DM inside Rmax), 2 = the same with the DM sphere capped at 2*R50.  Applies to
+     * EVERY secFOF group and to every secFOF seeding variant. */
+    int BHseedSecFOFbound;
     int BHseedMassScaleMsc;
     double MinMscForBHseed;
     /* Lowest sampled cluster mass written to the StarClusterDetails files. Resolved at
@@ -162,6 +167,15 @@ void set_fof_params(ParameterSet * ps)
         else
             fof_params.CWmodelMetallicity = -1;
         fof_params.SeedSeedFOFMassiveBoundStar = param_get_int(ps, "SeedSeedFOFMassiveBoundStar");
+        fof_params.BHseedSecFOFbound = param_get_int(ps, "BHseedSecFOFbound");
+        if(fof_params.BHseedSecFOFbound < 0 || fof_params.BHseedSecFOFbound > 2)
+            endrun(1, "BHseedSecFOFbound must be 0, 1 or 2 (got %d).\n", fof_params.BHseedSecFOFbound);
+        /* Both features restrict the seeding budget by overwriting the same two
+         * fields (StarClusterMassUnseeded, SCcomMcut); running them together would
+         * make the result depend on their order. */
+        if(fof_params.BHseedSecFOFbound && fof_params.SeedSeedFOFMassiveBoundStar)
+            endrun(1, "BHseedSecFOFbound=%d is incompatible with SeedSeedFOFMassiveBoundStar=1 "
+                      "(both restrict the seeding budget to bound stars).\n", fof_params.BHseedSecFOFbound);
         fof_params.BHseedMassScaleMsc = param_get_int(ps, "BHseedMassScaleMsc");
         fof_params.MinMscForBHseed = param_get_double(ps, "MinMscForBHseed");
 
@@ -990,6 +1004,22 @@ static void sc_met_unseeded_stats(const struct Group * g, struct SCmetdist * md)
     md->p25    = sc_met_hist_percentile(g->SCMetUnseededHist, N, md->min, md->max, 0.25);
     md->median = sc_met_hist_percentile(g->SCMetUnseededHist, N, md->min, md->max, 0.50);
     md->p75    = sc_met_hist_percentile(g->SCMetUnseededHist, N, md->min, md->max, 0.75);
+}
+
+/* Fill the StarClusterDetails bound-star summary from a (reduced, owned) group.
+ * All zero when BHseedSecFOFbound is off, since nothing filled the SCBound* fields. */
+static void sc_bound_stats(const struct Group * g, struct SCboundinfo * b)
+{
+    memset(b, 0, sizeof(*b));
+    b->mode = fof_params.BHseedSecFOFbound;
+    if(!b->mode)
+        return;
+    b->mass          = g->SCBoundStarMass;
+    b->mass_unseeded = g->SCBoundStarMassUnseeded;
+    b->scmass        = g->SCBoundClusterMass;
+    b->rdm           = g->SCBoundRdm;
+    b->mdm           = g->SCBoundMdm;
+    b->num           = g->NStarBound;
 }
 
 static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
@@ -1943,12 +1973,14 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
             g->SCMetalMassUnseeded / g->SCClusterMassUnseededInit : 0;
         struct SCmetdist md;
         sc_met_unseeded_stats(g, &md);
+        struct SCboundinfo bd;
+        sc_bound_stats(g, &bd);
         /* Reff = 0: not the per-cluster (SecFOFseedsumover=0) path.
          * Mbh_seed = the just-made BH's subgrid mass (the particle at index was
          * converted in place by blackhole_make_one). */
         scinfo_record_seed(index, atime, scaling_mass, g->StarClusterMass,
                            g->MassType[4], g->SCMass_seeded, sc_met, 0, BHP(index).Mass,
-                           g->LenType[5], g->base.GrNr, &md, SC_FLAG_SEEDED);
+                           g->LenType[5], g->base.GrNr, &md, &bd, SC_FLAG_SEEDED);
     }
 }
 
@@ -2010,6 +2042,7 @@ struct ms_group {
     double   scmass_seeded;     /* group consumed SC mass (SCMass_seeded, as-is) */
     double   met_unseeded;      /* unseeded-star metal mass ratio (StarClusterDetails metallicity) */
     struct SCmetdist metdist;   /* unseeded-star metallicity distribution (min/max/median/quartiles/std) */
+    struct SCboundinfo boundinfo; /* BHseedSecFOFbound bound-star summary (all zero when off) */
 };
 
 static int cmp_ms_group_grnr(const void * a, const void * b)
@@ -2225,6 +2258,7 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
         m->met_unseeded = g->SCClusterMassUnseededInit > 0 ?
             g->SCMetalMassUnseeded / g->SCClusterMassUnseededInit : 0;
         sc_met_unseeded_stats(g, &m->metdist);
+        sc_bound_stats(g, &m->boundinfo);
     }
     struct ms_group * msg = (struct ms_group *) mymalloc("MSG", n_msg * sizeof(struct ms_group));
     MPI_Allgatherv(local_msg, n_local * (int) sizeof(struct ms_group), MPI_BYTE,
@@ -2363,7 +2397,7 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
                 scinfo_record_seed(cc->local_index, atime, m->per_scaling, m->sc_mass_total,
                                    m->stellar_mass_total, m->scmass_seeded, m->met_unseeded, 0,
                                    BHP(cc->local_index).Mass, m->bh_ngb, m->GrNr, &m->metdist,
-                                   SC_FLAG_SEEDED);
+                                   &m->boundinfo, SC_FLAG_SEEDED);
                 n_conv_local++;
             }
             message(0, "    seed %d ID=%lu pos=(%.5g, %.5g, %.5g)\n",
@@ -2492,6 +2526,7 @@ struct rs_group {
     double   scmass_seeded; /* group consumed SC mass (SCMass_seeded, as-is) */
     double   met_unseeded;  /* unseeded-star metal mass ratio (StarClusterDetails metallicity) */
     struct SCmetdist metdist; /* unseeded-star metallicity distribution (min/max/median/quartiles/std) */
+    struct SCboundinfo boundinfo; /* BHseedSecFOFbound bound-star summary (all zero when off) */
     /* Equal-weight mean/std of the unseeded stars' log10(BirthMetallicity)
      * (floored at SC_MET_HIST_LOGMIN), for the CWmodelMetallicity 'lognormal'
      * per-cluster draw; the 'uniform' bounds come from metdist.min/max. */
@@ -2734,7 +2769,7 @@ static void sc_detail_record_cluster(double mass, int draw_index, void * data)
         scinfo_record_cluster(c->refid, c->refpos, c->atime, mass, m->sc_mass_total,
                               m->stellar_mass_total, m->scmass_seeded, z_record, reff_pc,
                               mvms_code, m->bh_ngb,
-                              m->GrNr, &m->metdist, SC_FLAG_BELOWSEED);
+                              m->GrNr, &m->metdist, &m->boundinfo, SC_FLAG_BELOWSEED);
         c->count++;
     }
     /* MinBHSeedInSC: this cluster is below MinMscForBHseed, so it never gets a BH no
@@ -2856,6 +2891,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         m->met_unseeded = g->SCClusterMassUnseededInit > 0 ?
             g->SCMetalMassUnseeded / g->SCClusterMassUnseededInit : 0;
         sc_met_unseeded_stats(g, &m->metdist);
+        sc_bound_stats(g, &m->boundinfo);
         /* Equal-weight log10(Z) mean/std of the unseeded stars for the
          * CWmodelMetallicity 'lognormal' per-cluster draw. */
         if(g->NStarUnseeded > 0) {
@@ -3054,7 +3090,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                                            m->stellar_mass_total, m->scmass_seeded,
                                            z_record, reff_pc,
                                            mvms_code, m->bh_ngb, m->GrNr, &m->metdist,
-                                           SC_FLAG_NOVMS);
+                                           &m->boundinfo, SC_FLAG_NOVMS);
                     continue;
                 }
                 seed_mass_override = (MyFloat) mvms_code;
@@ -3072,7 +3108,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                 scinfo_record_seed(cc->local_index, atime, m_sc, m->sc_mass_total,
                                    m->stellar_mass_total, m->scmass_seeded, z_record, reff_pc,
                                    BHP(cc->local_index).Mass, m->bh_ngb, m->GrNr, &m->metdist,
-                                   SC_FLAG_SEEDED);
+                                   &m->boundinfo, SC_FLAG_SEEDED);
                 n_conv_local++;
             }
             n_placed++;
@@ -3258,7 +3294,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                                        m->sc_mass_total, m->stellar_mass_total,
                                        m->scmass_seeded, m->met_unseeded, 0,
                                        BHP(cc->local_index).Mass, m->bh_ngb, m->GrNr,
-                                       &m->metdist, SC_FLAG_COMPENSATE);
+                                       &m->metdist, &m->boundinfo, SC_FLAG_COMPENSATE);
                 }
                 n_comp_placed++;
                 comp_mass_tot += comp_unit;
@@ -3772,6 +3808,638 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
     myfree(q_counts);
 }
 
+/* ================= BHseedSecFOFbound: bound-star restriction of the budget =================
+ *
+ * For every secondary-FOF group, flag the member star particles that are
+ * gravitationally bound to (all member stars + the local dark matter), and — when
+ * `apply` is set — feed only the bound UNSEEDED stars to the seeding machinery by
+ * overwriting StarClusterMassUnseeded (-> bound Sum(f(Z)*Gamma*m_star)) and
+ * SCcomMcut (-> bound Sum(m_star)) in place, exactly as
+ * fof_secfof_bound_massive_restrict does for its own threshold-gated variant.
+ *
+ * The DM sphere is centred on PotMinPos with radius
+ *     mode 1 : Rdm = Rmax                     (Williams et al. 2025 Eq. 2)
+ *     mode 2 : Rdm = min(2*R50, Rmax)
+ * where Rmax / R50 are the maximum / half-mass radii of the member stars about that
+ * centre.  Rmax is set by the single most distant member star, so once the FoF
+ * percolates it tracks a filament rather than the object (measured: Rmax of the
+ * dominant group grows 11x between linking lengths 0.244 and 7.32 ckpc/h while R50
+ * grows 1.4x, and M_DM(<Rmax)/M_star goes 2 -> 24).  Mode 2 keeps the test on the
+ * object.  The min() form is deliberate: for marginal few-star groups 2*R50 can
+ * exceed Rmax, and enlarging the sphere there would make the test *more* permissive
+ * exactly where it should be strict.
+ *
+ * POTENTIAL: spherically averaged about the group centre rather than the exact
+ * O(N^2) double sum.  With member stars sorted by softened radius s = sqrt(r^2+eps^2),
+ *     potmag(i) = [M_star(<r_i) + M_dm(<r_i)] / s_i
+ *               + Sum_{stars j: r_j > r_i} m_j / s_j
+ *               + Sum_{DM shells beyond r_i} m_shell / s_shell
+ * (self-term excluded from both star sums), which is exact for a spherical mass
+ * distribution and costs O(N log N) instead of O(N^2).  Validated against the exact
+ * sum on this project's z=9 star-primary catalogues at all six linking lengths:
+ * per-star flag agreement 97.9-98.4%, and the bound stellar mass is systematically
+ * low by 1.7-2.0% (a stable bias, not a drift with configuration).  The exact sum
+ * is not affordable here: 93-96% of Sum(N_star^2) sits in ONE group, and that group
+ * alone is 3.4e10 pairs already at z=9 / Ng=512, growing as (stellar mass)^2.
+ *
+ * Boundedness convention matches check_grav_bound() and
+ * fof_secfof_bound_massive_restrict(): with the internal velocity Vel = a^2 dx/dt,
+ *     0.5*|Vel_i - Vcom|^2  <=  atime * G * potmag(i)
+ * (E <= 0, i.e. marginally bound counts as bound).  Vcom is the mass-weighted
+ * centre-of-mass velocity of the stars *and* the DM in the sphere, so the test is
+ * evaluated in the frame of the system it is testing.
+ *
+ * DISTRIBUTION: the group geometry and the member stars are replicated on every rank
+ * with the Allgatherv pattern of secondfof_compute_sizes; the DM never moves — each
+ * rank bins its own local DM into per-group radial histograms which are then summed
+ * with one Allreduce.  Every rank therefore evaluates the same profile and each group
+ * is written only by its owning rank, so the result is independent of the rank count.
+ *
+ * MEMORY: the DM histograms are SB_NBIN doubles per group, replicated
+ * (TotNgroups * SB_NBIN * 8 bytes on every rank).
+ */
+
+/* Radial bins of the per-group DM profile.  The profile is only ever consumed
+ * through cumulative sums and the bin width stays below the gravitational
+ * softening for every group measured here, so linear bins cost no accuracy. */
+#define SB_NBIN 128
+
+/* One member star, replicated on all ranks. */
+struct sb_star {
+    int64_t  GrNr;
+    double   Pos[3];
+    double   Vel[3];
+    double   Mass;
+    double   mGamma;            /* f(Z)*ClusterMass for an UNSEEDED star, else 0 */
+    double   msample;           /* StarClusterMass_sample for an UNSEEDED star, else 0 */
+    double   scm;               /* host-selection key, identical to the `scm` of
+                                 * add_particle_to_group so the bound seed host is
+                                 * picked by the same rule as the unrestricted one */
+    MyIDType ID;
+    int      OrigTask;          /* rank owning this particle */
+    int      OrigIndex;         /* local index on OrigTask */
+    int      is_unseeded;       /* 1 if STARP.Seeded == 0 */
+};
+
+/* Sort by GrNr so each group is a contiguous block; ties broken by ID so the
+ * within-group order (and hence every partial sum below) is reproducible. */
+static int cmp_sb_star(const void * a, const void * b)
+{
+    const struct sb_star * pa = (const struct sb_star *) a;
+    const struct sb_star * pb = (const struct sb_star *) b;
+    if(pa->GrNr != pb->GrNr) return (pa->GrNr > pb->GrNr) - (pa->GrNr < pb->GrNr);
+    return (pa->ID > pb->ID) - (pa->ID < pb->ID);
+}
+
+/* Per-group geometry, replicated so every rank can bin its own DM. */
+struct sb_group {
+    int64_t GrNr;
+    double  cen[3];     /* PotMinPos */
+    double  Rmax;       /* max member-star radius about cen [comoving] */
+    double  Rdm;        /* radius of the DM sphere (mode 1: Rmax, mode 2: min(2*R50,Rmax)) */
+};
+
+static int cmp_sb_group(const void * a, const void * b)
+{
+    int64_t va = ((const struct sb_group *)a)->GrNr;
+    int64_t vb = ((const struct sb_group *)b)->GrNr;
+    return (va > vb) - (va < vb);
+}
+
+/* (cell id, group index) pair of the DM lookup grid.  Each group is registered
+ * into the 27 cells around its centre, so a DM particle only has to search its
+ * own cell (the cell size is >= the largest Rdm). */
+struct sb_cell {
+    int64_t cell;
+    int64_t grp;
+};
+
+static int cmp_sb_cell(const void * a, const void * b)
+{
+    const struct sb_cell * pa = (const struct sb_cell *) a;
+    const struct sb_cell * pb = (const struct sb_cell *) b;
+    if(pa->cell != pb->cell) return (pa->cell > pb->cell) - (pa->cell < pb->cell);
+    return (pa->grp > pb->grp) - (pa->grp < pb->grp);
+}
+
+/* Comoving radius of a member star about its group centre (unsoftened; the
+ * softening is applied where the potential is evaluated). */
+static inline double sb_radius(const double * pos, const double * cen, double BoxSize)
+{
+    double dx = NEAREST(pos[0] - cen[0], BoxSize);
+    double dy = NEAREST(pos[1] - cen[1], BoxSize);
+    double dz = NEAREST(pos[2] - cen[2], BoxSize);
+    return sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+/* (radius, mass, index) triple, sorted by radius to build the profile.  Ties are
+ * broken by the index, which is the position in the ID-sorted member block, so the
+ * ordering — and hence every partial sum taken from it — is reproducible. */
+struct sb_rm {
+    double  r;
+    double  m;
+    int64_t k;
+};
+
+static int cmp_sb_rm(const void * a, const void * b)
+{
+    const struct sb_rm * pa = (const struct sb_rm *) a;
+    const struct sb_rm * pb = (const struct sb_rm *) b;
+    if(pa->r != pb->r) return (pa->r > pb->r) - (pa->r < pb->r);
+    return (pa->k > pb->k) - (pa->k < pb->k);
+}
+
+void
+fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
+                          double atime, Cosmology * CP, MPI_Comm Comm)
+{
+    int NTask, ThisTask;
+    MPI_Comm_size(Comm, &NTask);
+    MPI_Comm_rank(Comm, &ThisTask);
+    const double BoxSize = PartManager->BoxSize;
+    const double G = CP->GravInternal;
+    const double eps = FORCE_SOFTENING() / 2.8;   /* Plummer-equivalent, comoving */
+    const double eps2 = eps * eps;
+    int i, g;
+    int64_t k;
+
+    if(mode != 1 && mode != 2)
+        return;
+
+    /* ---- Step 0: replicate (GrNr, PotMinPos) of every group on every rank. ---- */
+    int local_ngroups = (int) fof->Ngroups;
+    int * gc_counts = (int *) mymalloc2("SBgc", sizeof(int) * NTask);
+    MPI_Allgather(&local_ngroups, 1, MPI_INT, gc_counts, 1, MPI_INT, Comm);
+    int64_t total_groups = 0;
+    int * gc_displs = (int *) mymalloc2("SBgd", sizeof(int) * NTask);
+    for(i = 0; i < NTask; i++) {
+        gc_displs[i] = (int) total_groups;
+        total_groups += gc_counts[i];
+    }
+    if(total_groups == 0) {
+        myfree(gc_displs);
+        myfree(gc_counts);
+        return;
+    }
+    /* Checked up front: it also bounds the `int` group loop counters below. */
+    if(total_groups > (int64_t) INT_MAX / SB_NBIN)
+        endrun(1, "BHseedSecFOFbound: %ld secFOF groups x %d radial bins overflows the "
+                  "MPI_Allreduce count. Raise SecondFOFMinPrimaryLength or lower SB_NBIN.\n",
+                  total_groups, SB_NBIN);
+
+    struct sb_group * sbg = (struct sb_group *)
+        mymalloc2("SBgrp", sizeof(struct sb_group) * total_groups);
+    {
+        struct sb_group * loc = (struct sb_group *)
+            mymalloc2("SBgrpl", sizeof(struct sb_group) * (local_ngroups > 0 ? local_ngroups : 1));
+        for(g = 0; g < local_ngroups; g++) {
+            loc[g].GrNr = fof->Group[g].base.GrNr;
+            int d;
+            for(d = 0; d < 3; d++)
+                loc[g].cen[d] = fof->Group[g].PotMinPos[d];
+            loc[g].Rmax = 0;
+            loc[g].Rdm = 0;
+        }
+        int * cb = (int *) mymalloc2("SBgcb", sizeof(int) * NTask);
+        int * db = (int *) mymalloc2("SBgdb", sizeof(int) * NTask);
+        for(i = 0; i < NTask; i++) {
+            cb[i] = gc_counts[i] * (int) sizeof(struct sb_group);
+            db[i] = gc_displs[i] * (int) sizeof(struct sb_group);
+        }
+        MPI_Allgatherv(loc, local_ngroups * (int) sizeof(struct sb_group), MPI_BYTE,
+                       sbg, cb, db, MPI_BYTE, Comm);
+        myfree(db);
+        myfree(cb);
+        myfree(loc);
+    }
+    qsort(sbg, total_groups, sizeof(struct sb_group), cmp_sb_group);
+
+    /* ---- Step 1: replicate every group's member STARS on every rank. ---- */
+    int64_t n_local_star = 0;
+    for(i = 0; i < PartManager->NumPart; i++)
+        if(P[i].Type == 4 && P[i].GrNr >= 0)
+            n_local_star++;
+
+    int * sc_counts = (int *) mymalloc2("SBsc", sizeof(int) * NTask);
+    int n_local_star_int = (int) n_local_star;
+    MPI_Allgather(&n_local_star_int, 1, MPI_INT, sc_counts, 1, MPI_INT, Comm);
+    int64_t total_stars = 0;
+    int * sc_displs = (int *) mymalloc2("SBsd", sizeof(int) * NTask);
+    for(i = 0; i < NTask; i++) {
+        sc_displs[i] = (int) total_stars;
+        total_stars += sc_counts[i];
+    }
+
+    struct sb_star * sbs = (struct sb_star *)
+        mymalloc2("SBstar", sizeof(struct sb_star) * (total_stars > 0 ? total_stars : 1));
+    {
+        struct sb_star * loc = (struct sb_star *)
+            mymalloc2("SBstarl", sizeof(struct sb_star) * (n_local_star > 0 ? n_local_star : 1));
+        int64_t n = 0;
+        for(i = 0; i < PartManager->NumPart; i++) {
+            if(!(P[i].Type == 4 && P[i].GrNr >= 0)) continue;
+            struct sb_star * m = &loc[n++];
+            m->GrNr = P[i].GrNr;
+            int d;
+            for(d = 0; d < 3; d++) {
+                m->Pos[d] = P[i].Pos[d];
+                m->Vel[d] = P[i].Vel[d];
+            }
+            m->Mass = P[i].Mass;
+            m->ID = P[i].ID;
+            m->OrigTask = ThisTask;
+            m->OrigIndex = i;
+            m->is_unseeded = !STARP(i).Seeded;
+            /* f(Z)-scaled cluster mass: the bound sum replaces
+             * StarClusterMassUnseeded, which carries f(Z) too. */
+            m->mGamma = m->is_unseeded ?
+                get_seed_metallicity_factor(STARP(i).BirthMetallicity) * STARP(i).ClusterMass : 0;
+            m->msample = m->is_unseeded ? STARP(i).StarClusterMass_sample : 0;
+            m->scm = (fof_params.StarClusterSampling && !fof_params.SeedSecFOFcomSample) ?
+                m->msample : m->mGamma;
+        }
+        int * cb = (int *) mymalloc2("SBscb", sizeof(int) * NTask);
+        int * db = (int *) mymalloc2("SBsdb", sizeof(int) * NTask);
+        for(i = 0; i < NTask; i++) {
+            cb[i] = sc_counts[i] * (int) sizeof(struct sb_star);
+            db[i] = sc_displs[i] * (int) sizeof(struct sb_star);
+        }
+        MPI_Allgatherv(loc, n_local_star_int * (int) sizeof(struct sb_star), MPI_BYTE,
+                       sbs, cb, db, MPI_BYTE, Comm);
+        myfree(db);
+        myfree(cb);
+        myfree(loc);
+    }
+    qsort(sbs, total_stars, sizeof(struct sb_star), cmp_sb_star);
+
+    /* Block [gstart[g], gend[g]) of each group's stars in sbs.  Both arrays are
+     * sorted by GrNr, so one merge pass suffices; a group with no member star gets
+     * an empty block.  Every rank does this for EVERY group (it has all the stars),
+     * because the DM binning below needs the geometry of groups it does not own. */
+    int64_t * gstart = (int64_t *) mymalloc2("SBgs", sizeof(int64_t) * total_groups);
+    int64_t * gend   = (int64_t *) mymalloc2("SBge", sizeof(int64_t) * total_groups);
+    {
+        int64_t pos = 0;
+        for(g = 0; g < total_groups; g++) {
+            while(pos < total_stars && sbs[pos].GrNr < sbg[g].GrNr)
+                pos++;
+            gstart[g] = pos;
+            while(pos < total_stars && sbs[pos].GrNr == sbg[g].GrNr)
+                pos++;
+            gend[g] = pos;
+        }
+    }
+
+    /* Rmax and the stellar half-mass radius R50 about the group centre, hence the
+     * DM sphere radius Rdm.  Sorting the (radius, mass) pairs once gives both
+     * exactly and is cheaper than bisecting on the half-mass condition. */
+    double Rdm_max = 0;
+    for(g = 0; g < total_groups; g++) {
+        const int64_t s = gstart[g], e = gend[g], ns = e - s;
+        if(ns <= 0) { sbg[g].Rmax = 0; sbg[g].Rdm = 0; continue; }
+        struct sb_rm * rm = (struct sb_rm *) mymalloc2("SBrm0", sizeof(struct sb_rm) * ns);
+        double mtot = 0;
+        for(k = 0; k < ns; k++) {
+            rm[k].r = sb_radius(sbs[s + k].Pos, sbg[g].cen, BoxSize);
+            rm[k].m = sbs[s + k].Mass;
+            rm[k].k = k;
+            mtot += rm[k].m;
+        }
+        qsort(rm, ns, sizeof(struct sb_rm), cmp_sb_rm);
+        double rmax = rm[ns - 1].r;
+        double r50 = rmax, acc = 0;
+        for(k = 0; k < ns; k++) {
+            acc += rm[k].m;
+            if(acc >= 0.5 * mtot) { r50 = rm[k].r; break; }
+        }
+        myfree(rm);
+        sbg[g].Rmax = rmax;
+        sbg[g].Rdm = (mode == 2 && 2.0 * r50 < rmax) ? 2.0 * r50 : rmax;
+        if(sbg[g].Rdm > Rdm_max) Rdm_max = sbg[g].Rdm;
+    }
+
+    /* ---- Step 2: bin the local DM into per-group radial histograms. ---- */
+    /* hist[g*SB_NBIN + b] = DM mass in shell b of group g; mom[g*4 + 0..2] = DM
+     * momentum inside Rdm, mom[g*4+3] = DM mass inside Rdm. */
+    double * dmhist = (double *) mymalloc2("SBhist", sizeof(double) * total_groups * SB_NBIN);
+    double * dmmom  = (double *) mymalloc2("SBmom", sizeof(double) * total_groups * 4);
+    memset(dmhist, 0, sizeof(double) * total_groups * SB_NBIN);
+    memset(dmmom, 0, sizeof(double) * total_groups * 4);
+
+    if(Rdm_max > 0) {
+        /* Lookup grid: cell size >= Rdm_max so registering each group in its 27
+         * neighbouring cells lets a DM particle search only its own cell. */
+        int ncell = (int) (BoxSize / Rdm_max);
+        if(ncell < 1) ncell = 1;
+        if(ncell > 512) ncell = 512;
+        const double lcell = BoxSize / ncell;
+
+        int64_t ncell_ent = 0;
+        struct sb_cell * cells = (struct sb_cell *)
+            mymalloc2("SBcell", sizeof(struct sb_cell) * total_groups * 27);
+        for(g = 0; g < total_groups; g++) {
+            if(sbg[g].Rdm <= 0) continue;
+            int ci = (int) floor(sbg[g].cen[0] / lcell);
+            int cj = (int) floor(sbg[g].cen[1] / lcell);
+            int ck = (int) floor(sbg[g].cen[2] / lcell);
+            int di, dj, dk;
+            for(di = -1; di <= 1; di++)
+            for(dj = -1; dj <= 1; dj++)
+            for(dk = -1; dk <= 1; dk++) {
+                int a = ((ci + di) % ncell + ncell) % ncell;
+                int b = ((cj + dj) % ncell + ncell) % ncell;
+                int c = ((ck + dk) % ncell + ncell) % ncell;
+                cells[ncell_ent].cell = ((int64_t) a * ncell + b) * ncell + c;
+                cells[ncell_ent].grp = g;
+                ncell_ent++;
+            }
+        }
+        qsort(cells, ncell_ent, sizeof(struct sb_cell), cmp_sb_cell);
+        /* Drop duplicate (cell, group) pairs.  With ncell < 3 the 27 neighbour
+         * offsets alias onto the same cell (ncell == 1 maps all of them to cell 0),
+         * so without this a DM particle would be binned into the same group up to
+         * 27 times.  cells is sorted by (cell, grp), so duplicates are adjacent. */
+        {
+            int64_t w = 0, t;
+            for(t = 0; t < ncell_ent; t++) {
+                if(w > 0 && cells[w - 1].cell == cells[t].cell
+                         && cells[w - 1].grp == cells[t].grp)
+                    continue;
+                cells[w++] = cells[t];
+            }
+            ncell_ent = w;
+        }
+
+        /* Deliberately serial.  Threading this would need either per-thread copies of
+         * the histogram (total_groups*SB_NBIN doubles each) or atomic adds, and the
+         * latter would make the bin sums depend on the thread schedule.  The loop is
+         * one binary search per local DM particle into a table of 27*Ngroups entries
+         * (~1.7e7 operations for a 512^3 run on 80 ranks), which is negligible next
+         * to the Allgatherv above. */
+        for(i = 0; i < PartManager->NumPart; i++) {
+            if(P[i].Type != 1) continue;
+            int ci = (int) floor(P[i].Pos[0] / lcell);
+            int cj = (int) floor(P[i].Pos[1] / lcell);
+            int ck = (int) floor(P[i].Pos[2] / lcell);
+            ci = (ci % ncell + ncell) % ncell;
+            cj = (cj % ncell + ncell) % ncell;
+            ck = (ck % ncell + ncell) % ncell;
+            int64_t key = ((int64_t) ci * ncell + cj) * ncell + ck;
+            /* first entry with this cell id */
+            int64_t lo = 0, hi = ncell_ent;
+            while(lo < hi) {
+                int64_t mid = lo + (hi - lo) / 2;
+                if(cells[mid].cell < key) lo = mid + 1;
+                else hi = mid;
+            }
+            int64_t t;
+            for(t = lo; t < ncell_ent && cells[t].cell == key; t++) {
+                int64_t gg = cells[t].grp;
+                double Rdm = sbg[gg].Rdm;
+                double dx = NEAREST(P[i].Pos[0] - sbg[gg].cen[0], BoxSize);
+                double dy = NEAREST(P[i].Pos[1] - sbg[gg].cen[1], BoxSize);
+                double dz = NEAREST(P[i].Pos[2] - sbg[gg].cen[2], BoxSize);
+                double r2 = dx * dx + dy * dy + dz * dz;
+                if(r2 > Rdm * Rdm) continue;
+                double r = sqrt(r2);
+                int b = (int) (r / Rdm * SB_NBIN);
+                if(b < 0) b = 0;
+                if(b >= SB_NBIN) b = SB_NBIN - 1;
+                dmhist[gg * SB_NBIN + b] += P[i].Mass;
+                dmmom[gg * 4 + 0] += P[i].Mass * P[i].Vel[0];
+                dmmom[gg * 4 + 1] += P[i].Mass * P[i].Vel[1];
+                dmmom[gg * 4 + 2] += P[i].Mass * P[i].Vel[2];
+                dmmom[gg * 4 + 3] += P[i].Mass;
+            }
+        }
+        myfree(cells);
+    }
+
+    /* Sum the per-rank histograms.  With a uniform DM mass the bin sums are exact
+     * integers times m_dm, so the reduction order does not matter; for a run with
+     * unequal DM masses the last bits may depend on the rank count. */
+    MPI_Allreduce(MPI_IN_PLACE, dmhist, (int) (total_groups * SB_NBIN), MPI_DOUBLE, MPI_SUM, Comm);
+    MPI_Allreduce(MPI_IN_PLACE, dmmom, (int) (total_groups * 4), MPI_DOUBLE, MPI_SUM, Comm);
+
+    /* ---- Step 3: per OWNED group, flag the bound stars and (optionally) restrict. ---- */
+    int64_t n_restricted = 0, n_dropped = 0;
+    for(g = 0; g < local_ngroups; g++) {
+        struct Group * grp = &fof->Group[g];
+        /* locate this group in the replicated arrays */
+        int64_t lo = 0, hi = total_groups, gi = -1;
+        while(lo < hi) {
+            int64_t mid = lo + (hi - lo) / 2;
+            if(sbg[mid].GrNr < grp->base.GrNr) lo = mid + 1;
+            else hi = mid;
+        }
+        if(lo < total_groups && sbg[lo].GrNr == grp->base.GrNr) gi = lo;
+
+        grp->SCBoundStarMass = 0;
+        grp->SCBoundStarMassUnseeded = 0;
+        grp->SCBoundClusterMass = 0;
+        grp->NStarBound = 0;
+        grp->SCBoundRdm = 0;
+        grp->SCBoundMdm = 0;
+
+        if(gi < 0 || gend[gi] <= gstart[gi]) {
+            /* no member stars: nothing can seed */
+            if(apply) {
+                grp->StarClusterMassUnseeded = 0;
+                grp->SCcomMcut = 0;
+                grp->seed_index_star = -1;
+                grp->seed_task_star = -1;
+            }
+            continue;
+        }
+
+        const int64_t s = gstart[gi], e = gend[gi];
+        const int64_t N = e - s;
+        const double Rdm = sbg[gi].Rdm;
+        grp->SCBoundRdm = (float) Rdm;
+        grp->SCBoundMdm = (float) dmmom[gi * 4 + 3];
+
+        /* Member stars sorted by radius; rm[].k indexes back into the block. */
+        struct sb_rm * rm = (struct sb_rm *) mymalloc2("SBrm", sizeof(struct sb_rm) * N);
+        for(k = 0; k < N; k++) {
+            rm[k].r = sb_radius(sbs[s + k].Pos, sbg[gi].cen, BoxSize);
+            rm[k].m = sbs[s + k].Mass;
+            rm[k].k = k;
+        }
+        qsort(rm, N, sizeof(struct sb_rm), cmp_sb_rm);
+
+        /* Star prefix (mass strictly inside r_k) and suffix (Sum m/s strictly outside),
+         * both excluding the star itself, matching the exact potential's self-term. */
+        double * Min = (double *) mymalloc2("SBmin", sizeof(double) * N);
+        double * Tout = (double *) mymalloc2("SBtout", sizeof(double) * N);
+        {
+            double acc = 0;
+            for(k = 0; k < N; k++) { Min[k] = acc; acc += rm[k].m; }
+            double t = 0;
+            for(k = N - 1; k >= 0; k--) {
+                Tout[k] = t;
+                t += rm[k].m / sqrt(rm[k].r * rm[k].r + eps2);
+            }
+        }
+
+        /* DM shell prefix / suffix at bin resolution. */
+        double dr = (Rdm > 0) ? Rdm / SB_NBIN : 0;
+        double * Mdm_cum = (double *) mymalloc2("SBmdmc", sizeof(double) * (SB_NBIN + 1));
+        double * Tdm     = (double *) mymalloc2("SBtdm", sizeof(double) * (SB_NBIN + 1));
+        {
+            int b;
+            Mdm_cum[0] = 0;
+            for(b = 0; b < SB_NBIN; b++)
+                Mdm_cum[b + 1] = Mdm_cum[b] + dmhist[gi * SB_NBIN + b];
+            Tdm[SB_NBIN] = 0;
+            for(b = SB_NBIN - 1; b >= 0; b--) {
+                double c = (b + 0.5) * dr;
+                double sc = sqrt(c * c + eps2);
+                Tdm[b] = Tdm[b + 1] + dmhist[gi * SB_NBIN + b] / sc;
+            }
+        }
+
+        /* Rest frame: mass-weighted COM velocity of the member stars + the DM in the
+         * sphere, i.e. the frame of the system whose binding is being tested. */
+        double Vcom[3] = {0, 0, 0};
+        {
+            double msum = dmmom[gi * 4 + 3];
+            int d;
+            for(d = 0; d < 3; d++) Vcom[d] = dmmom[gi * 4 + d];
+            for(k = 0; k < N; k++) {
+                msum += sbs[s + k].Mass;
+                for(d = 0; d < 3; d++) Vcom[d] += sbs[s + k].Mass * sbs[s + k].Vel[d];
+            }
+            if(msum > 0) for(d = 0; d < 3; d++) Vcom[d] /= msum;
+        }
+
+        double bound_mass = 0, bound_mass_uns = 0, bound_mgamma = 0, bound_msample = 0;
+        int nbound = 0;
+        double best_scm = -1.0;
+        const struct sb_star * best = NULL;
+        for(k = 0; k < N; k++) {
+            const struct sb_star * st = &sbs[s + rm[k].k];
+            const double rk_ = rm[k].r;                       /* unsoftened radius */
+            const double sk = sqrt(rk_ * rk_ + eps2);         /* softened radius */
+
+            /* DM mass inside r_k and the shell-tail beyond it (linear within the bin). */
+            double Mdm_in = 0, Tdm_out = 0;
+            if(dr > 0) {
+                double x = rk_ / dr;
+                int b = (int) x;
+                if(b >= SB_NBIN) { b = SB_NBIN - 1; x = SB_NBIN; }
+                if(b < 0) { b = 0; x = 0; }
+                double frac = x - b;
+                if(frac < 0) frac = 0;
+                if(frac > 1) frac = 1;
+                double mb = dmhist[gi * SB_NBIN + b];
+                double cb = (b + 0.5) * dr;
+                double scb = sqrt(cb * cb + eps2);
+                Mdm_in = Mdm_cum[b] + mb * frac;
+                Tdm_out = Tdm[b + 1] + mb * (1.0 - frac) / scb;
+            }
+
+            double potmag = (Min[k] + Mdm_in) / sk + Tout[k] + Tdm_out;
+            double dvx = st->Vel[0] - Vcom[0];
+            double dvy = st->Vel[1] - Vcom[1];
+            double dvz = st->Vel[2] - Vcom[2];
+            double ke = 0.5 * (dvx * dvx + dvy * dvy + dvz * dvz);
+            double pe = atime * G * potmag;
+            if(ke <= pe) {
+                nbound++;
+                bound_mass += st->Mass;
+                if(st->is_unseeded) {
+                    bound_mass_uns += st->Mass;
+                    bound_mgamma += st->mGamma;
+                    bound_msample += st->msample;
+                    /* Same key as add_particle_to_group's MaxStarClusterMass, so the
+                     * bound host is the one the unrestricted run would have chosen had
+                     * the unbound stars not existed.  Ties go to the smaller ID. */
+                    if(st->scm > best_scm ||
+                       (best && st->scm == best_scm && st->ID < best->ID)) {
+                        best_scm = st->scm;
+                        best = st;
+                    }
+                }
+            }
+        }
+
+        grp->SCBoundStarMass = bound_mass;
+        grp->SCBoundStarMassUnseeded = bound_mass_uns;
+        grp->SCBoundClusterMass = bound_mgamma;
+        grp->NStarBound = nbound;
+
+        if(apply) {
+            /* Every quantity the seeding gates read off the UNSEEDED stars is replaced
+             * by its bound-only counterpart.  Both cluster-mass variants must be done:
+             * the combined sampler reads StarClusterMassUnseeded, while the plain
+             * secFOF path with StarClusterSampling=1 reads StarClusterMassSampleUnseeded.
+             *
+             * NStarUnseeded is deliberately NOT overwritten: it is the denominator of
+             * the SCMetUnseeded* metallicity histogram/sums, which were accumulated over
+             * all unseeded stars in add_particle_to_group and cannot be recomputed here.
+             * The multi-seed host caps derived from it therefore still count every
+             * unseeded star; those modes (SeedInSecFOFMultipleSeeds, SecFOFseedsumover=0)
+             * cap the seed COUNT, not the budget, so the restriction is still applied to
+             * every mass that decides whether and how massive a seed is. */
+            double old = fof_params.StarClusterSampling && !fof_params.SeedSecFOFcomSample ?
+                grp->StarClusterMassSampleUnseeded : grp->StarClusterMassUnseeded;
+            double neu = fof_params.StarClusterSampling && !fof_params.SeedSecFOFcomSample ?
+                bound_msample : bound_mgamma;
+            if(old > 0 && neu <= 0) n_dropped++;
+            else if(neu < old) n_restricted++;
+
+            grp->StarClusterMassUnseeded = bound_mgamma;
+            grp->StarClusterMassSampleUnseeded = bound_msample;
+            grp->SCcomMcut = bound_mass_uns;
+            /* Repoint the seed host to the best BOUND unseeded star so a BH is never
+             * seeded at an unbound star; drop the seed if none is bound (the gates drop
+             * the group anyway, since the budget is now 0). */
+            if(best) {
+                grp->seed_index_star = best->OrigIndex;
+                grp->seed_task_star  = best->OrigTask;
+                grp->SeedStarID      = best->ID;
+                grp->MaxStarClusterMass = best_scm;
+            } else {
+                grp->seed_index_star = -1;
+                grp->seed_task_star  = -1;
+                grp->MaxStarClusterMass = 0;
+            }
+        }
+
+        /* LIFO within the iteration: Tdm, Mdm_cum, Tout, Min, rm. */
+        myfree(Tdm);
+        myfree(Mdm_cum);
+        myfree(Tout);
+        myfree(Min);
+        myfree(rm);
+    }
+
+    if(apply) {
+        int64_t tot[2] = {n_restricted, n_dropped}, all[2];
+        MPI_Allreduce(tot, all, 2, MPI_INT64, MPI_SUM, Comm);
+        message(0, "BHseedSecFOFbound=%d: restricted the seeding budget of %ld secFOF groups "
+                   "(%ld lost every bound unseeded star and can no longer seed).\n",
+                   mode, all[0], all[1]);
+    }
+
+    /* ---- Step 4: strict LIFO frees (reverse allocation order). ---- */
+    myfree(dmmom);
+    myfree(dmhist);
+    myfree(gend);
+    myfree(gstart);
+    myfree(sbs);
+    myfree(sc_displs);
+    myfree(sc_counts);
+    myfree(sbg);
+    myfree(gc_displs);
+    myfree(gc_counts);
+}
+
+int fof_get_secfof_bound_mode(void)
+{
+    return fof_params.BHseedSecFOFbound;
+}
+
 void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double atime, const RandTable * const rnd,
               int64_t ** seeded_grnr_out, int * n_seeded_out,
               double ** seeded_totmsc_out, double ** seeded_mcut_out, Cosmology * CP, MPI_Comm Comm)
@@ -3780,6 +4448,16 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
 
     int NTask;
     MPI_Comm_size(Comm, &NTask);
+
+    /* BHseedSecFOFbound: restrict every group's seeding budget to its gravitationally
+     * bound stars BEFORE any gate or sampler reads it.  This has to sit ahead of the
+     * mask loop below (not inside the SeedSecFOFcomSample branch, where the older
+     * SeedSeedFOFMassiveBoundStar hooks in) because it applies to every secFOF
+     * seeding variant.  get_seed_in_secfof() keeps it off the primary-FOF fof_seed
+     * call: the parameter requires SeedInSecFOFasStarCluster=1, and when that is on
+     * run.c reaches fof_seed only through secondfof_seed. */
+    if(fof_params.BHseedSecFOFbound && get_seed_in_secfof())
+        fof_secfof_bound_restrict(fof, fof_params.BHseedSecFOFbound, 1, atime, CP, Comm);
 
     char * Marked = (char *) mymalloc2("SeedMark", fof->Ngroups);
 

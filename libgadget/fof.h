@@ -139,6 +139,24 @@ struct Group
     double  SCMetUnseededLogSum2;          /*!< Sum of log10(BirthMetallicity)^2, floored (CWmodelMetallicity). */
     float   SCMetUnseededHist[SC_MET_HIST_NBIN]; /*!< log10(Z) histogram (see SC_MET_HIST_* above). */
 
+    /* BHseedSecFOFbound diagnostics: the gravitationally bound subset of the
+     * group's UNSEEDED stars, as selected by fof_secfof_bound_restrict.  These
+     * are pure bookkeeping -- the restriction itself acts by overwriting
+     * StarClusterMassUnseeded / SCcomMcut -- and are written to the SecPIG
+     * catalogue and the StarClusterDetails record.  All zero when
+     * BHseedSecFOFbound = 0, i.e. when no bound selection was performed.
+     * NOT accumulated in add_particle_to_group and NOT summed in
+     * fof_reduce_group: they are filled after the group reduction, on the
+     * owning rank only, from the globally gathered member list. */
+    MyFloat SCBoundStarMass;         /*!< Sum of m_star over BOUND member stars (seeded + unseeded). */
+    MyFloat SCBoundStarMassUnseeded; /*!< Sum of m_star over BOUND UNSEEDED stars (the new SCcomMcut). */
+    MyFloat SCBoundClusterMass;      /*!< Sum of f(Z)*ClusterMass over BOUND UNSEEDED stars
+                                      *   (the new StarClusterMassUnseeded, i.e. the seeding budget). */
+    int     NStarBound;              /*!< Count of BOUND member stars (seeded + unseeded). */
+    float   SCBoundRdm;              /*!< Radius of the DM sphere actually used [comoving]: Rmax
+                                      *   (BHseedSecFOFbound=1) or min(2*R50, Rmax) (=2). */
+    float   SCBoundMdm;              /*!< DM mass inside SCBoundRdm [code units]. */
+
     /* SeedSecFOFcomSample (combined per-secFOF sampling). Accumulated over
      * UNSEEDED stars (STARP.Seeded==0) only. */
     MyFloat SCcomMcut;    /*!< Sum of m_star over unseeded stars = mass-function cutoff M_cut */
@@ -177,6 +195,19 @@ void fof_finish(FOFGroups * fof);
 void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double atime, const RandTable * const rnd,
               int64_t ** seeded_grnr_out, int * n_seeded_out,
               double ** seeded_totmsc_out, double ** seeded_mcut_out, Cosmology * CP, MPI_Comm Comm);
+
+/* BHseedSecFOFbound (see gadget/params.c and the implementation in fof.c).
+ * Fills the SCBound* fields of every owned group with the gravitationally bound
+ * subset of its member stars.  `mode` is 1 (DM inside Rmax) or 2 (DM inside
+ * min(2*R50, Rmax)); any other value is a no-op.  With `apply` set it additionally
+ * overwrites StarClusterMassUnseeded / SCcomMcut / the seed-star pointer so only the
+ * bound stars drive BH seeding; with `apply` clear it only reports (used on the
+ * catalogue path, where the seeding decision has already been taken).
+ * Collective: must be called by every rank of Comm. */
+void fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
+                               double atime, Cosmology * CP, MPI_Comm Comm);
+/* Whether BHseedSecFOFbound is active, and in which mode (0 = off). */
+int fof_get_secfof_bound_mode(void);
 
 /* Saves the Group structure to disc.
  Returns 1 if a domain_exchange is needed afterwards.*/

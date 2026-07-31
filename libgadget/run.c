@@ -820,7 +820,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
          * Only computes groups and sets SecGrNr; catalog I/O is deferred. */
         SecondFOFResult * secfof = NULL;
         if(WriteFOF && get_secondfof_on()) {
-            secfof = secondfof_run(ddecomp, GetOutputPotential(), MPI_COMM_WORLD);
+            secfof = secondfof_run(ddecomp, GetOutputPotential(), atime, &All.CP, MPI_COMM_WORLD);
         }
 
         /* WriteFOF just reminds the checkpoint code to save GroupID*/
@@ -989,7 +989,7 @@ runfof(const int RestartSnapNum, const inttime_t Ti_Current, const struct header
     /* Run second FOF computation (sets SecGrNr) before saving catalogs */
     SecondFOFResult * secfof = NULL;
     if(get_secondfof_on()) {
-        secfof = secondfof_run(ddecomp, GetOutputPotential(), MPI_COMM_WORLD);
+        secfof = secondfof_run(ddecomp, GetOutputPotential(), header->TimeSnapshot, &All.CP, MPI_COMM_WORLD);
     }
 
     /* Skip saving the primary FOF catalog if SecFOFonly is set */

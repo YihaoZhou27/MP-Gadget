@@ -41,6 +41,7 @@ struct SecondFOFParams {
     int SeedSecFOFcomSampleParticle; /* per-star-particle sampling variant of SeedSecFOFcomSample */
     int SecFOFStarCluster;  /* flag that sec FOF groups are star clusters (requires SecondFOFOn && StarClusterOn) */
     int SecFOFUnseededPart; /* if 1, only unseeded star particles are primary-linking particles (requires StarClusterOn) */
+    int BHseedSecFOFbound;  /* 0 = off; 1 = bound to stars + DM in Rmax; 2 = ... DM in min(2*R50,Rmax) */
     char SecondFOFFileBase[256];
 };
 
@@ -71,6 +72,12 @@ void set_secondfof_params(ParameterSet * ps)
             message(0, "SeedInSecFOFasStarCluster requires SecondFOFOn=1, StarClusterOn=1, and SecFOFStarCluster=1; disabling.\n");
             sfof_params.SeedInSecFOFasStarCluster = 0;
         }
+        /* BHseedSecFOFbound only means anything for the secondary-FOF seed path. */
+        sfof_params.BHseedSecFOFbound = param_get_int(ps, "BHseedSecFOFbound");
+        if(sfof_params.BHseedSecFOFbound && !sfof_params.SeedInSecFOFasStarCluster)
+            endrun(1, "BHseedSecFOFbound=%d requires SeedInSecFOFasStarCluster=1 "
+                      "(effective: SecondFOFOn=1, StarClusterOn=1, SecFOFStarCluster=1).\n",
+                      sfof_params.BHseedSecFOFbound);
         /* SeedSecFOFcomSample requires the (effective) SeedInSecFOFasStarCluster.
          * Hard error (exit) if not satisfied, per design. */
         sfof_params.SeedSecFOFcomSample = param_get_int(ps, "SeedSecFOFcomSample");
@@ -616,6 +623,13 @@ SIMPLE_PROPERTY_SECFOF(PrimaryFOFID, ext.PrimaryFOFID, int64_t, 1)
 
 SIMPLE_PROPERTY_SECFOF(SCMass, grp.StarClusterMass, float, 1)
 SIMPLE_PROPERTY_SECFOF(SCMass_seeded, grp.SCMass_seeded, float, 1)
+/* BHseedSecFOFbound diagnostics; all zero when the feature is off. */
+SIMPLE_PROPERTY_SECFOF(BoundStarMass, grp.SCBoundStarMass, float, 1)
+SIMPLE_PROPERTY_SECFOF(BoundStarMassUnseeded, grp.SCBoundStarMassUnseeded, float, 1)
+SIMPLE_PROPERTY_SECFOF(BoundSCMass, grp.SCBoundClusterMass, float, 1)
+SIMPLE_PROPERTY_SECFOF(BoundStarNum, grp.NStarBound, int, 1)
+SIMPLE_PROPERTY_SECFOF(BoundRdm, grp.SCBoundRdm, float, 1)
+SIMPLE_PROPERTY_SECFOF(BoundDMMass, grp.SCBoundMdm, float, 1)
 SIMPLE_PROPERTY_SECFOF(SCMetallicity, grp.StarClusterMetallicity, float, 1)
 SIMPLE_PROPERTY_SECFOF(SCMetalElemMass, grp.StarClusterMetalElemMass[0], float, NMETALS)
 
@@ -733,6 +747,17 @@ secondfof_register_io_blocks(int MetalReturnOn, int ComputeSize, int SecFOFStarC
         IO_REG(SecSCMass_seeded, "f4", 1, PTYPE_FOF_GROUP, IOTable);
         IO_REG(SecSCMetallicity, "f4", 1, PTYPE_FOF_GROUP, IOTable);
         IO_REG(SecSCMetalElemMass, "f4", NMETALS, PTYPE_FOF_GROUP, IOTable);
+        /* BHseedSecFOFbound: the gravitationally bound subset of the member stars.
+         * Registered unconditionally so the catalogue schema does not depend on a
+         * runtime switch; every block is identically 0 when BHseedSecFOFbound = 0.
+         * These are diagnostics only -- SecSCMass, SecMassByType and SecLengthByType
+         * above still describe ALL member stars in every mode. */
+        IO_REG(SecBoundStarMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+        IO_REG(SecBoundStarMassUnseeded, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+        IO_REG(SecBoundSCMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+        IO_REG(SecBoundStarNum, "i4", 1, PTYPE_FOF_GROUP, IOTable);
+        IO_REG(SecBoundRdm, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+        IO_REG(SecBoundDMMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
     }
 }
 
@@ -982,7 +1007,8 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
     fof_set_seed_params(save_SeedSC, save_SeedHalo, save_SeedGas);
 }
 
-SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential, MPI_Comm Comm)
+SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential,
+                                double atime, Cosmology * CP, MPI_Comm Comm)
 {
     int i;
 
@@ -1025,6 +1051,16 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential, MPI
     #pragma omp parallel for
     for(i = 0; i < PartManager->NumPart; i++)
         P[i].SecGrNr = P[i].GrNr;
+
+    /* Step 5b: BHseedSecFOFbound -- fill the catalogue's SecBound* blocks.
+     * Must happen HERE, while P[].GrNr still holds the secondary group number that
+     * fof_secfof_bound_restrict keys on (Step 6 restores the primary one).
+     * apply = 0: the seeding decision was taken at seeding time on its own FOF pass;
+     * this call only measures the bound subset for the snapshot, so the catalogue's
+     * SCMass / MassByType / LengthByType keep describing ALL member stars. */
+    if(sfof_params.BHseedSecFOFbound)
+        fof_secfof_bound_restrict(&fof, sfof_params.BHseedSecFOFbound, 0,
+                                  atime, CP, Comm);
 
     /* Step 6: Restore original GrNr and free saved_GrNr
      * (must free before allocating result to respect stack allocator order) */
