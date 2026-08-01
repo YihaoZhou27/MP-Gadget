@@ -931,6 +931,7 @@ static void fof_reduce_group(void * pdst, void * psrc) {
     for(j = 0; j < SC_MET_HIST_NBIN; j++)
         gdst->SCMetUnseededHist[j] += gsrc->SCMetUnseededHist[j];
     gdst->SCcomMcut += gsrc->SCcomMcut;
+    gdst->StellarMassUnseeded += gsrc->StellarMassUnseeded;
     gdst->GasMetalMass += gsrc->GasMetalMass;
     gdst->StellarMetalMass += gsrc->StellarMetalMass;
     gdst->MassHeIonized += gsrc->MassHeIonized;
@@ -1046,6 +1047,18 @@ static void sc_met_unseeded_stats(const struct Group * g, struct SCmetdist * md)
 
 /* Fill the StarClusterDetails bound-star summary from a (reduced, owned) group.
  * All zero when BHseedSecFOFbound is off, since nothing filled the SCBound* fields. */
+/* The host group's remaining mass sums for the StarClusterDetails record.  sc_budget is
+ * read from StarClusterMassUnseeded, which the bound pass has already restricted when
+ * BHseedSecFOFbound > 0, so it is by construction the number the sampler was given.
+ * sc_unseeded is derived from the two raw catalogue sums (they partition every member
+ * star between seeded and unseeded), so no extra Group field is needed for it. */
+static void sc_group_mass(const struct Group * g, struct SCgroupmass * m)
+{
+    m->stellar_unseeded = g->StellarMassUnseeded;
+    m->sc_unseeded      = g->StarClusterMass - g->SCMass_seeded;
+    m->sc_budget        = g->StarClusterMassUnseeded;
+}
+
 static void sc_bound_stats(const struct Group * g, struct SCboundinfo * b)
 {
     memset(b, 0, sizeof(*b));
@@ -1124,6 +1137,9 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
             gdst->StarClusterMassUnseeded += fseed * STARP(index).ClusterMass;
             gdst->StarClusterMassSampleUnseeded += STARP(index).StarClusterMass_sample;
             gdst->SCcomMcut += P[index].Mass;
+            /* Same sum, kept for the detail records because the bound restriction
+             * overwrites SCcomMcut with the bound-only subset. */
+            gdst->StellarMassUnseeded += P[index].Mass;
             gdst->NStarUnseeded++;
 
             /* Unseeded-star metallicity for StarClusterDetails: metal mass (frozen
@@ -2014,12 +2030,14 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
         sc_met_unseeded_stats(g, &md);
         struct SCboundinfo bd;
         sc_bound_stats(g, &bd);
+        struct SCgroupmass gm;
+        sc_group_mass(g, &gm);
         /* Reff = 0: not the per-cluster (SecFOFseedsumover=0) path.
          * Mbh_seed = the just-made BH's subgrid mass (the particle at index was
          * converted in place by blackhole_make_one). */
         scinfo_record_seed(index, atime, scaling_mass, g->StarClusterMass,
                            g->MassType[4], g->SCMass_seeded, sc_met, 0, BHP(index).Mass,
-                           g->LenType[5], g->base.GrNr, &md, &bd, SC_FLAG_SEEDED);
+                           g->LenType[5], g->base.GrNr, &md, &bd, &gm, SC_FLAG_SEEDED);
     }
 }
 
@@ -2082,6 +2100,7 @@ struct ms_group {
     double   met_unseeded;      /* unseeded-star metal mass ratio (StarClusterDetails metallicity) */
     struct SCmetdist metdist;   /* unseeded-star metallicity distribution (min/max/median/quartiles/std) */
     struct SCboundinfo boundinfo; /* BHseedSecFOFbound bound-star summary (all zero when off) */
+    struct SCgroupmass gmass;     /* host-group unseeded / seeding-budget mass sums */
 };
 
 static int cmp_ms_group_grnr(const void * a, const void * b)
@@ -2298,6 +2317,7 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
             g->SCMetalMassUnseeded / g->SCClusterMassUnseededInit : 0;
         sc_met_unseeded_stats(g, &m->metdist);
         sc_bound_stats(g, &m->boundinfo);
+        sc_group_mass(g, &m->gmass);
     }
     struct ms_group * msg = (struct ms_group *) mymalloc("MSG", n_msg * sizeof(struct ms_group));
     MPI_Allgatherv(local_msg, n_local * (int) sizeof(struct ms_group), MPI_BYTE,
@@ -2436,7 +2456,7 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
                 scinfo_record_seed(cc->local_index, atime, m->per_scaling, m->sc_mass_total,
                                    m->stellar_mass_total, m->scmass_seeded, m->met_unseeded, 0,
                                    BHP(cc->local_index).Mass, m->bh_ngb, m->GrNr, &m->metdist,
-                                   &m->boundinfo, SC_FLAG_SEEDED);
+                                   &m->boundinfo, &m->gmass, SC_FLAG_SEEDED);
                 n_conv_local++;
             }
             message(0, "    seed %d ID=%lu pos=(%.5g, %.5g, %.5g)\n",
@@ -2576,6 +2596,7 @@ struct rs_group {
     double   met_unseeded;  /* unseeded-star metal mass ratio (StarClusterDetails metallicity) */
     struct SCmetdist metdist; /* unseeded-star metallicity distribution (min/max/median/quartiles/std) */
     struct SCboundinfo boundinfo; /* BHseedSecFOFbound bound-star summary (all zero when off) */
+    struct SCgroupmass gmass;     /* host-group unseeded / seeding-budget mass sums */
     /* Equal-weight mean/std of the unseeded stars' log10(BirthMetallicity)
      * (floored at SC_MET_HIST_LOGMIN), for the CWmodelMetallicity 'lognormal'
      * per-cluster draw; the 'uniform' bounds come from metdist.min/max. */
@@ -2819,7 +2840,7 @@ static void sc_detail_record_cluster(double mass, int draw_index, void * data)
         scinfo_record_cluster(c->refid, c->refpos, c->atime, mass, m->sc_mass_total,
                               m->stellar_mass_total, m->scmass_seeded, z_record, reff_pc,
                               mvms_code, m->bh_ngb,
-                              m->GrNr, &m->metdist, &m->boundinfo, SC_FLAG_BELOWSEED);
+                              m->GrNr, &m->metdist, &m->boundinfo, &m->gmass, SC_FLAG_BELOWSEED);
         c->count++;
     }
     /* MinBHSeedInSC: this cluster is below MinMscForBHseed, so it never gets a BH no
@@ -2943,6 +2964,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
             g->SCMetalMassUnseeded / g->SCClusterMassUnseededInit : 0;
         sc_met_unseeded_stats(g, &m->metdist);
         sc_bound_stats(g, &m->boundinfo);
+        sc_group_mass(g, &m->gmass);
         /* Equal-weight log10(Z) mean/std of the unseeded stars for the
          * CWmodelMetallicity 'lognormal' per-cluster draw. */
         if(g->NStarUnseeded > 0) {
@@ -3141,7 +3163,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                                            m->stellar_mass_total, m->scmass_seeded,
                                            z_record, reff_pc,
                                            mvms_code, m->bh_ngb, m->GrNr, &m->metdist,
-                                           &m->boundinfo, SC_FLAG_NOVMS);
+                                           &m->boundinfo, &m->gmass, SC_FLAG_NOVMS);
                     continue;
                 }
                 seed_mass_override = (MyFloat) mvms_code;
@@ -3159,7 +3181,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                 scinfo_record_seed(cc->local_index, atime, m_sc, m->sc_mass_total,
                                    m->stellar_mass_total, m->scmass_seeded, z_record, reff_pc,
                                    BHP(cc->local_index).Mass, m->bh_ngb, m->GrNr, &m->metdist,
-                                   &m->boundinfo, SC_FLAG_SEEDED);
+                                   &m->boundinfo, &m->gmass, SC_FLAG_SEEDED);
                 n_conv_local++;
             }
             n_placed++;
@@ -3345,7 +3367,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                                        m->sc_mass_total, m->stellar_mass_total,
                                        m->scmass_seeded, m->met_unseeded, 0,
                                        BHP(cc->local_index).Mass, m->bh_ngb, m->GrNr,
-                                       &m->metdist, &m->boundinfo, SC_FLAG_COMPENSATE);
+                                       &m->metdist, &m->boundinfo, &m->gmass, SC_FLAG_COMPENSATE);
                 }
                 n_comp_placed++;
                 comp_mass_tot += comp_unit;

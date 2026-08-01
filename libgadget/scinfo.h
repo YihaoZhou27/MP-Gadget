@@ -55,6 +55,25 @@ struct __attribute__((__packed__)) SCseedinfo {
      * related by any single factor.  Their ratio is the group's mass-weighted mean CFE. */
     double   StellarMassTotal;
     double   SCMass_seeded;        /* Host group cluster mass already consumed by earlier seeds (SecSCMass_seeded, as-is). */
+    /* The rest of the host group's mass sums, so the record carries the whole 2x3
+     * matrix (stellar mass / cluster mass) x (all / unseeded / bound / bound+unseeded)
+     * without the reader having to derive anything:
+     *
+     *   quantity                 all stars              unseeded            bound         bound+unseeded
+     *   Sum m_star               StellarMassTotal    StellarMassUnseeded  BoundStarMass  BoundStarMassUnseeded
+     *   Sum Gamma*m_star     StarClusterMassTotal    SCMass_unseeded      BoundSCMass    BoundSCMassUnseeded
+     *
+     * None of these carry the metallicity seeding factor f(Z), so any ratio between
+     * them is meaningful.  SCMass_seeded + SCMass_unseeded == StarClusterMassTotal. */
+    double   StellarMassUnseeded;  /* Sum m_star over UNSEEDED stars (unrestricted). */
+    double   SCMass_unseeded;      /* Sum Gamma*m_star over UNSEEDED stars (unrestricted). */
+    /* The number actually handed to the cluster sampler for this group: the
+     * f(Z)-WEIGHTED sum over the unseeded stars, restricted to the bound ones when
+     * BHseedSecFOFbound > 0.  This is the single field that says what drove the seed.
+     * It equals BoundSCMassUnseeded (bound modes) or SCMass_unseeded (feature off)
+     * whenever f(Z) == 1 for every contributing star, i.e. when
+     * StarClusterSeedMetallicityMax <= Min; otherwise it is strictly smaller. */
+    double   SCMassSeedBudget;
     double   Metallicity;          /* Unseeded-star metal mass ratio: Sum(BirthMet*initClusterMass)/Sum(initClusterMass). */
     double   Reff;                 /* Effective radius [pc] (per-cluster SecFOFseedsumover=0 seeding only; 0 otherwise). */
     /* Model seed mass of this cluster, code units.  Under MbhMscRelationCWmodel this is
@@ -83,9 +102,10 @@ struct __attribute__((__packed__)) SCseedinfo {
      *     BoundSCMass            / StarClusterMassTotal      (cluster mass, all stars)
      *     BoundSCMassUnseeded    / StarClusterMassTotal      (cluster mass, unseeded)
      * BoundSCMass* deliberately carry NO f(Z) factor, matching StarClusterMassTotal, so
-     * every one of those is a ratio of like for like.  The f(Z)-weighted unseeded sum is
-     * what actually set this seed's budget; it equals BoundSCMassUnseeded whenever
-     * f(Z) == 1 everywhere (StarClusterSeedMetallicityMax <= Min).
+     * every one of those is a ratio of like for like.  The f(Z)-weighted sum that
+     * actually set this seed's budget is recorded separately as SCMassSeedBudget; it
+     * equals BoundSCMassUnseeded whenever f(Z) == 1 everywhere
+     * (StarClusterSeedMetallicityMax <= Min).
      * All are 0 when BHseedSecFOFbound = 0 (no bound selection was made). */
     double   BoundStarMass;        /* Sum m_star over BOUND member stars (seeded + unseeded). */
     double   BoundStarMassUnseeded;/* Sum m_star over BOUND UNSEEDED stars. */
@@ -110,6 +130,15 @@ struct SCboundinfo {
     double mdm;           /* DM mass inside rdm */
     int    num;           /* count of BOUND member stars */
     int    mode;          /* BHseedSecFOFbound value */
+};
+
+/* The host group's remaining mass sums (see the record fields of the same names).
+ * Carried in one struct rather than three more positional arguments; a NULL pointer
+ * records all-zero. */
+struct SCgroupmass {
+    double stellar_unseeded; /* Sum m_star over UNSEEDED stars */
+    double sc_unseeded;      /* Sum Gamma*m_star over UNSEEDED stars (no f(Z)) */
+    double sc_budget;        /* the f(Z)-weighted, bound-restricted sum given to the sampler */
 };
 
 /* Distribution stats of one host group's unseeded-star metallicity, passed to
@@ -142,7 +171,7 @@ void scinfo_record_seed(int index, double atime, double SCmass, double SCMassTot
                         double StellarMassTotal, double SCMassSeeded, double metallicity,
                         double Reff, double Mbh_seed, int NBHInGroup, int64_t GrNr,
                         const struct SCmetdist * metdist, const struct SCboundinfo * bound,
-                        int flag);
+                        const struct SCgroupmass * gmass, int flag);
 
 /* Append one record for a sampled star cluster that has no host particle of its own
  * (MinMscForSCdetail): `id` and `pos` are the host group's reference star, `pos` in the
@@ -155,6 +184,7 @@ void scinfo_record_cluster(MyIDType id, const double * pos, double atime, double
                            double SCMassTotal, double StellarMassTotal, double SCMassSeeded,
                            double metallicity, double Reff, double Mbh_seed, int NBHInGroup,
                            int64_t GrNr, const struct SCmetdist * metdist,
-                           const struct SCboundinfo * bound, int flag);
+                           const struct SCboundinfo * bound,
+                           const struct SCgroupmass * gmass, int flag);
 
 #endif

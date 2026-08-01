@@ -1,5 +1,23 @@
 # MP-Gadget Development Log
 
+## 2026-08-01 — StarClusterDetails: record the host group's full mass matrix
+
+The detail record carried the host group's totals and its bound subset but not the plain *unseeded* sums, so the natural denominators had to be inferred (or, for the unseeded stellar mass, could not be recovered at all — `SCcomMcut` holds it but the bound restriction overwrites it in place). Three fields added, and each record now pins down every cell of
+
+    quantity              all stars             unseeded          bound          bound+unseeded
+    Sum m_star            StellarMassTotal   StellarMassUnseeded  BoundStarMass  BoundStarMassUnseeded
+    Sum Gamma*m_star   StarClusterMassTotal  SCMass_unseeded      BoundSCMass    BoundSCMassUnseeded
+
+None of the six carry the f(Z) seeding factor, so every ratio between them is meaningful and `SCMass_seeded + SCMass_unseeded == StarClusterMassTotal` exactly. `SCMass_unseeded` is derived from the two raw catalogue sums at record time rather than accumulated again; `StellarMassUnseeded` needed a new Group field, accumulated beside `SCcomMcut` and never overwritten.
+
+The third field, **`SCMassSeedBudget`**, is the one number that actually drove the seed: the f(Z)-*weighted* unseeded sum, already bound-restricted when `BHseedSecFOFbound > 0`, read straight out of `StarClusterMassUnseeded` at record time. It coincides with `BoundSCMassUnseeded` (bound modes) or `SCMass_unseeded` (feature off) precisely when f(Z)=1 for every contributing star, i.e. `StarClusterSeedMetallicityMax <= Min`; otherwise it is strictly smaller. Recording it removes the only remaining place where the file's meaning depended on the metallicity settings. The three travel in a new `struct SCgroupmass` rather than three more positional arguments to the already 15-argument record functions, filled by `sc_group_mass()` mirroring the existing `sc_bound_stats()`, and carried in the two gathered per-group message structs alongside `boundinfo`.
+
+Record 224 -> 248 bytes (payload marker 216 -> 240), converter updated and verified field-by-field against the compiled struct; the marker-160 and older layouts still resolve unchanged, so existing archives convert as before. Markers 208 and 216 are deliberately not readable — both were same-week intermediates that no completed run wrote, and 208's `BoundSCMass` meant something else. Compiles and links cleanly with no warnings, `test_fof` passes; still no end-to-end run.
+
+**Files modified:** `libgadget/fof.c`, `libgadget/fof.h`, `libgadget/scinfo.c`, `libgadget/scinfo.h` (+ `script/scdetails_raw2bf.py`, outside the repo)
+
+---
+
 ## 2026-08-01 — BHseedSecFOFbound: make the bound cluster-mass diagnostics comparable to the totals
 
 `SecBoundSCMass` (and the detail file's `BoundSCMass`) were the *f(Z)-weighted* sum over the bound *unseeded* stars — the seeding budget itself — while the totals they would naturally be divided by, `SecSCMass` / `StarClusterMassTotal`, are the plain `Sum(Gamma*m_star)` over *all* member stars. Two differences at once, so the obvious ratio was not a bound fraction of anything. They now use the same definition as those totals: **no f(Z) factor, over all bound stars**, with a new `SecBoundSCMass_unseeded` / `BoundSCMassUnseeded` for the bound *and* unseeded subset. Every bound fraction is now a ratio of like for like:

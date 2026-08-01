@@ -38,7 +38,7 @@ scinfo_write(MyIDType id, const double * pos, double atime, double SCmass,
              double SCMassTotal, double StellarMassTotal, double SCMassSeeded,
              double metallicity, double Reff, double Mbh_seed, int NBHInGroup,
              int64_t GrNr, const struct SCmetdist * metdist,
-             const struct SCboundinfo * bound, int flag)
+             const struct SCboundinfo * bound, const struct SCgroupmass * gmass, int flag)
 {
     struct SCseedinfo info;
     memset(&info, 0, sizeof(info));
@@ -57,6 +57,11 @@ scinfo_write(MyIDType id, const double * pos, double atime, double SCmass,
     info.StarClusterMassTotal = SCMassTotal;
     info.StellarMassTotal = StellarMassTotal;
     info.SCMass_seeded = SCMassSeeded;
+    if(gmass) {
+        info.StellarMassUnseeded = gmass->stellar_unseeded;
+        info.SCMass_unseeded     = gmass->sc_unseeded;
+        info.SCMassSeedBudget    = gmass->sc_budget;
+    }
     info.Metallicity = metallicity;
     info.Reff = Reff;
     info.Mbh_seed = Mbh_seed;
@@ -88,14 +93,15 @@ void
 scinfo_record_seed(int index, double atime, double SCmass, double SCMassTotal,
                    double StellarMassTotal, double SCMassSeeded, double metallicity,
                    double Reff, double Mbh_seed, int NBHInGroup, int64_t GrNr,
-                   const struct SCmetdist * metdist, const struct SCboundinfo * bound, int flag)
+                   const struct SCmetdist * metdist, const struct SCboundinfo * bound,
+                   const struct SCgroupmass * gmass, int flag)
 {
     if(!FdSC)
         return;
 
     scinfo_write(P[index].ID, P[index].Pos, atime, SCmass, SCMassTotal, StellarMassTotal,
                  SCMassSeeded, metallicity, Reff, Mbh_seed, NBHInGroup, GrNr, metdist,
-                 bound, flag);
+                 bound, gmass, flag);
     /* Seed events are rare (at most once per PM step), so flushing each record is
      * negligible and keeps the file current / crash-durable. */
     fflush(FdSC);
@@ -106,7 +112,8 @@ scinfo_record_cluster(MyIDType id, const double * pos, double atime, double SCma
                       double SCMassTotal, double StellarMassTotal, double SCMassSeeded,
                       double metallicity, double Reff, double Mbh_seed, int NBHInGroup,
                       int64_t GrNr, const struct SCmetdist * metdist,
-                      const struct SCboundinfo * bound, int flag)
+                      const struct SCboundinfo * bound,
+                      const struct SCgroupmass * gmass, int flag)
 {
     if(!FdSC)
         return;
@@ -114,5 +121,5 @@ scinfo_record_cluster(MyIDType id, const double * pos, double atime, double SCma
     /* Mbh_seed here is a model mass only: no BH particle exists for these clusters.
      * Deliberately unflushed -- the caller flushes once per batch. */
     scinfo_write(id, pos, atime, SCmass, SCMassTotal, StellarMassTotal, SCMassSeeded,
-                 metallicity, Reff, Mbh_seed, NBHInGroup, GrNr, metdist, bound, flag);
+                 metallicity, Reff, Mbh_seed, NBHInGroup, GrNr, metdist, bound, gmass, flag);
 }

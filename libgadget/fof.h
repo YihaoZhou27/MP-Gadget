@@ -167,7 +167,14 @@ struct Group
 
     /* SeedSecFOFcomSample (combined per-secFOF sampling). Accumulated over
      * UNSEEDED stars (STARP.Seeded==0) only. */
-    MyFloat SCcomMcut;    /*!< Sum of m_star over unseeded stars = mass-function cutoff M_cut */
+    MyFloat SCcomMcut;    /*!< Sum of m_star over unseeded stars = mass-function cutoff M_cut.
+                           *   OVERWRITTEN by fof_secfof_bound_restrict with the BOUND unseeded
+                           *   stellar mass, so it is not the unrestricted total once
+                           *   BHseedSecFOFbound is on -- use StellarMassUnseeded for that. */
+    /* Unrestricted Sum(m_star) over UNSEEDED stars.  Same accumulation as SCcomMcut but
+     * never overwritten by the bound restriction, so the StarClusterDetails records can
+     * report the whole unseeded stellar mass alongside the bound subset. */
+    MyFloat StellarMassUnseeded;
     MyFloat BHSeedMsc;    /*!< Combined-sampled seed cluster mass > 1e4 Msun (bhseed_msc); drives seed mass. Set in fof_seed */
     MyFloat BHSampledMscTotal; /*!< Combined-sampled cluster mass, full draw (no 1e4 cut); recorded as BH init_Msc_sample. Set in fof_seed */
     MyIDType SeedStarID;  /*!< ID of the max-ClusterMass unseeded star (RNG seed for the combined draw) */
