@@ -150,8 +150,16 @@ struct Group
      * owning rank only, from the globally gathered member list. */
     MyFloat SCBoundStarMass;         /*!< Sum of m_star over BOUND member stars (seeded + unseeded). */
     MyFloat SCBoundStarMassUnseeded; /*!< Sum of m_star over BOUND UNSEEDED stars (the new SCcomMcut). */
-    MyFloat SCBoundClusterMass;      /*!< Sum of f(Z)*ClusterMass over BOUND UNSEEDED stars
-                                      *   (the new StarClusterMassUnseeded, i.e. the seeding budget). */
+    /* Cluster mass of the bound subset, NOT f(Z)-weighted and NOT the seeding budget.
+     * They use the same definition as StarClusterMass / SCMass_seeded above -- plain
+     * Sum(ClusterMass) = Sum(Gamma*m_star) -- so the bound fractions are ratios of like
+     * for like: SCBoundClusterMass/StarClusterMass over all stars, and
+     * SCBoundClusterMassUnseeded/(StarClusterMass - SCMass_seeded) over the unseeded
+     * ones.  The seeding budget is the f(Z)-weighted unseeded sum, which the apply pass
+     * writes into StarClusterMassUnseeded; the two differ whenever f(Z) < 1 somewhere
+     * (i.e. StarClusterSeedMetallicityMax > Min). */
+    MyFloat SCBoundClusterMass;         /*!< Sum of ClusterMass over BOUND stars (seeded + unseeded). */
+    MyFloat SCBoundClusterMassUnseeded; /*!< Sum of ClusterMass over BOUND UNSEEDED stars. */
     int     NStarBound;              /*!< Count of BOUND member stars (seeded + unseeded). */
     float   SCBoundRdm;              /*!< Radius of the DM sphere actually used [comoving]: Rmax
                                       *   (BHseedSecFOFbound=1) or min(2*R50, Rmax) (=2). */

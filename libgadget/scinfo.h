@@ -78,12 +78,19 @@ struct __attribute__((__packed__)) SCseedinfo {
     /* BHseedSecFOFbound: the gravitationally bound subset of the host group's member
      * stars, i.e. the stars that actually contributed Gamma*m_star to this seed.
      * StarClusterMassTotal / StellarMassTotal above are unaffected -- they still
-     * describe ALL member stars -- so BoundStarMass/StellarMassTotal is the bound
-     * fraction and BoundSCMass is the restricted seeding budget.
-     * All three are 0 when BHseedSecFOFbound = 0 (no bound selection was made). */
+     * describe ALL member stars -- so the bound fractions are
+     *     BoundStarMass          / StellarMassTotal          (stellar mass)
+     *     BoundSCMass            / StarClusterMassTotal      (cluster mass, all stars)
+     *     BoundSCMassUnseeded    / StarClusterMassTotal      (cluster mass, unseeded)
+     * BoundSCMass* deliberately carry NO f(Z) factor, matching StarClusterMassTotal, so
+     * every one of those is a ratio of like for like.  The f(Z)-weighted unseeded sum is
+     * what actually set this seed's budget; it equals BoundSCMassUnseeded whenever
+     * f(Z) == 1 everywhere (StarClusterSeedMetallicityMax <= Min).
+     * All are 0 when BHseedSecFOFbound = 0 (no bound selection was made). */
     double   BoundStarMass;        /* Sum m_star over BOUND member stars (seeded + unseeded). */
     double   BoundStarMassUnseeded;/* Sum m_star over BOUND UNSEEDED stars. */
-    double   BoundSCMass;          /* Sum f(Z)*Gamma*m_star over BOUND UNSEEDED stars. */
+    double   BoundSCMass;          /* Sum Gamma*m_star over BOUND stars (seeded + unseeded). */
+    double   BoundSCMassUnseeded;  /* Sum Gamma*m_star over BOUND UNSEEDED stars. */
     double   BoundRdm;             /* radius of the DM sphere used [comoving code units]. */
     double   BoundDMMass;          /* DM mass inside BoundRdm [code units]. */
     int      BoundStarNum;         /* count of BOUND member stars. */
@@ -97,7 +104,8 @@ struct __attribute__((__packed__)) SCseedinfo {
 struct SCboundinfo {
     double mass;          /* Sum m_star over BOUND member stars */
     double mass_unseeded; /* Sum m_star over BOUND UNSEEDED stars */
-    double scmass;        /* Sum f(Z)*Gamma*m_star over BOUND UNSEEDED stars */
+    double scmass;          /* Sum Gamma*m_star over BOUND stars (no f(Z)) */
+    double scmass_unseeded; /* Sum Gamma*m_star over BOUND UNSEEDED stars (no f(Z)) */
     double rdm;           /* DM sphere radius [comoving] */
     double mdm;           /* DM mass inside rdm */
     int    num;           /* count of BOUND member stars */

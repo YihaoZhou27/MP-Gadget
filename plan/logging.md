@@ -1,5 +1,21 @@
 # MP-Gadget Development Log
 
+## 2026-08-01 — BHseedSecFOFbound: make the bound cluster-mass diagnostics comparable to the totals
+
+`SecBoundSCMass` (and the detail file's `BoundSCMass`) were the *f(Z)-weighted* sum over the bound *unseeded* stars — the seeding budget itself — while the totals they would naturally be divided by, `SecSCMass` / `StarClusterMassTotal`, are the plain `Sum(Gamma*m_star)` over *all* member stars. Two differences at once, so the obvious ratio was not a bound fraction of anything. They now use the same definition as those totals: **no f(Z) factor, over all bound stars**, with a new `SecBoundSCMass_unseeded` / `BoundSCMassUnseeded` for the bound *and* unseeded subset. Every bound fraction is now a ratio of like for like:
+
+    SecBoundStarMass          / SecMassByType[4]
+    SecBoundSCMass            / SecSCMass
+    SecBoundSCMass_unseeded   / (SecSCMass - SecSCMass_seeded)
+
+The seeding budget is unchanged — it is still the f(Z)-weighted unseeded sum, written to `StarClusterMassUnseeded` in the apply pass and never a catalogue output. It coincides with the new unseeded block only when f(Z) = 1 everywhere (`StarClusterSeedMetallicityMax <= Min`), which is why the diagnostics and the budget are now accumulated separately rather than sharing one number. `struct sb_star` grew a raw `ClusterMass` field for this, 112 -> 120 B, which lowers the replicated-gather ceiling from 19.2M to 17.9M member stars (still ~2.0 GB/rank); the header table and the abort message were updated.
+
+The detail record grew by one double, 216 -> 224 bytes (payload marker 208 -> 216), and `script/scdetails_raw2bf.py` was updated to match — verified field-by-field against the C struct, not just by record size (`BoundSCMass` at offset 176, `BoundSCMassUnseeded` at 184, `Flag` at 216 in both). The short-lived marker-208 layout is deliberately **not** kept as a readable older layout: its `BoundSCMass` meant something else, so reading it under the new names would silently mislead, and no completed run ever wrote one (an unknown marker raises a clear error listing the accepted set). Compiles and links cleanly with no warnings, `test_fof` passes; still no end-to-end run.
+
+**Files modified:** `gadget/params.c`, `libgadget/fof.c`, `libgadget/fof.h`, `libgadget/secondfof.c`, `libgadget/scinfo.c`, `libgadget/scinfo.h` (+ `script/scdetails_raw2bf.py`, outside the repo)
+
+---
+
 ## 2026-07-31 — BHseedSecFOFbound is now compatible with per-cluster seeding (SecFOFseedsumover=0)
 
 Lifted the startup refusal of `BHseedSecFOFbound > 0` together with `SecFOFseedsumover = 0`. The group-level restriction could not reach that mode because per-cluster seeding ignores the single `seed_index_star` the restriction repoints and draws its own host for every sampled cluster from the group's unseeded stars. `fof_secfof_bound_restrict` now optionally fills a **transient per-particle bound flag**, a plain `char` array over local particles that the per-cluster path uses to filter its host pool. Only the budget was ever restricted correctly in that mode; the seeds themselves could land on unbound stars, which is the defect this removes.

@@ -627,6 +627,7 @@ SIMPLE_PROPERTY_SECFOF(SCMass_seeded, grp.SCMass_seeded, float, 1)
 SIMPLE_PROPERTY_SECFOF(BoundStarMass, grp.SCBoundStarMass, float, 1)
 SIMPLE_PROPERTY_SECFOF(BoundStarMassUnseeded, grp.SCBoundStarMassUnseeded, float, 1)
 SIMPLE_PROPERTY_SECFOF(BoundSCMass, grp.SCBoundClusterMass, float, 1)
+SIMPLE_PROPERTY_SECFOF(BoundSCMass_unseeded, grp.SCBoundClusterMassUnseeded, float, 1)
 SIMPLE_PROPERTY_SECFOF(BoundStarNum, grp.NStarBound, int, 1)
 SIMPLE_PROPERTY_SECFOF(BoundRdm, grp.SCBoundRdm, float, 1)
 SIMPLE_PROPERTY_SECFOF(BoundDMMass, grp.SCBoundMdm, float, 1)
@@ -751,10 +752,18 @@ secondfof_register_io_blocks(int MetalReturnOn, int ComputeSize, int SecFOFStarC
          * Registered unconditionally so the catalogue schema does not depend on a
          * runtime switch; every block is identically 0 when BHseedSecFOFbound = 0.
          * These are diagnostics only -- SecSCMass, SecMassByType and SecLengthByType
-         * above still describe ALL member stars in every mode. */
+         * above still describe ALL member stars in every mode.
+         * SecBoundSCMass / SecBoundSCMass_unseeded use the SAME definition as SecSCMass
+         * (plain Sum(Gamma*m_star), no f(Z) factor), so the bound fractions are
+         *     SecBoundSCMass          / SecSCMass                        (all stars)
+         *     SecBoundSCMass_unseeded / (SecSCMass - SecSCMass_seeded)   (unseeded)
+         * The f(Z)-weighted unseeded sum that actually drives seeding is NOT output
+         * here; it equals SecBoundSCMass_unseeded whenever f(Z) == 1 everywhere, i.e.
+         * when StarClusterSeedMetallicityMax <= Min. */
         IO_REG(SecBoundStarMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
         IO_REG(SecBoundStarMassUnseeded, "f4", 1, PTYPE_FOF_GROUP, IOTable);
         IO_REG(SecBoundSCMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+        IO_REG(SecBoundSCMass_unseeded, "f4", 1, PTYPE_FOF_GROUP, IOTable);
         IO_REG(SecBoundStarNum, "i4", 1, PTYPE_FOF_GROUP, IOTable);
         IO_REG(SecBoundRdm, "f4", 1, PTYPE_FOF_GROUP, IOTable);
         IO_REG(SecBoundDMMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);

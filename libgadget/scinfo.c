@@ -74,6 +74,7 @@ scinfo_write(MyIDType id, const double * pos, double atime, double SCmass,
         info.BoundStarMass         = bound->mass;
         info.BoundStarMassUnseeded = bound->mass_unseeded;
         info.BoundSCMass           = bound->scmass;
+        info.BoundSCMassUnseeded   = bound->scmass_unseeded;
         info.BoundRdm              = bound->rdm;
         info.BoundDMMass           = bound->mdm;
         info.BoundStarNum          = bound->num;

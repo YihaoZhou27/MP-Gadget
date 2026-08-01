@@ -1052,9 +1052,10 @@ static void sc_bound_stats(const struct Group * g, struct SCboundinfo * b)
     b->mode = fof_params.BHseedSecFOFbound;
     if(!b->mode)
         return;
-    b->mass          = g->SCBoundStarMass;
-    b->mass_unseeded = g->SCBoundStarMassUnseeded;
-    b->scmass        = g->SCBoundClusterMass;
+    b->mass            = g->SCBoundStarMass;
+    b->mass_unseeded   = g->SCBoundStarMassUnseeded;
+    b->scmass          = g->SCBoundClusterMass;
+    b->scmass_unseeded = g->SCBoundClusterMassUnseeded;
     b->rdm           = g->SCBoundRdm;
     b->mdm           = g->SCBoundMdm;
     b->num           = g->NStarBound;
@@ -3913,15 +3914,15 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
  *
  * MEMORY / SCALING CEILING: the group geometry and the member stars are replicated on
  * every rank, so the per-rank cost is set by the GLOBAL counts and does not fall as
- * ranks are added.  The star array dominates at sizeof(struct sb_star) = 112 B:
+ * ranks are added.  The star array dominates at sizeof(struct sb_star) = 120 B:
  *
  *     265k stars (z=9, Ng=512)  ->   0.03 GB/rank
- *       5M stars                ->   0.52 GB/rank
- *      19M stars                ->   1.98 GB/rank   <- hard limit, see below
+ *       5M stars                ->   0.56 GB/rank
+ *      17.9M stars              ->   2.00 GB/rank   <- hard limit, see below
  *
  * The hard limit is not memory but MPI: MPI_Allgatherv takes int counts and
  * displacements, and the ones here are BYTE counts, so the ceiling is
- * INT_MAX / sizeof(struct sb_star) ~ 19.2M member stars.  Beyond that a displacement
+ * INT_MAX / sizeof(struct sb_star) ~ 17.9M member stars.  Beyond that a displacement
  * wraps negative and MPI reads or writes outside the buffer, so both the local and the
  * global count are checked below and the run aborts with a clear message instead.
  * The DM histograms add TotNgroups * SB_NBIN * 8 bytes per rank on top.
@@ -3929,8 +3930,8 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
  * Raising the ceiling, cheapest first:
  *   - shrink the record: store the position as a float offset from the group centre
  *     (better conditioned than absolute coordinates) and demote Vel/Mass/mGamma/
- *     msample/scm to float, which are only ever accumulated into doubles afterwards.
- *     112 B -> ~72 B, i.e. ~30M stars.  A 1.6x reprieve, not a fix.
+ *     scmass/msample/scm to float, which are only ever accumulated into doubles
+ *     afterwards.  120 B -> ~76 B, i.e. ~28M stars.  A 1.6x reprieve, not a fix.
  *   - replace the replication with a distributed gather: each group is processed by
  *     its owning rank, which pulls only its own members.  That removes the ceiling
  *     entirely but needs real point-to-point communication, and the load imbalance is
@@ -3949,6 +3950,13 @@ struct sb_star {
     double   Vel[3];
     double   Mass;
     double   mGamma;            /* f(Z)*ClusterMass for an UNSEEDED star, else 0 */
+    /* Raw ClusterMass (= Gamma*m_star) of EVERY star, seeded or not, with no f(Z)
+     * factor.  Kept separate from mGamma because the two answer different questions:
+     * mGamma is the seeding budget (f(Z)-weighted, unseeded only, replaces
+     * StarClusterMassUnseeded), while this feeds the SCBoundClusterMass* diagnostics,
+     * which must use the same definition as the catalogue's StarClusterMass so the
+     * bound fraction is a ratio of like for like. */
+    double   scmass;
     double   msample;           /* StarClusterMass_sample for an UNSEEDED star, else 0 */
     double   scm;               /* host-selection key, identical to the `scm` of
                                  * add_particle_to_group so the bound seed host is
@@ -4108,8 +4116,8 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
 
     /* The gathered records are replicated on EVERY rank, so both the int byte range of
      * MPI_Allgatherv and the per-rank memory scale with the GLOBAL star count and do
-     * not improve by adding ranks.  At sizeof(struct sb_star) = 112 B the int ceiling
-     * is ~19.2M member stars (~2.0 GB/rank, so the two limits bite at about the same
+     * not improve by adding ranks.  At sizeof(struct sb_star) = 120 B the int ceiling
+     * is ~17.9M member stars (~2.0 GB/rank, so the two limits bite at about the same
      * point).  Guard the local count before it is narrowed to int, and the global one
      * before any byte displacement is formed from it. */
     const int64_t sb_star_max = (int64_t) INT_MAX / (int64_t) sizeof(struct sb_star);
@@ -4158,6 +4166,9 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
              * StarClusterMassUnseeded, which carries f(Z) too. */
             m->mGamma = m->is_unseeded ?
                 get_seed_metallicity_factor(STARP(i).BirthMetallicity) * STARP(i).ClusterMass : 0;
+            /* Unweighted and for every star: the same quantity add_particle_to_group
+             * sums into StarClusterMass. */
+            m->scmass = STARP(i).ClusterMass;
             m->msample = m->is_unseeded ? STARP(i).StarClusterMass_sample : 0;
             m->scm = (fof_params.StarClusterSampling && !fof_params.SeedSecFOFcomSample) ?
                 m->msample : m->mGamma;
@@ -4381,6 +4392,7 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
         grp->SCBoundStarMass = 0;
         grp->SCBoundStarMassUnseeded = 0;
         grp->SCBoundClusterMass = 0;
+        grp->SCBoundClusterMassUnseeded = 0;
         grp->NStarBound = 0;
         grp->SCBoundRdm = 0;
         grp->SCBoundMdm = 0;
@@ -4469,6 +4481,10 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
         }
 
         double bound_mass = 0, bound_mass_uns = 0, bound_mgamma = 0, bound_msample = 0;
+        /* Diagnostic cluster masses, unweighted by f(Z), matching the catalogue's
+         * StarClusterMass definition: over ALL bound stars, and over the bound
+         * UNSEEDED ones.  Separate from bound_mgamma, which is the seeding budget. */
+        double bound_scm_all = 0, bound_scm_uns = 0;
         int nbound = 0;
         double best_scm = -1.0;
         const struct sb_star * best = NULL;
@@ -4508,8 +4524,10 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
                  * says "bound", and every consumer applies its own unseeded test. */
                 if(bound_mask && st->OrigTask == ThisTask)
                     bound_mask[st->OrigIndex] = 1;
+                bound_scm_all += st->scmass;
                 if(st->is_unseeded) {
                     bound_mass_uns += st->Mass;
+                    bound_scm_uns += st->scmass;
                     bound_mgamma += st->mGamma;
                     bound_msample += st->msample;
                     /* Same key as add_particle_to_group's MaxStarClusterMass, so the
@@ -4527,7 +4545,12 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
         if(grp) {
             grp->SCBoundStarMass = bound_mass;
             grp->SCBoundStarMassUnseeded = bound_mass_uns;
-            grp->SCBoundClusterMass = bound_mgamma;
+            /* Diagnostics, NOT the seeding budget: unweighted by f(Z), so they are
+             * directly comparable to the catalogue's StarClusterMass / SCMass_seeded.
+             * The f(Z)-weighted, unseeded-only budget goes into StarClusterMassUnseeded
+             * in the apply branch below. */
+            grp->SCBoundClusterMass = bound_scm_all;
+            grp->SCBoundClusterMassUnseeded = bound_scm_uns;
             grp->NStarBound = nbound;
         }
 
