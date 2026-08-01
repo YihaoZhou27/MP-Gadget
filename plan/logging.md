@@ -1,5 +1,21 @@
 # MP-Gadget Development Log
 
+## 2026-08-01 — BHseedSecFOFbound: restrict the unseeded-star metallicity to the bound subset
+
+The bound pass restricted every *mass* the seeding decision reads — the cluster-mass budget, `SCcomMcut`, the host pool, the seed host — but deliberately left the unseeded-star metallicity summary (`SCMetalMassUnseeded`, `SCClusterMassUnseededInit`, `SCMetUnseeded{Min,Max,Sum,Sum2,LogSum,LogSum2,Hist}`) accumulated over ALL unseeded stars, because `NStarUnseeded` is its denominator and could not be recomputed there. That left a real hole: those fields are not diagnostics. Per-cluster CW seeding draws each cluster's metallicity from them — `CWmodelMetallicity` 'ave' from the metal-mass ratio, 'lognormal' from the log sums, 'uniform' from the min/max — and Z feeds the Vink winds in the collision model, so an unbound star could still shift `M_VMS` and hence the BH seed mass while contributing no mass and hosting no seed.
+
+The whole summary is now rebuilt over the bound unseeded stars and written back under `apply=1`, term for term as `add_particle_to_group` builds the unrestricted one (same sentinels, same `SC_MET_HIST_LOGMIN` floor, same equal-weight-per-star convention), so the bound version is the unrestricted one with the unbound stars removed and nothing else. `NStarUnseeded` is restricted with it — required, since it is the particle count those equal-weight sums are divided by in `sc_met_unseeded_stats`, and restricting the sums alone would divide bound sums by an unrestricted count.
+
+**Second-order effect, deliberate:** `NStarUnseeded` also caps the host count in the multi-seed modes and sizes their slot reservation, so both tighten. That is correct — an unbound star can never host a seed — and remains a valid upper bound, since the host pool `(bound && unseeded && f(Z)>0)` is a subset of the bound unseeded stars counted here. A group with bound stars but no bound *unseeded* star now ends with `NStarUnseeded = 0` and is dropped by `secfof_random_group_eligible`, which it would have been anyway on a zero budget.
+
+**Meaning change:** in a `BHseedSecFOFbound` run the StarClusterDetails `MetUnseeded*` columns and `Metallicity` now describe the bound unseeded stars — matching the Z actually used for the seed mass. The SecPIG catalogue path is untouched (it calls the bound pass with `apply=0`).
+
+`struct sb_star` gained the frozen `initClusterMass` and `BirthMetallicity`, 120 -> 128 B, which lowers the replicated-gather ceiling from 17.9M to 16.8M member stars (still 2.00 GB/rank); the header memory table, the shrink-the-record note and the abort message were updated, and the size/ceiling verified by compiling the struct standalone (128 B, INT_MAX/128 = 16,777,215, 2.000 GB). Compiles with no warnings, `test_fof` passes; no end-to-end run.
+
+**Files modified:** `libgadget/fof.c`, `libgadget/fof.h`, `gadget/params.c`
+
+---
+
 ## 2026-08-01 — One deterministic seed-host ordering everywhere: (scm desc, ID asc)
 
 The group's seed host — the largest-`scm` unseeded star, whose ID becomes `SeedStarID` — was picked by two different rules. `add_particle_to_group` and `fof_reduce_group` used a bare `>`, i.e. "keep the first maximum encountered", while the `BHseedSecFOFbound` pass broke equal-`scm` ties on the smallest ID. All three now share one `sc_seed_host_better()` helper implementing **(scm descending, ID ascending)**.

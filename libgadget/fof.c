@@ -3965,15 +3965,15 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
  *
  * MEMORY / SCALING CEILING: the group geometry and the member stars are replicated on
  * every rank, so the per-rank cost is set by the GLOBAL counts and does not fall as
- * ranks are added.  The star array dominates at sizeof(struct sb_star) = 120 B:
+ * ranks are added.  The star array dominates at sizeof(struct sb_star) = 128 B:
  *
  *     265k stars (z=9, Ng=512)  ->   0.03 GB/rank
- *       5M stars                ->   0.56 GB/rank
- *      17.9M stars              ->   2.00 GB/rank   <- hard limit, see below
+ *       5M stars                ->   0.60 GB/rank
+ *      16.8M stars              ->   2.00 GB/rank   <- hard limit, see below
  *
  * The hard limit is not memory but MPI: MPI_Allgatherv takes int counts and
  * displacements, and the ones here are BYTE counts, so the ceiling is
- * INT_MAX / sizeof(struct sb_star) ~ 17.9M member stars.  Beyond that a displacement
+ * INT_MAX / sizeof(struct sb_star) ~ 16.8M member stars.  Beyond that a displacement
  * wraps negative and MPI reads or writes outside the buffer, so both the local and the
  * global count are checked below and the run aborts with a clear message instead.
  * The DM histograms add TotNgroups * SB_NBIN * 8 bytes per rank on top.
@@ -3981,8 +3981,8 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
  * Raising the ceiling, cheapest first:
  *   - shrink the record: store the position as a float offset from the group centre
  *     (better conditioned than absolute coordinates) and demote Vel/Mass/mGamma/
- *     scmass/msample/scm to float, which are only ever accumulated into doubles
- *     afterwards.  120 B -> ~76 B, i.e. ~28M stars.  A 1.6x reprieve, not a fix.
+ *     scmass/msample/scm/initscm to float, which are only ever accumulated into
+ *     doubles afterwards.  128 B -> ~80 B, i.e. ~26M stars.  A 1.6x reprieve, not a fix.
  *   - replace the replication with a distributed gather: each group is processed by
  *     its owning rank, which pulls only its own members.  That removes the ceiling
  *     entirely but needs real point-to-point communication, and the load imbalance is
@@ -4012,10 +4012,14 @@ struct sb_star {
     double   scm;               /* host-selection key, identical to the `scm` of
                                  * add_particle_to_group so the bound seed host is
                                  * picked by the same rule as the unrestricted one */
+    /* Frozen initClusterMass, the denominator of the unseeded-star metal mass ratio.
+     * Carried raw for EVERY star; the unseeded test is applied where it is consumed. */
+    double   initscm;
     MyIDType ID;
     int      OrigTask;          /* rank owning this particle */
     int      OrigIndex;         /* local index on OrigTask */
     int      is_unseeded;       /* 1 if STARP.Seeded == 0 */
+    float    zbirth;            /* frozen BirthMetallicity, raw as initscm */
 };
 
 /* Sort by GrNr so each group is a contiguous block; ties broken by ID so the
@@ -4213,6 +4217,10 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
             m->OrigTask = ThisTask;
             m->OrigIndex = i;
             m->is_unseeded = !STARP(i).Seeded;
+            /* Frozen metallicity inputs, so the whole unseeded-star metallicity
+             * summary can be rebuilt over the BOUND subset (see the apply branch). */
+            m->zbirth = STARP(i).BirthMetallicity;
+            m->initscm = STARP(i).initClusterMass;
             /* f(Z)-scaled cluster mass: the bound sum replaces
              * StarClusterMassUnseeded, which carries f(Z) too. */
             m->mGamma = m->is_unseeded ?
@@ -4544,6 +4552,18 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
          * the gates drop it either way. */
         double best_scm = 0;
         const struct sb_star * best = NULL;
+        /* Unseeded-star metallicity summary rebuilt over the BOUND subset, mirroring
+         * add_particle_to_group's accumulation term for term (same sentinels, same
+         * SC_MET_HIST_LOGMIN floor, same equal-weight-per-star convention) so the
+         * bound version is the unrestricted one with the unbound stars removed and
+         * nothing else.  nbound_uns is its particle count, i.e. the N that
+         * sc_met_unseeded_stats divides by. */
+        double bmet_mass = 0, bmet_init = 0;
+        double bz_min = 1e30, bz_max = 0, bz_sum = 0, bz_sum2 = 0;
+        double blz_sum = 0, blz_sum2 = 0;
+        float  bhist[SC_MET_HIST_NBIN];
+        memset(bhist, 0, sizeof(bhist));
+        int64_t nbound_uns = 0;
         for(k = 0; k < N; k++) {
             const struct sb_star * st = &sbs[s + rm[k].k];
             const double rk_ = rm[k].r;                       /* unsoftened radius */
@@ -4586,6 +4606,23 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
                     bound_scm_uns += st->scmass;
                     bound_mgamma += st->mGamma;
                     bound_msample += st->msample;
+                    /* Metallicity summary of the bound unseeded stars, term for term
+                     * as add_particle_to_group builds the unrestricted one. */
+                    nbound_uns++;
+                    bmet_mass += (double) st->zbirth * st->initscm;
+                    bmet_init += st->initscm;
+                    {
+                        double zb = st->zbirth;
+                        if(zb < bz_min) bz_min = zb;
+                        if(zb > bz_max) bz_max = zb;
+                        bz_sum  += zb;
+                        bz_sum2 += zb * zb;
+                        bhist[sc_met_hist_bin(zb)] += 1;
+                        double lzb = (zb > 0) ? log10(zb) : SC_MET_HIST_LOGMIN;
+                        if(lzb < SC_MET_HIST_LOGMIN) lzb = SC_MET_HIST_LOGMIN;
+                        blz_sum  += lzb;
+                        blz_sum2 += lzb * lzb;
+                    }
                     /* Same key AND same ordering as add_particle_to_group's
                      * MaxStarClusterMass (sc_seed_host_better), so the bound host is
                      * exactly the one the unrestricted run would have chosen had the
@@ -4617,13 +4654,22 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
              * the combined sampler reads StarClusterMassUnseeded, while the plain
              * secFOF path with StarClusterSampling=1 reads StarClusterMassSampleUnseeded.
              *
-             * NStarUnseeded is deliberately NOT overwritten: it is the denominator of
-             * the SCMetUnseeded* metallicity histogram/sums, which were accumulated over
-             * all unseeded stars in add_particle_to_group and cannot be recomputed here.
-             * The multi-seed host caps derived from it therefore still count every
-             * unseeded star; those modes (SeedInSecFOFMultipleSeeds, SecFOFseedsumover=0)
-             * cap the seed COUNT, not the budget, so the restriction is still applied to
-             * every mass that decides whether and how massive a seed is. */
+             * The metallicity summary is replaced too.  It is not a diagnostic: the CW
+             * seed-mass model draws each cluster's Z from it (CWmodelMetallicity 'ave'
+             * uses SCMetalMassUnseeded/SCClusterMassUnseededInit, 'lognormal' the log
+             * sums, 'uniform' the min/max), so leaving it unrestricted would let the
+             * unbound stars -- which contribute no mass and host no seed -- still move
+             * M_VMS and hence the BH seed mass.  NStarUnseeded goes with it, because it
+             * is the particle count those equal-weight sums are divided by in
+             * sc_met_unseeded_stats; restricting the sums without it would divide the
+             * bound sums by the unrestricted count.
+             *
+             * NStarUnseeded also caps the host count in the multi-seed modes
+             * (SeedInSecFOFMultipleSeeds, SecFOFseedsumover=0) and sizes their slot
+             * reservation.  Restricting it tightens both, which is correct -- an unbound
+             * star can never host a seed -- and stays a valid upper bound on the seeds
+             * actually placed: the host pool is (bound && unseeded && f(Z)>0), a subset
+             * of the bound unseeded stars counted here. */
             double old = fof_params.StarClusterSampling && !fof_params.SeedSecFOFcomSample ?
                 grp->StarClusterMassSampleUnseeded : grp->StarClusterMassUnseeded;
             double neu = fof_params.StarClusterSampling && !fof_params.SeedSecFOFcomSample ?
@@ -4634,6 +4680,23 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
             grp->StarClusterMassUnseeded = bound_mgamma;
             grp->StarClusterMassSampleUnseeded = bound_msample;
             grp->SCcomMcut = bound_mass_uns;
+
+            grp->NStarUnseeded = (int) nbound_uns;
+            grp->SCMetalMassUnseeded = bmet_mass;
+            grp->SCClusterMassUnseededInit = bmet_init;
+            /* Restore the empty-set sentinels when nothing is bound, so
+             * sc_met_unseeded_stats takes its own N < 1 early-out unchanged. */
+            grp->SCMetUnseededMin = (nbound_uns > 0) ? bz_min : 1e30;
+            grp->SCMetUnseededMax = bz_max;
+            grp->SCMetUnseededSum = bz_sum;
+            grp->SCMetUnseededSum2 = bz_sum2;
+            grp->SCMetUnseededLogSum = blz_sum;
+            grp->SCMetUnseededLogSum2 = blz_sum2;
+            {
+                int j;
+                for(j = 0; j < SC_MET_HIST_NBIN; j++)
+                    grp->SCMetUnseededHist[j] = bhist[j];
+            }
             /* Repoint the seed host to the best BOUND unseeded star so a BH is never
              * seeded at an unbound star; drop the seed if none is bound (the gates drop
              * the group anyway, since the budget is now 0). */

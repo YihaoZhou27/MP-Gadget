@@ -118,9 +118,17 @@ struct Group
     MyFloat StarClusterMassSampleUnseeded; /*!< Sum of StarClusterMass_sample over UNSEEDED stars (sampled seeding). */
     MyFloat SCMass_seeded;                 /*!< Sum of ClusterMass over SEEDED stars (catalogue output). */
     int NStarUnseeded;                     /*!< Count of UNSEEDED type-4 stars (caps the per-secFOF multi-seed number). */
-    /* Unseeded-star metallicity for the StarClusterDetails record: the metal mass
-     * ratio Sum(BirthMetallicity*initClusterMass) / Sum(initClusterMass) over UNSEEDED
-     * stars. Both sums accumulated separately (over Seeded==0 stars) and reduced. */
+    /* Unseeded-star metallicity for the StarClusterDetails record AND for the CW
+     * seed-mass model's per-cluster Z draw: the metal mass ratio
+     * Sum(BirthMetallicity*initClusterMass) / Sum(initClusterMass) over UNSEEDED
+     * stars. Both sums accumulated separately (over Seeded==0 stars) and reduced.
+     *
+     * NStarUnseeded and every SCMet* field below are OVERWRITTEN with their
+     * bound-only counterparts by fof_secfof_bound_restrict(apply=1), so that under
+     * BHseedSecFOFbound the metallicity the seed mass is drawn from comes from the
+     * same stars that supplied the budget.  They therefore describe the bound
+     * unseeded subset in the seeding path, and all unseeded stars everywhere else
+     * (the catalogue call passes apply=0 and leaves them alone). */
     MyFloat SCMetalMassUnseeded;           /*!< Sum of BirthMetallicity*initClusterMass over UNSEEDED stars (metal mass). */
     MyFloat SCClusterMassUnseededInit;     /*!< Sum of initClusterMass over UNSEEDED stars (metallicity denominator). */
     /* Per-particle (equal-weight) BirthMetallicity distribution of UNSEEDED stars,
