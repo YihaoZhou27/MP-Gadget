@@ -203,9 +203,22 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
  * overwrites StarClusterMassUnseeded / SCcomMcut / the seed-star pointer so only the
  * bound stars drive BH seeding; with `apply` clear it only reports (used on the
  * catalogue path, where the seeding decision has already been taken).
+ *
+ * `bound_mask`, when not NULL, is a caller-owned char array of PartManager->NumPart
+ * entries which the call fills with the per-LOCAL-PARTICLE bound flag (1 = a member
+ * star of some secFOF group that passed the bound test, 0 = everything else).  It is
+ * the transient per-star flag the group-level fields cannot carry, and it lets the
+ * seeding paths that re-scan the unseeded stars individually keep the restriction.
+ * Producing it makes every rank evaluate EVERY group rather than only its own (a
+ * group's member stars are spread over all ranks), which costs a few percent of wall
+ * time and no communication; pass NULL when the mask is not needed.  The mask indexes
+ * P[] directly, so it is only valid while NumPart and the particle order are
+ * unchanged -- seeding converts particles in place, so it survives fof_seed.
+ *
  * Collective: must be called by every rank of Comm. */
 void fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
-                               double atime, Cosmology * CP, MPI_Comm Comm);
+                               double atime, Cosmology * CP, char * bound_mask,
+                               MPI_Comm Comm);
 /* Whether BHseedSecFOFbound is active, and in which mode (0 = off). */
 int fof_get_secfof_bound_mode(void);
 

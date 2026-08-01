@@ -1083,7 +1083,8 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential,
      * secondfof_seed hardcodes PotentialMin = 1 in its own fof_set_params call.) */
     if(sfof_params.BHseedSecFOFbound)
         fof_secfof_bound_restrict(&fof, sfof_params.BHseedSecFOFbound, 0,
-                                  atime, CP, Comm);
+                                  atime, CP, NULL /* no per-star mask: catalogue only */,
+                                  Comm);
 
     /* Step 6: Restore original GrNr and free saved_GrNr
      * (must free before allocating result to respect stack allocator order) */
