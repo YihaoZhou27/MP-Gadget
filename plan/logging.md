@@ -1,5 +1,15 @@
 # MP-Gadget Development Log
 
+## 2026-08-01 — BHseedSecFOFbound: correct the stale rest-frame description (doc only)
+
+The `BHseedSecFOFbound` parameter text claimed the binding test's rest frame was "the member stars' mass-weighted centre of mass". It is not, and never was: the implementation seeds the COM with the DM momentum and mass inside the sphere and then adds the member stars. The code is right and the description was wrong — the potential in the same loop is `(Min + Mdm_in)/sk + Tout + Tdm_out`, i.e. stars *and* DM, so a stars-only frame would leave the DM that dominates the well streaming through it; both `BHseedSecFOFbound` modes are DM-inclusive by definition; and this is the Eq.-2 test of Williams et al. 2025 Sec 2.3, whose convention (also used by `script/secpig_star_dm_binding.py`) is to refer velocities to the COM of *the system being tested* — stars only for Eq. 1, stars+DM for Eq. 2. A stars-only frame here would have disagreed with that pipeline. Wording corrected, and the description now also states that the frame is computed once over all member stars with no iterative unbinding.
+
+Unrelated but noted while checking: the older `SeedSeedFOFMassiveBoundStar` uses the deepest-potential member's velocity as its rest frame, which is a genuinely different (and weaker) convention — a single particle's velocity carries an offset of order the velocity dispersion, the same scale the test operates at. Left alone; it is incompatible with `BHseedSecFOFbound` and unused.
+
+**Files modified:** `gadget/params.c` (description only, no behaviour change)
+
+---
+
 ## 2026-08-01 — SCmasscapSecFOFstarmass: cap the cluster draw in draw order, in every mode
 
 The cap only ever existed in the summed mode, where it clamped the *total* after the fact; the per-cluster mode (`SecFOFseedsumover=0`) drew its population with no such constraint at all, so a group could emit a single cluster heavier than every star available to form it. Measured on the v4 test runs (`output_l0.1_BH1e3_compensate`, 2074 group draws, 10.9M sampled clusters): ~4% of draws overshoot the group's unseeded stellar mass, ~0.6% of the BH-seeding clusters are individually heavier than it, and overshoots reach 300x. Rare, but concentrated — 10 draws carry 96% of the affected seed mass — and those are the draws seeding the most massive BHs.
