@@ -892,6 +892,32 @@ static void fof_reduce_base_group(void * pdst, void * psrc) {
     /* preserve the dst FirstPos so all other base group gets the same FirstPos */
 }
 
+/* Seed-host ordering: (scm DESCENDING, ID ASCENDING).  Returns 1 if the candidate
+ * (scm, id) beats the incumbent (best_scm, best_id); have_best = 0 means there is no
+ * incumbent yet, in which case the candidate must still clear the scm > 0 sentinel.
+ *
+ * Shared by all three places that track a group's largest-scm unseeded star --
+ * add_particle_to_group, fof_reduce_group and the BHseedSecFOFbound pass -- because
+ * the tie-break is not cosmetic: the winner's ID becomes Group.SeedStarID, which seeds
+ * the per-group cluster-sampler RNG, so two orderings that disagree on a tie do not
+ * give slightly different answers, they give a completely different Poisson draw and
+ * cluster population.  "Keep the first maximum encountered" would make that depend on
+ * local particle index order and on the rank-merge order -- i.e. on the domain
+ * decomposition -- and would let BHseedSecFOFbound change the seeding decision even
+ * when every star is bound.  Exact ties are rare when scm is f(Z)*ClusterMass (Gamma
+ * and m_star are both continuous) but expected when StarClusterSampling drives scm
+ * from the discrete StarClusterMass_sample, which is 0 for every star whose per-star
+ * draw sampled no cluster. */
+static inline int
+sc_seed_host_better(double scm, MyIDType id, double best_scm, MyIDType best_id, int have_best)
+{
+    if(!have_best)
+        return scm > best_scm;
+    if(scm != best_scm)
+        return scm > best_scm;
+    return id < best_id;
+}
+
 static void fof_reduce_group(void * pdst, void * psrc) {
     struct Group * gdst = (struct Group *) pdst;
     struct Group * gsrc = (struct Group *) psrc;
@@ -954,7 +980,9 @@ static void fof_reduce_group(void * pdst, void * psrc) {
         for(d = 0; d < 3; d++)
             gdst->PotMinPos[d] = gsrc->PotMinPos[d];
     }
-    if(gsrc->MaxStarClusterMass > gdst->MaxStarClusterMass)
+    if(sc_seed_host_better(gsrc->MaxStarClusterMass, gsrc->SeedStarID,
+                           gdst->MaxStarClusterMass, gdst->SeedStarID,
+                           gdst->seed_task_star >= 0))
     {
         gdst->MaxStarClusterMass = gsrc->MaxStarClusterMass;
         gdst->seed_index_star = gsrc->seed_index_star;
@@ -1173,7 +1201,8 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
              * seed for the combined draw. */
             MyFloat scm = (fof_params.StarClusterSampling && !fof_params.SeedSecFOFcomSample) ?
                 STARP(index).StarClusterMass_sample : fseed * STARP(index).ClusterMass;
-            if(scm > gdst->MaxStarClusterMass) {
+            if(sc_seed_host_better(scm, P[index].ID, gdst->MaxStarClusterMass,
+                                   gdst->SeedStarID, gdst->seed_task_star >= 0)) {
                 gdst->MaxStarClusterMass = scm;
                 gdst->seed_index_star = index;
                 gdst->seed_task_star = ThisTask;
@@ -4508,7 +4537,12 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
          * UNSEEDED ones.  Separate from bound_mgamma, which is the seeding budget. */
         double bound_scm_all = 0, bound_scm_uns = 0;
         int nbound = 0;
-        double best_scm = -1.0;
+        /* 0, not -1: the same sentinel add_particle_to_group starts MaxStarClusterMass
+         * at, so a group all of whose bound unseeded stars have scm == 0 ends with no
+         * host here too instead of picking an arbitrary one.  Safe -- in both scm
+         * configurations "every scm is 0" implies the group's seeding budget is 0, so
+         * the gates drop it either way. */
+        double best_scm = 0;
         const struct sb_star * best = NULL;
         for(k = 0; k < N; k++) {
             const struct sb_star * st = &sbs[s + rm[k].k];
@@ -4552,11 +4586,12 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
                     bound_scm_uns += st->scmass;
                     bound_mgamma += st->mGamma;
                     bound_msample += st->msample;
-                    /* Same key as add_particle_to_group's MaxStarClusterMass, so the
-                     * bound host is the one the unrestricted run would have chosen had
-                     * the unbound stars not existed.  Ties go to the smaller ID. */
-                    if(st->scm > best_scm ||
-                       (best && st->scm == best_scm && st->ID < best->ID)) {
+                    /* Same key AND same ordering as add_particle_to_group's
+                     * MaxStarClusterMass (sc_seed_host_better), so the bound host is
+                     * exactly the one the unrestricted run would have chosen had the
+                     * unbound stars not existed -- including on a tie. */
+                    if(sc_seed_host_better(st->scm, st->ID, best_scm,
+                                           best ? best->ID : 0, best != NULL)) {
                         best_scm = st->scm;
                         best = st;
                     }

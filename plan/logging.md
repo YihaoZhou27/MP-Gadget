@@ -1,5 +1,19 @@
 # MP-Gadget Development Log
 
+## 2026-08-01 — One deterministic seed-host ordering everywhere: (scm desc, ID asc)
+
+The group's seed host — the largest-`scm` unseeded star, whose ID becomes `SeedStarID` — was picked by two different rules. `add_particle_to_group` and `fof_reduce_group` used a bare `>`, i.e. "keep the first maximum encountered", while the `BHseedSecFOFbound` pass broke equal-`scm` ties on the smallest ID. All three now share one `sc_seed_host_better()` helper implementing **(scm descending, ID ascending)**.
+
+The tie-break is not cosmetic. `SeedStarID` seeds the per-group cluster-sampler RNG, so two orderings that disagree on a tie do not give slightly different answers — they give a completely different Poisson draw and cluster population. The old `>` form made that depend on local particle index order and on the rank-merge order, i.e. on the domain decomposition, so the same physical configuration could seed differently at different `NTask`; and it let `BHseedSecFOFbound` change the seeding decision even when every star is bound.
+
+How exposed the existing runs are, measured on `output_l0.1_BH1e3_compensate/PIG_021`: **zero** tied maxima across all 47 groups with an unseeded star. With `SeedSecFOFcomSample=1` the key is `f(Z)*Gamma*m_star`, and both factors are continuous in practice — 246,333 distinct `Mass` values and 265,543 distinct CFE values among 275,756 stars, and the CFE table has no plateau. Completed runs are unaffected. The other branch is the exposed one: when `StarClusterSampling=1 && !SeedSecFOFcomSample` the key is the discrete `StarClusterMass_sample`, which is 0 for 100% of stars in that snapshot, so ties there are expected rather than hypothetical.
+
+Also aligned the bound pass's sentinel (`best_scm` −1 -> 0) with `MaxStarClusterMass`'s, so a group all of whose bound unseeded stars have `scm == 0` ends with no host in both paths instead of an arbitrary one. Safe: in either configuration "every scm is 0" implies a zero seeding budget, so the gates drop the group regardless.
+
+**Files modified:** `libgadget/fof.c`
+
+---
+
 ## 2026-08-01 — BHseedSecFOFbound: correct the stale rest-frame description (doc only)
 
 The `BHseedSecFOFbound` parameter text claimed the binding test's rest frame was "the member stars' mass-weighted centre of mass". It is not, and never was: the implementation seeds the COM with the DM momentum and mass inside the sphere and then adds the member stars. The code is right and the description was wrong — the potential in the same loop is `(Min + Mdm_in)/sk + Tout + Tdm_out`, i.e. stars *and* DM, so a stars-only frame would leave the DM that dominates the well streaming through it; both `BHseedSecFOFbound` modes are DM-inclusive by definition; and this is the Eq.-2 test of Williams et al. 2025 Sec 2.3, whose convention (also used by `script/secpig_star_dm_binding.py`) is to refer velocities to the COM of *the system being tested* — stars only for Eq. 1, stars+DM for Eq. 2. A stars-only frame here would have disagreed with that pipeline. Wording corrected, and the description now also states that the frame is computed once over all member stars with no iterative unbinding.
