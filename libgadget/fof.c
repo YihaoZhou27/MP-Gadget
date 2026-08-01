@@ -206,9 +206,8 @@ void set_fof_params(ParameterSet * ps)
         if(fof_params.BHseedSecFOFbound) {
             if(fof_params.SeedSecFOFcomSampleParticle)
                 endrun(1, "BHseedSecFOFbound=%d is incompatible with SeedSecFOFcomSampleParticle=1: "
-                          "the per-star sampler draws for every unseeded star (unbound included) and "
-                          "the redistribution would divide by the bound stellar mass while summing "
-                          "over all unseeded stars, inflating the group cluster mass.\n",
+                          "fof_secfof_particle_sample draws a cluster population for every unseeded "
+                          "star, unbound ones included, so they keep contributing to tot_msc_fof.\n",
                           fof_params.BHseedSecFOFbound);
             if(fof_params.SeedInSecFOFMultipleSeeds)
                 endrun(1, "BHseedSecFOFbound=%d is incompatible with SeedInSecFOFMultipleSeeds=1: "
