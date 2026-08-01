@@ -912,6 +912,51 @@ static double msc_icmf_sample(const struct msc_icmf * p, double u)
     return p->Mcut * 0.5 * (lo + hi);
 }
 
+/* ---- SCmasscapSecFOFstarmass: draw-order truncation at Mcut ----
+ * A group cannot turn more stellar mass into clusters than it has unseeded stars, so
+ * the drawn population is truncated in DRAW ORDER at Mcut (= the group's unseeded
+ * stellar mass): clusters are accepted until the running total reaches Mcut, the
+ * cluster that crosses it is shortened to the remaining budget, and every later
+ * cluster is dropped.  The total therefore lands exactly on Mcut.
+ *
+ * Draw order matters.  With StarClusterICMFcutoff = 0 the ICMF is a pure m^-2 with no
+ * knowledge of the host, so a small group can draw a cluster heavier than all its
+ * stars; truncating a prefix of the draw removes clusters without regard to their
+ * mass, which leaves the surviving subset an unbiased sample of the ICMF.  Truncating
+ * after the descending sort in starcluster_combined_seed_masslist would instead only
+ * ever delete the lightest clusters -- a cap in name only, since the offending heavy
+ * cluster is exactly the one that would survive.
+ *
+ * All three samplers below share this so they keep drawing the identical population
+ * (see the invariant note above msc_poisson_draw): the budget is consumed by EVERY
+ * drawn cluster, including ones a caller then discards for being outside its mass
+ * window, so the truncation point does not depend on which sampler is asking. */
+struct msc_budget {
+    int    on;      /* cap active for this draw */
+    double left;    /* stellar mass still available (code units) */
+};
+
+static void msc_budget_init(struct msc_budget * b, double Mcut, int allow)
+{
+    b->on = allow && sfr_params.SCmasscapSecFOFstarmass;
+    b->left = Mcut;
+}
+
+/* Charge one drawn cluster against the remaining budget and return the mass that
+ * actually forms: the cluster itself while the budget covers it, the remainder for the
+ * cluster that crosses Mcut, then 0 -- which every caller treats as end-of-draw. */
+static double msc_budget_take(struct msc_budget * b, double mass)
+{
+    if(!b->on)
+        return mass;
+    if(b->left <= 0)
+        return 0;
+    if(mass > b->left)
+        mass = b->left;
+    b->left -= mass;
+    return mass;
+}
+
 /* Combined per-secFOF star-cluster sampling for BH seeding (SeedSecFOFcomSample).
  * Draws ONE cluster population for a whole secFOF group:
  *   - mass function n(m) ~ m^-2 exp(-m/Mcut) on [1e2, 1e8] Msun, cutoff Mcut = group
@@ -941,32 +986,28 @@ double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
         return 0;
 
     /* Sample N cluster masses from the ICMF, summing those above the massive-cluster
-     * threshold (1e4 Msun). RNG offsets +300+s, matching the per-star sampler. */
+     * threshold (1e4 Msun). RNG offsets +300+s, matching the per-star sampler.
+     * SCmasscapSecFOFstarmass truncates the draw in order at Mcut, so the loop ends
+     * as soon as the group's unseeded stellar mass is spent (bhseed_msc <=
+     * total_sampled <= Mcut).  allow_cap == 0 disables it for the per-particle sampler
+     * (SeedSecFOFcomSampleParticle), which passes Mcut = min(M_cstar, group stellar
+     * mass) per star: there the cap belongs on the group-summed total, applied by the
+     * caller, not on each per-star draw. */
     struct msc_icmf icmf;
     msc_icmf_init(&icmf, Mcut);
+    struct msc_budget budget;
+    msc_budget_init(&budget, Mcut, allow_cap);
 
     double bhseed_msc = 0;
     double total_sampled = 0;
     for(int s = 0; s < N; s++) {
         double u_s = get_random_number(rand_id + 300 + (uint64_t)s, rnd);
-        double mass = msc_icmf_sample(&icmf, u_s);
+        double mass = msc_budget_take(&budget, msc_icmf_sample(&icmf, u_s));
+        if(mass <= 0)
+            break;              /* stellar mass budget spent: the rest never forms */
         total_sampled += mass;
         if(mass > sfr_params.msc_seed_thresh_code)
             bhseed_msc += mass;
-    }
-    /* Optional cap (SCmasscapSecFOFstarmass): the sampled star-cluster mass cannot
-     * exceed the hosting stellar mass, i.e. the group's total unseeded stellar
-     * mass, which is exactly Mcut. Cap both the full draw (recorded as
-     * init_Msc_sample) and the seed-driving > 1e4 Msun sum, keeping
-     * bhseed_msc <= total_sampled <= Mcut.
-     * Skipped when allow_cap == 0: the per-particle sampler (SeedSecFOFcomSampleParticle)
-     * passes Mcut = min(M_cstar, group stellar mass) per star, so the cap must be
-     * applied on the group-summed total instead, not on each per-star draw. */
-    if(allow_cap && sfr_params.SCmasscapSecFOFstarmass) {
-        if(total_sampled > Mcut)
-            total_sampled = Mcut;
-        if(bhseed_msc > Mcut)
-            bhseed_msc = Mcut;
     }
     if(total_sampled_out)
         *total_sampled_out = total_sampled;
@@ -984,8 +1025,9 @@ static int cmp_double_desc(const void * a, const void * b)
  * population and individual cluster masses as starcluster_combined_bhseed_msc (identical
  * RNG offsets and StarClusterICMFcutoff-aware mass function), but instead of summing the
  * masses > 1e4 Msun it returns the count of clusters >= min_seed_mass and the largest
- * min(n_qualify, cap) of those masses (descending). The SCmasscapSecFOFstarmass cap does
- * not apply here (it caps a summed mass; individual cluster masses are used directly). */
+ * min(n_qualify, cap) of those masses (descending). SCmasscapSecFOFstarmass applies here
+ * too, as a draw-order truncation at Mcut (see struct msc_budget): the returned masses
+ * are those of the surviving prefix, so n_qualify itself shrinks when the cap bites. */
 int starcluster_combined_seed_masslist(double Mcut, double sum_mGamma,
                                        uint64_t rand_id, const RandTable * const rnd,
                                        double min_seed_mass, double * out_masses, int cap)
@@ -1005,9 +1047,14 @@ int starcluster_combined_seed_masslist(double Mcut, double sum_mGamma,
      * summed sampler), collecting those >= min_seed_mass. When collecting, all qualifying
      * masses are buffered and sorted once (O(N + n_qualify log n_qualify)); the count-only
      * path (out_masses == NULL or cap <= 0, used for the slot upper bound) allocates
-     * nothing. The RNG draw sequence is identical either way, so both calls agree. */
+     * nothing. The RNG draw sequence is identical either way, so both calls agree.
+     * SCmasscapSecFOFstarmass truncates the draw in order at Mcut BEFORE the
+     * min_seed_mass test and before the sort, so the cap deletes an unbiased prefix of
+     * the population rather than only its lightest members. */
     struct msc_icmf icmf;
     msc_icmf_init(&icmf, Mcut);
+    struct msc_budget budget;
+    msc_budget_init(&budget, Mcut, 1);
 
     int collecting = (out_masses != NULL && cap > 0);
     double * qual = collecting ? (double *) mymalloc("SeedMassQual", (size_t)N * sizeof(double)) : NULL;
@@ -1015,7 +1062,9 @@ int starcluster_combined_seed_masslist(double Mcut, double sum_mGamma,
     int n_qualify = 0;
     for(int s = 0; s < N; s++) {
         double u_s = get_random_number(rand_id + 300 + (uint64_t)s, rnd);
-        double mass = msc_icmf_sample(&icmf, u_s);
+        double mass = msc_budget_take(&budget, msc_icmf_sample(&icmf, u_s));
+        if(mass <= 0)
+            break;              /* stellar mass budget spent: the rest never forms */
         if(mass >= min_seed_mass) {
             if(collecting)
                 qual[n_qualify] = mass;
@@ -1056,10 +1105,17 @@ void starcluster_seed_masslist_detail(double Mcut, double sum_mGamma,
 
     struct msc_icmf icmf;
     msc_icmf_init(&icmf, Mcut);
+    /* The budget is charged for every drawn cluster, not just the ones inside
+     * [mass_lo, mass_hi), so this pass truncates at exactly the same place as
+     * starcluster_combined_seed_masslist whatever window the caller asked for. */
+    struct msc_budget budget;
+    msc_budget_init(&budget, Mcut, 1);
 
     for(int s = 0; s < N; s++) {
         double u_s = get_random_number(rand_id + 300 + (uint64_t)s, rnd);
-        double mass = msc_icmf_sample(&icmf, u_s);
+        double mass = msc_budget_take(&budget, msc_icmf_sample(&icmf, u_s));
+        if(mass <= 0)
+            break;              /* stellar mass budget spent: the rest never forms */
         if(mass >= mass_lo && mass < mass_hi)
             cb(mass, s, cbdata);
     }

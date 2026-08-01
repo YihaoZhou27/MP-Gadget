@@ -64,8 +64,11 @@ double sfr_density_threshold(const double atime);
  * sum_mGamma : sum of m_star*Gamma over the sampled stars (code units): the group
  *              total in combined mode, or a single star's m_star*Gamma per-particle.
  * rand_id    : RNG seed (reproducible)
- * allow_cap  : if 1 and SCmasscapSecFOFstarmass is set, cap the result at Mcut;
- *              pass 0 for the per-particle mode (the cap is applied on the group sum).
+ * allow_cap  : if 1 and SCmasscapSecFOFstarmass is set, truncate the draw in order at
+ *              Mcut (accept clusters until the running total reaches Mcut, shorten the
+ *              crossing one to the remainder, drop the rest), so the full draw sums to
+ *              exactly Mcut.  Pass 0 for the per-particle mode, whose Mcut is per-star:
+ *              there the cap belongs on the group sum and the caller applies it.
  * Returns bhseed_msc = sum of sampled cluster masses > 1e4 Msun (code units).
  * If total_sampled_out != NULL, also returns the summed mass of ALL sampled
  * clusters there (full draw, no threshold).
@@ -80,7 +83,10 @@ double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
  * largest min(n_qualify, cap) such masses, sorted descending, and returns n_qualify =
  * the TOTAL number of clusters >= min_seed_mass (which may exceed cap, so the caller can
  * detect a shortage of unseeded stars). out_masses may be NULL when cap == 0. All masses
- * in code units. Serial only (uses the global GSL error handler). */
+ * in code units. Serial only (uses the global GSL error handler).
+ * SCmasscapSecFOFstarmass truncates the draw in order at Mcut before the min_seed_mass
+ * test and before the descending sort, so both n_qualify and the returned masses are
+ * those of the surviving prefix. */
 int starcluster_combined_seed_masslist(double Mcut, double sum_mGamma,
                                        uint64_t rand_id, const RandTable * const rnd,
                                        double min_seed_mass, double * out_masses, int cap);
@@ -95,7 +101,10 @@ typedef void (*sc_detail_cb)(double mass, int draw_index, void * data);
  * hands every cluster with mass_lo <= m < mass_hi to cb, in draw order. Used to record
  * the clusters that are too light to ever seed a BH, which are never buffered or
  * communicated. No-op if cb is NULL or the mass window is empty.
- * Serial only (uses the global GSL error handler). */
+ * Serial only (uses the global GSL error handler).
+ * SCmasscapSecFOFstarmass truncates identically here: the budget is charged for every
+ * drawn cluster, including those outside [mass_lo, mass_hi), so the truncation point is
+ * the same one starcluster_combined_seed_masslist saw whatever window is requested. */
 void starcluster_seed_masslist_detail(double Mcut, double sum_mGamma,
                                       uint64_t rand_id, const RandTable * const rnd,
                                       double mass_lo, double mass_hi,

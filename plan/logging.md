@@ -1,5 +1,21 @@
 # MP-Gadget Development Log
 
+## 2026-08-01 — SCmasscapSecFOFstarmass: cap the cluster draw in draw order, in every mode
+
+The cap only ever existed in the summed mode, where it clamped the *total* after the fact; the per-cluster mode (`SecFOFseedsumover=0`) drew its population with no such constraint at all, so a group could emit a single cluster heavier than every star available to form it. Measured on the v4 test runs (`output_l0.1_BH1e3_compensate`, 2074 group draws, 10.9M sampled clusters): ~4% of draws overshoot the group's unseeded stellar mass, ~0.6% of the BH-seeding clusters are individually heavier than it, and overshoots reach 300x. Rare, but concentrated — 10 draws carry 96% of the affected seed mass — and those are the draws seeding the most massive BHs.
+
+The cap is now a **draw-order truncation**: clusters are accepted until the running total reaches `Mcut` (the group's unseeded stellar mass), the cluster that crosses it is shortened to the remaining budget so the total lands exactly on `Mcut`, and every later cluster is dropped. Draw order rather than sorted order is the whole point — with `StarClusterICMFcutoff=0` the pure m^-2 ICMF knows nothing about the host, and truncating a descending-sorted list would only ever delete the lightest clusters, leaving the offending heavy one untouched. Shortening the crossing cluster rather than dropping it keeps a group whose first draw already exceeds `Mcut` from seeding nothing at all.
+
+All three samplers share one `struct msc_budget`, charged for **every** drawn cluster before any mass-window or `min_seed_mass` test, so the seeding pass, the slot-reservation pass and the `MinMscForSCdetail` / `MinBHSeedInSC` detail pass all truncate at the identical index however they filter — the existing "identical population" invariant is preserved. In the per-cluster mode this also lowers `n_qualify`, hence the number of BHs seeded. Breaking out of the draw loop early cannot desynchronise anything: the per-cluster deviate is indexed (`rand_id + 300 + s`), not sequential.
+
+**Behaviour change:** the summed mode (`SecFOFseedsumover=1`) now truncates in draw order too instead of clamping the sum, so runs with `SCmasscapSecFOFstarmass=1` will not reproduce earlier results. Deliberate — the parameter now means one thing in every mode. The per-particle mode (`SeedSecFOFcomSampleParticle=1`) is unaffected: its per-star cutoff is not the group budget, so it still passes `allow_cap=0` and the cap stays on the group-summed total in `fof.c`.
+
+Invariants checked against the functions extracted verbatim from the source: cap off / loose budget / `allow_cap=0` truncate nothing; a tight cap lands the total on `Mcut` to 1e-15 relative; survivors are a bit-identical prefix of the uncapped draw with only the crossing cluster shortened; a first cluster heavier than the budget yields exactly one cluster of exactly `Mcut`; two different mass windows truncate at the same index and total. Compiles with no warnings, `test_fof` passes; no end-to-end run yet.
+
+**Files modified:** `libgadget/sfr_eff.c`, `libgadget/sfr_eff.h`, `gadget/params.c`
+
+---
+
 ## 2026-08-01 — StarClusterDetails: record the host group's full mass matrix
 
 The detail record carried the host group's totals and its bound subset but not the plain *unseeded* sums, so the natural denominators had to be inferred (or, for the unseeded stellar mass, could not be recovered at all — `SCcomMcut` holds it but the bound restriction overwrites it in place). Three fields added, and each record now pins down every cell of
