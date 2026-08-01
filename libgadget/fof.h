@@ -189,12 +189,20 @@ void fof_finish(FOFGroups * fof);
  * (BHSeedMsc) and unseeded stellar mass (SCcomMcut) are returned in parallel
  * arrays (used by secondfof_seed for SeedSecFOFcomSampleParticle redistribution).
  * The caller must myfree any returned arrays in reverse allocation order
- * (mcut, then totmsc, then grnr). Pass NULL to skip collection (e.g. primary FOF). */
+ * (mcut, then totmsc, then grnr). Pass NULL to skip collection (e.g. primary FOF).
+ * If bound_mask_out != NULL and BHseedSecFOFbound is on, the transient per-particle
+ * bound flag (see fof_secfof_bound_restrict) is returned there instead of being
+ * released here, so the caller's own post-seeding passes can keep the restriction;
+ * *bound_mask_out is NULL when the feature is off.  It is allocated BEFORE everything
+ * else in fof_seed, so the caller frees it LAST -- after mcut/totmsc/grnr and before
+ * anything that predates the fof_seed call (notably fof_finish, whose Group array is
+ * an older mymalloc2 block). */
 /* tree (the live gas/BH force tree from run.c, or NULL) is relocated off the
  * MAIN bottom stack around slots_reserve so SlotsBase can be grown (LIFO). */
 void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double atime, const RandTable * const rnd,
               int64_t ** seeded_grnr_out, int * n_seeded_out,
-              double ** seeded_totmsc_out, double ** seeded_mcut_out, Cosmology * CP, MPI_Comm Comm);
+              double ** seeded_totmsc_out, double ** seeded_mcut_out,
+              char ** bound_mask_out, Cosmology * CP, MPI_Comm Comm);
 
 /* BHseedSecFOFbound (see gadget/params.c and the implementation in fof.c).
  * Fills the SCBound* fields of every owned group with the gravitationally bound

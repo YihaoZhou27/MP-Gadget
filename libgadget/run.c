@@ -714,7 +714,11 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                         /* Seed BH using secondary FOF catalog */
                         secondfof_seed(ddecomp, &Act, &gasTree, atime, &rnd, &All.CP, MPI_COMM_WORLD);
                     } else if(need_fof_seeding) {
-                        fof_seed(&fof, &Act, &gasTree, atime, &rnd, NULL, NULL, NULL, NULL, &All.CP, MPI_COMM_WORLD);
+                        /* Primary-FOF seeding: no seeded-group list and no bound mask
+                         * (BHseedSecFOFbound requires SeedInSecFOFasStarCluster=1, which
+                         * routes seeding through secondfof_seed instead). */
+                        fof_seed(&fof, &Act, &gasTree, atime, &rnd, NULL, NULL, NULL, NULL, NULL,
+                                 &All.CP, MPI_COMM_WORLD);
                     }
                     /* Seed BH from individual star particles with large SC mass.
                      * When BHseedEveryTimestep is on, this is handled after

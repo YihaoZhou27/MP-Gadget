@@ -889,8 +889,13 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
     double * local_seeded_totmsc = NULL;
     double * local_seeded_mcut = NULL;
     int n_local_seeded = 0;
+    /* BHseedSecFOFbound: the per-particle bound flag, kept alive past fof_seed so the
+     * Seeded=1 marking below can skip the unbound stars (NULL when the feature is off).
+     * It is the oldest of the four buffers fof_seed hands back, so it is freed LAST --
+     * and still before fof_finish, whose Group array predates the fof_seed call. */
+    char * bound_mask = NULL;
     fof_seed(&secfof, act, tree, atime, rnd, &local_seeded_grnr, &n_local_seeded,
-             &local_seeded_totmsc, &local_seeded_mcut, CP, Comm);
+             &local_seeded_totmsc, &local_seeded_mcut, &bound_mask, CP, Comm);
 
     /* Flag (Seeded=1) all type-4 stars in secondary FOF groups that just had a BH
      * seeded, so they are excluded from future seeding sums.  ClusterMass and
@@ -938,6 +943,13 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
         for(i = 0; i < PartManager->NumPart; i++) {
             if(P[i].Type != 4 || P[i].GrNr < 0)
                 continue;
+            /* BHseedSecFOFbound: only the BOUND stars fed the group's restricted budget,
+             * so only they are spent here.  An unbound star keeps Seeded=0 and its cluster
+             * mass, and contributes at a later seeding search if it becomes bound -- the
+             * restriction defers it instead of consuming it.  This also keeps the
+             * redistribution below summing over exactly the set that formed mcut. */
+            if(bound_mask && !bound_mask[i])
+                continue;
             /* Binary search for GrNr in the seeded-group list */
             int64_t key = P[i].GrNr;
             int lo = 0, hi = n_total_seeded, found = -1;
@@ -964,9 +976,10 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
 
         int64_t n_marked_total;
         MPI_Allreduce(&n_marked, &n_marked_total, 1, MPI_INT64, MPI_SUM, Comm);
-        message(0, "SecondFOF seed: flagged Seeded=1 for %ld stars in %d seeded groups.%s\n",
+        message(0, "SecondFOF seed: flagged Seeded=1 for %ld stars in %d seeded groups.%s%s\n",
                    n_marked_total, n_total_seeded,
-                   particle_mode ? " (ClusterMass redistributed from tot_msc_fof)" : "");
+                   particle_mode ? " (ClusterMass redistributed from tot_msc_fof)" : "",
+                   bound_mask ? " (BHseedSecFOFbound: unbound stars left unseeded)" : "");
 
         myfree(all_sg);
         myfree(local_sg);
@@ -981,6 +994,10 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
         myfree(local_seeded_totmsc);
     if(local_seeded_grnr)
         myfree(local_seeded_grnr);
+    /* Last of the four fof_seed buffers (it was allocated first), and it must still go
+     * before fof_finish: secfof.Group is an older mymalloc2 block than the mask. */
+    if(bound_mask)
+        myfree(bound_mask);
 
     fof_finish(&secfof);
 

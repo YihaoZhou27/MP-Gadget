@@ -186,10 +186,11 @@ void set_fof_params(ParameterSet * ps)
          *
          *  - SeedSecFOFcomSampleParticle: fof_secfof_particle_sample() draws a cluster
          *    population for EVERY unseeded star, so unbound stars keep contributing to
-         *    tot_msc_fof; worse, secondfof_seed then redistributes that total as
-         *    totmsc * m_star / SCcomMcut over EVERY unseeded star while SCcomMcut is
-         *    now only the BOUND stellar mass, inflating the group sum by
-         *    M_unseeded / M_bound instead of conserving it.
+         *    tot_msc_fof -- and that sampler is not mask-filtered.  (Its other half, the
+         *    redistribution in secondfof_seed, IS fixed now that the same loop skips
+         *    unbound stars: summing totmsc * m_star / SCcomMcut over the bound stars
+         *    alone conserves the group total, since SCcomMcut is their mass.  Lifting
+         *    this guard therefore only needs the sampler filtered as well.)
          *  - SeedInSecFOFMultipleSeeds: seeds 2..N are placed on the next-largest
          *    unseeded stars without a boundedness test, so only seed 1 is guaranteed
          *    bound.
@@ -197,12 +198,10 @@ void set_fof_params(ParameterSet * ps)
          * SecFOFseedsumover = 0 (per-cluster seeding) used to be refused for the same
          * reason -- each cluster's host is drawn from all unseeded stars -- and is now
          * supported: fof_seed hands fof_secfof_random_seeds the transient per-particle
-         * bound flag from fof_secfof_bound_restrict, which filters the host pool (and
-         * with it the seed count, since nsel = min(n_request, navail)).  That mask lives
-         * only inside fof_seed, so it cannot rescue SeedSecFOFcomSampleParticle, whose
-         * redistribution runs later in secondfof_seed.
+         * bound flag from fof_secfof_bound_restrict, which filters the host pool and
+         * with it the seed count (nsel = min(n_request, navail)).
          *
-         * Supporting the two below needs the flag carried further; until then, refuse
+         * Supporting the two above needs the flag carried further; until then, refuse
          * the combination rather than silently produce a restriction that does not hold. */
         if(fof_params.BHseedSecFOFbound) {
             if(fof_params.SeedSecFOFcomSampleParticle)
@@ -3367,18 +3366,15 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
      * groups are absent from that list, so they are marked here). f(Z)=0 stars never participate
      * and are left untouched; stars already converted to BHs are type 5 and skipped.
      *
-     * BHseedSecFOFbound: deliberately NOT filtered by bound_mask (NULL is passed even when
-     * the mask exists).  Under the restriction only the bound stars fed the draw, so an
-     * unbound star is consumed here without having contributed -- but that is exactly what
-     * the single-seed combined path does too (secondfof_seed marks EVERY type-4 star of a
-     * seeded group), and the two modes must agree on when a star is spent.  Filtering here
-     * instead would leave unbound stars unseeded so they could contribute at a later seeding
-     * search once they fall in; that is a separate modelling choice for BOTH paths, not
-     * something this mode should decide on its own. */
+     * BHseedSecFOFbound: filtered by bound_mask, so only the stars that actually fed the
+     * restricted draw are spent.  An UNBOUND star stays Seeded=0 and keeps its cluster
+     * mass, so it contributes at a later seeding search if it becomes bound -- the
+     * restriction defers those stars rather than consuming them.  secondfof_seed applies
+     * the same filter to the single-seed path's marking. */
     int64_t n_flag = 0;
     #pragma omp parallel for reduction(+:n_flag)
     for(i = 0; i < PartManager->NumPart; i++) {
-        if(!secfof_random_seedable_star(i, NULL)) continue;   /* unseeded & f(Z)>0 */
+        if(!secfof_random_seedable_star(i, bound_mask)) continue;   /* unseeded & f(Z)>0 & bound */
         int64_t key = P[i].GrNr;
         int lo = 0, hi = n_msg, found = -1;
         while(lo < hi) { int mid = lo + (hi - lo) / 2; if(all_rsg[mid].GrNr == key) { found = mid; break; } else if(all_rsg[mid].GrNr < key) lo = mid + 1; else hi = mid; }
@@ -4611,7 +4607,8 @@ int fof_get_secfof_bound_mode(void)
 
 void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double atime, const RandTable * const rnd,
               int64_t ** seeded_grnr_out, int * n_seeded_out,
-              double ** seeded_totmsc_out, double ** seeded_mcut_out, Cosmology * CP, MPI_Comm Comm)
+              double ** seeded_totmsc_out, double ** seeded_mcut_out,
+              char ** bound_mask_out, Cosmology * CP, MPI_Comm Comm)
 {
     int i, j, n, ntot;
 
@@ -4626,16 +4623,16 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
      * call: the parameter requires SeedInSecFOFasStarCluster=1, and when that is on
      * run.c reaches fof_seed only through secondfof_seed.
      *
-     * Per-cluster seeding (SecFOFseedsumover=0) picks its own hosts from the group's
-     * unseeded stars instead of the single seed_index_star the restriction repoints, so
-     * the group-level fields alone cannot keep it on bound stars; it also gets the
-     * transient per-particle bound flag.  That mask stays live until its last consumer
-     * (fof_secfof_random_seeds), so it must sit at the BOTTOM of this function's
-     * mymalloc2 stack and be freed only after ImportGroups.  The other modes that
-     * re-scan unseeded stars are still refused in set_fof_params.  Sized on NumPart,
-     * which seeding leaves unchanged (particles are converted in place). */
+     * The group-level fields cannot carry the restriction into the passes that re-scan
+     * the unseeded stars one by one, so those also get the transient per-particle bound
+     * flag: the per-cluster host pool here in fof_seed, and the Seeded=1 marking, which
+     * for the single-seed path happens in secondfof_seed AFTER this call returns.  The
+     * mask therefore sits at the BOTTOM of this function's mymalloc2 stack -- released
+     * after ImportGroups when nobody claims it, handed to the caller (who frees it last)
+     * when they do.  Sized on NumPart, which seeding leaves unchanged (particles are
+     * converted in place). */
     char * bound_mask = NULL;
-    if(fof_params.BHseedSecFOFbound && get_seed_in_secfof() && secfof_percluster_seeding()) {
+    if(fof_params.BHseedSecFOFbound && get_seed_in_secfof()) {
         bound_mask = (char *) mymalloc2("SBmask",
                 PartManager->NumPart > 0 ? PartManager->NumPart : 1);
         memset(bound_mask, 0, PartManager->NumPart > 0 ? PartManager->NumPart : 1);
@@ -4924,13 +4921,15 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
 
     myfree(ImportGroups);
 
-    /* All its consumers are done (the last was fof_secfof_random_seeds above), and
-     * ImportGroups -- the only mymalloc2 block still sitting on top of it -- has just
-     * gone, so the mask is now the top of this function's mymalloc2 stack.  It MUST be
-     * released here: the caller-owned Seeded* buffers below are allocated on the same
-     * stack and outlive fof_seed, so freeing the mask after them would break LIFO. */
-    if(bound_mask)
+    /* Every consumer inside fof_seed is done (the last was fof_secfof_random_seeds), and
+     * ImportGroups -- the only mymalloc2 block that was sitting on top of it -- has just
+     * gone, so the mask is now the top of this function's mymalloc2 stack.  A caller that
+     * did not ask for it must be given it back here, before the Seeded* buffers below go
+     * on top; a caller that did takes ownership and frees it after those (see fof.h). */
+    if(bound_mask && !bound_mask_out) {
         myfree(bound_mask);
+        bound_mask = NULL;
+    }
 
     /* Now that ImportGroups is freed, copy the temporaries into persistent storage.
      * Allocate grnr, then totmsc, then mcut so the caller frees mcut->totmsc->grnr. */
@@ -4957,6 +4956,12 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
             if(seeded_mcut_out) *seeded_mcut_out = NULL;
         }
     }
+
+    /* Hand over the bound mask last: it is the OLDEST mymalloc2 block of this function,
+     * so the caller must free it after the Seeded* buffers just allocated above.  NULL
+     * when BHseedSecFOFbound is off. */
+    if(bound_mask_out)
+        *bound_mask_out = bound_mask;
 
     walltime_measure("/FOF/Seeding");
 }
