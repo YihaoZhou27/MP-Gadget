@@ -165,15 +165,29 @@ struct SecondGroupExtra {
     float  R50;             /* Half-mass radius of primary particles */
     float  R90;             /* 90%-mass radius of primary particles */
     float  Rmax;            /* Max primary particle separation from center */
+    /* The same three radii over the BOUND member stars only (STARP.Bounded == 1), about
+     * the SAME centre (PotMinPos), so bound/total is a ratio of like for like.  All zero
+     * when BHseedSecFOFbound = 0, and for a group with no bound star.  The population is
+     * stars-only even when gas is a primary link type, since boundness is only defined
+     * for stars -- so under PrimaryLinkTypes = 17 the totals above are gas+star radii
+     * while these are stellar. */
+    float  R50Bound;
+    float  R90Bound;
+    float  RmaxBound;
     int32_t PrimaryFOFNum;  /* Number of distinct primary FOF groups hosting particles of this sec FOF */
     int64_t PrimaryFOFID;   /* Primary FOF GrNr that hosts the largest fraction of primary-linked particles; -1 if none */
 };
 
-/* (distance, mass, GrNr) tuple for computing group sizes. */
+/* (distance, mass, GrNr) tuple for computing group sizes.
+ * `bound` marks a member star the BHseedSecFOFbound pass flagged, so the bound-star
+ * radii can be accumulated from this same array: every entry of a group shares one
+ * centre, so the bound entries are already in ascending distance order within the
+ * group's block and need no separate gather or sort. */
 struct dist_mass_grp {
     double dist;
     double mass;
     int64_t GrNr;
+    int bound;
 };
 
 /* One secFOF group that just seeded a BH, broadcast to all ranks so every rank
@@ -324,6 +338,9 @@ secondfof_compute_sizes(FOFGroups * fof, struct SecondGroupExtra * extra, MPI_Co
         dm_local[n].dist = sqrt(r2);
         dm_local[n].mass = P[i].Mass;
         dm_local[n].GrNr = grNr;
+        /* 0 for every non-star and whenever the bound pass did not run, in which case
+         * the bound radii below come out 0 without needing a separate code path. */
+        dm_local[n].bound = (P[i].Type == 4 && STARP(i).Bounded == 1);
         n++;
     }
 
@@ -385,15 +402,21 @@ secondfof_compute_sizes(FOFGroups * fof, struct SecondGroupExtra * extra, MPI_Co
         int64_t count = end - start;
 
         if(count > 0) {
-            /* Particles in [start, end) are already sorted by distance */
-            double total_mass = 0;
+            /* Particles in [start, end) are already sorted by distance -- and so, as a
+             * subsequence of them, are the bound member stars, because both sets are
+             * measured about the same centre. */
+            double total_mass = 0, total_bmass = 0;
             int64_t k;
-            for(k = start; k < end; k++)
+            for(k = start; k < end; k++) {
                 total_mass += dm_global[k].mass;
+                if(dm_global[k].bound)
+                    total_bmass += dm_global[k].mass;
+            }
 
-            double cumul_mass = 0;
+            double cumul_mass = 0, cumul_bmass = 0;
             float r50 = 0, r90 = 0, rmax = 0;
-            int found50 = 0, found90 = 0;
+            float br50 = 0, br90 = 0, brmax = 0;
+            int found50 = 0, found90 = 0, bfound50 = 0, bfound90 = 0;
             for(k = start; k < end; k++) {
                 cumul_mass += dm_global[k].mass;
                 if(!found50 && cumul_mass >= 0.5 * total_mass) {
@@ -405,14 +428,35 @@ secondfof_compute_sizes(FOFGroups * fof, struct SecondGroupExtra * extra, MPI_Co
                     found90 = 1;
                 }
                 rmax = dm_global[k].dist;
+
+                /* Bound stars only. A group with none never enters here, so its bound
+                 * radii stay 0 and the degenerate total_bmass == 0 case cannot fire. */
+                if(dm_global[k].bound) {
+                    cumul_bmass += dm_global[k].mass;
+                    if(!bfound50 && cumul_bmass >= 0.5 * total_bmass) {
+                        br50 = dm_global[k].dist;
+                        bfound50 = 1;
+                    }
+                    if(!bfound90 && cumul_bmass >= 0.9 * total_bmass) {
+                        br90 = dm_global[k].dist;
+                        bfound90 = 1;
+                    }
+                    brmax = dm_global[k].dist;
+                }
             }
             extra[g].R50 = r50;
             extra[g].R90 = r90;
             extra[g].Rmax = rmax;
+            extra[g].R50Bound = br50;
+            extra[g].R90Bound = br90;
+            extra[g].RmaxBound = brmax;
         } else {
             extra[g].R50 = 0;
             extra[g].R90 = 0;
             extra[g].Rmax = 0;
+            extra[g].R50Bound = 0;
+            extra[g].R90Bound = 0;
+            extra[g].RmaxBound = 0;
         }
     }
 
@@ -618,6 +662,9 @@ SIMPLE_PROPERTY_SECFOF(PotMin, grp.PotMin, float, 1)
 SIMPLE_PROPERTY_SECFOF(R50, ext.R50, float, 1)
 SIMPLE_PROPERTY_SECFOF(R90, ext.R90, float, 1)
 SIMPLE_PROPERTY_SECFOF(Rmax, ext.Rmax, float, 1)
+SIMPLE_PROPERTY_SECFOF(R50Bound, ext.R50Bound, float, 1)
+SIMPLE_PROPERTY_SECFOF(R90Bound, ext.R90Bound, float, 1)
+SIMPLE_PROPERTY_SECFOF(RmaxBound, ext.RmaxBound, float, 1)
 SIMPLE_PROPERTY_SECFOF(PrimaryFOFNum, ext.PrimaryFOFNum, int32_t, 1)
 SIMPLE_PROPERTY_SECFOF(PrimaryFOFID, ext.PrimaryFOFID, int64_t, 1)
 
@@ -740,6 +787,20 @@ secondfof_register_io_blocks(int MetalReturnOn, int ComputeSize, int SecFOFStarC
         IO_REG(SecR50, "f4", 1, PTYPE_FOF_GROUP, IOTable);
         IO_REG(SecR90, "f4", 1, PTYPE_FOF_GROUP, IOTable);
         IO_REG(SecRmax, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+        if(SecFOFStarCluster) {
+            /* The same three radii over the BOUND member stars, about the SAME centre
+             * (SecPotMinPos), so bound/total is a ratio of like for like.  Registered
+             * unconditionally within this gate, like the SecBound* blocks: identically 0
+             * when BHseedSecFOFbound = 0, and for a group with no bound star.
+             *
+             * The one difference from SecR50/R90/Rmax that remains is the population:
+             * these are stars-only by construction, since boundness is defined for stars,
+             * while SecR50 covers every primary-linked type -- so under
+             * SecondFOFPrimaryLinkTypes = 17 the totals are gas+star radii. */
+            IO_REG(SecR50Bound, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+            IO_REG(SecR90Bound, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+            IO_REG(SecRmaxBound, "f4", 1, PTYPE_FOF_GROUP, IOTable);
+        }
     }
     IO_REG(SecPrimaryFOFNum, "i4", 1, PTYPE_FOF_GROUP, IOTable);
     IO_REG(SecPrimaryFOFID, "i8", 1, PTYPE_FOF_GROUP, IOTable);
@@ -979,6 +1040,7 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
                  * fof.c keys off Seeded (not zeroed ClusterMass), so this is
                  * consistent across all seeding paths. */
                 STARP(i).Seeded = 1;
+                STARP(i).SeedBHTime = (float) atime;
                 n_marked++;
             }
         }
@@ -1106,11 +1168,58 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential,
      * this call only measures the bound subset for the snapshot, so the catalogue's
      * SCMass / MassByType / LengthByType keep describing ALL member stars.
      * (The seeding path is not affected by the OutputPotential issue above:
-     * secondfof_seed hardcodes PotentialMin = 1 in its own fof_set_params call.) */
-    if(sfof_params.BHseedSecFOFbound)
+     * secondfof_seed hardcodes PotentialMin = 1 in its own fof_set_params call.)
+     *
+     * The per-star mask is requested as well, purely so the result can be stamped into
+     * STARP.Bounded for the catalogue's 4/Bounded block.  Asking for it makes every rank
+     * sweep every group instead of only its own (a group's member stars are spread over
+     * all ranks); the replication, the DM binning and the two Allreduces are paid either
+     * way, and one group holds the large majority of the member stars, so its owner was
+     * already doing that work while the other ranks waited.
+     *
+     * The mask cannot be carried to the writer directly: fof_save_particles_to_bigfile
+     * copies the particles into a fresh part/slot manager and re-sorts them by
+     * (Type, GrNr) across ranks, so a P[]-indexed array would no longer line up.  The
+     * slot travels with its particle, which is why the flag has to live there. */
+    if(sfof_params.BHseedSecFOFbound) {
+        /* Bottom-stack allocation, freed below before saved_GrNr (LIFO).  The bound
+         * pass itself allocates only on the top stack (mymalloc2), so it cannot
+         * interleave with this. */
+        char * bound_mask = (char *) mymalloc("SecFOF_BoundMask",
+                                sizeof(char) * (PartManager->NumPart > 0 ? PartManager->NumPart : 1));
+        memset(bound_mask, 0, sizeof(char) * (PartManager->NumPart > 0 ? PartManager->NumPart : 1));
+
         fof_secfof_bound_restrict(&fof, sfof_params.BHseedSecFOFbound, 0,
-                                  atime, CP, NULL /* no per-star mask: catalogue only */,
-                                  Comm);
+                                  atime, CP, bound_mask, Comm);
+
+        /* Stamp the tri-state flag onto every LOCAL star, from scratch: a star that has
+         * dropped out of every group since the last pass (or since the last snapshot of
+         * a live run) must fall back to -1 rather than keep a stale 0/1.
+         * P[].GrNr still holds the SECONDARY group number here -- Step 6 restores the
+         * primary one -- and MinPrimaryLength/MinLength have already set it to -1 on the
+         * members of groups that did not make the catalogue, so >= 0 is exactly
+         * "member of a group in the catalogue about to be written". */
+        int64_t nbound_loc = 0, nmemb_loc = 0;
+        #pragma omp parallel for reduction(+: nbound_loc, nmemb_loc)
+        for(i = 0; i < PartManager->NumPart; i++) {
+            if(P[i].Type != 4)
+                continue;
+            if(P[i].GrNr < 0) {
+                STARP(i).Bounded = -1;
+                continue;
+            }
+            STARP(i).Bounded = bound_mask[i] ? 1 : 0;
+            nmemb_loc++;
+            if(bound_mask[i]) nbound_loc++;
+        }
+        int64_t counts[2] = {nmemb_loc, nbound_loc};
+        MPI_Allreduce(MPI_IN_PLACE, counts, 2, MPI_INT64, MPI_SUM, Comm);
+        message(0, "SecondFOF: 4/Bounded set from BHseedSecFOFbound=%d: %ld of %ld member "
+                   "stars bound (%.2f%%).\n", sfof_params.BHseedSecFOFbound,
+                   counts[1], counts[0], counts[0] > 0 ? 100.0 * counts[1] / counts[0] : 0.0);
+
+        myfree(bound_mask);
+    }
 
     /* Step 6: Restore original GrNr and free saved_GrNr
      * (must free before allocating result to respect stack allocator order) */

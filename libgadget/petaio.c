@@ -313,6 +313,11 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
             STARP(i).initClusterMass = 0;
             STARP(i).initStarClusterMass_sample = 0;
             STARP(i).Seeded = 0;
+            /* Unseeded default; repaired below from Seeded if the block is missing. */
+            STARP(i).SeedBHTime = -1;
+            /* Written only to SecPIG, never read back, so a restart always has to
+             * start from "not a member" rather than from the snapshot. */
+            STARP(i).Bounded = -1;
         }
         if(P[i].Type == 5) {
             BHP(i).init_Msc = 0;
@@ -325,6 +330,8 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
 
     /* Set when an older snapshot is missing the (non-fatal) 4/BirthMetallicity block. */
     int birthmet_missing = 0;
+    /* Likewise for 4/SeedBHTime. */
+    int seedbhtime_missing = 0;
     for(i = 0; i < IOTable->used; i ++) {
         /* only process the particle blocks */
         char blockname[128];
@@ -362,6 +369,8 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
             petaio_readout_buffer(&array, &IOTable->ent[i], &conv, PartManager, SlotsManager);
         else if(ptype == 4 && 0 == strcmp(IOTable->ent[i].name, "BirthMetallicity"))
             birthmet_missing = 1;
+        else if(ptype == 4 && 0 == strcmp(IOTable->ent[i].name, "SeedBHTime"))
+            seedbhtime_missing = 1;
         petaio_destroy_buffer(&array);
     }
 
@@ -375,6 +384,22 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
         for(i = 0; i < PartManager->NumPart; i++) {
             if(P[i].Type == 4)
                 STARP(i).BirthMetallicity = STARP(i).Metallicity;
+        }
+    }
+
+    /* Backward compatibility: older snapshots lack the 4/SeedBHTime block, so its setter
+     * never ran and every star still holds the -1 pre-zeroed above. Stars that were
+     * already seeded were seeded at some unrecorded time, so give them 0 -- distinct from
+     * both -1 (never seeded) and from any real scale factor, which is always > 0 -- while
+     * the unseeded ones correctly keep -1. Reads Seeded, so it must come after the block
+     * loop. Skipped for ICs, which read neither block and have no seeded stars. */
+    if(seedbhtime_missing && !ic) {
+        message(0, "WARNING: snapshot has no 4/SeedBHTime block; setting it to 0 for "
+                   "already-seeded stars (seeding time unknown) and -1 for unseeded ones.\n");
+        #pragma omp parallel for
+        for(i = 0; i < PartManager->NumPart; i++) {
+            if(P[i].Type == 4)
+                STARP(i).SeedBHTime = STARP(i).Seeded ? 0 : -1;
         }
     }
     destroy_io_blocks(IOTable);
@@ -871,6 +896,9 @@ SIMPLE_PROPERTY_PI(StarClusterMass_sample, StarClusterMass_sample, float, 1, str
 SIMPLE_PROPERTY_PI(initClusterMass, initClusterMass, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(initStarClusterMass_sample, initStarClusterMass_sample, float, 1, struct star_particle_data)
 SIMPLE_PROPERTY_PI(Seeded, Seeded, int, 1, struct star_particle_data)
+SIMPLE_PROPERTY_PI(SeedBHTime, SeedBHTime, float, 1, struct star_particle_data)
+/* Getter only: 4/Bounded is written, never read back (see register_secfof_star_io_blocks). */
+SIMPLE_GETTER_PI(GTBounded, Bounded, int, 1, struct star_particle_data)
 SIMPLE_PROPERTY_TYPE_PI(ClusterFormationEfficiency, 0, ClusterFormationEfficiency, float, 1, struct sph_particle_data)
 SIMPLE_PROPERTY_PI(SumSFRdt, SumSFRdt, float, 1, struct sph_particle_data)
 SIMPLE_PROPERTY_PI(SumSpawnedMass, SumSpawnedMass, float, 1, struct sph_particle_data)
@@ -1092,6 +1120,7 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
     IO_REG_NONFATAL(ClusterMass, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(initClusterMass, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(Seeded, "i4", 1, 4, IOTable);
+    IO_REG_NONFATAL(SeedBHTime, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(Msc_ave, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(StarClusterMass_sample, "f4", 1, 4, IOTable);
     IO_REG_NONFATAL(initStarClusterMass_sample, "f4", 1, 4, IOTable);
@@ -1154,6 +1183,21 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
     /* end excursion set*/
 
     /*Sort IO blocks so similar types are together; then ordered by the sequence they are declared. */
+    qsort_openmp(IOTable->ent, IOTable->used, sizeof(struct IOTableEntry), order_by_type);
+}
+
+/* Star blocks that only the secondary-FOF particle catalogue carries.
+ * Call AFTER register_io_blocks on the SecPIG path only.
+ *
+ * Bounded is deliberately not part of register_io_blocks: it is filled by the
+ * BHseedSecFOFbound pass in secondfof_run, so it only has a meaning for the catalogue
+ * being written right then.  In PART_/PIG_ it would be a stale leftover of whichever
+ * secondary FOF ran last, which is why it is registered here and WRONLY -- written,
+ * never read back, so a restart starts from the -1 that petaio_read_snapshot sets. */
+void register_secfof_star_io_blocks(struct IOTable * IOTable)
+{
+    IO_REG_WRONLY(Bounded, "i4", 1, 4, IOTable);
+    /* Keep the table in the same order the two registration functions above leave it. */
     qsort_openmp(IOTable->ent, IOTable->used, sizeof(struct IOTableEntry), order_by_type);
 }
 

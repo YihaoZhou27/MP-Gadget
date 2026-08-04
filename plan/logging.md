@@ -1,5 +1,95 @@
 # MP-Gadget Development Log
 
+## 2026-08-03 — SecPIG: bound-star R50 / R90 / Rmax
+
+Three new SecPIG group blocks — `SecR50Bound`, `SecR90Bound`, `SecRmaxBound` — over the member stars the `BHseedSecFOFbound` pass flagged (`STARP.Bounded == 1`), about the same `SecPotMinPos` centre as `SecR50`/`R90`/`Rmax`, so bound/total is a ratio of like for like. Identically 0 when `BHseedSecFOFbound = 0` or a group has no bound star. Registered under `ComputeSize && SecFOFStarCluster`, so the catalogue schema does not depend on the bound switch.
+
+The one difference from the totals that remains is the population: these are stars-only by construction, since boundness is only defined for stars, while `SecR50` covers every primary-linked type. Under `SecondFOFPrimaryLinkTypes = 17` the totals are gas+star half-mass radii, not stellar — worth keeping in mind when comparing across the `PriStar` (17) and `boundSC` (16) runs.
+
+Sharing the centre keeps this nearly free. `struct dist_mass_grp` gains a `bound` flag (24 -> 32 B) and the existing per-group scan accumulates a second cumulative sum: because every entry of a group is measured from one centre, the bound entries are already in ascending distance order inside the sorted block, so no second gather and no second sort are needed. The alternative that was built first — centring the bound radii on the bound-star COM — forced a second gather and sort, since the bound stars order differently about a different centre; it was measured at ~2x this function and dropped in favour of the shared centre.
+
+Measured baseline for that decision (`output_l0.1_BH5e3_bound_seededfix`, `cpu.txt-R013` + `R020`): `/SecondFOF/Compute` is **4.08 s of a 12,023 s run (0.034%)**, 0.51 s per snapshot step, against `/FOF/Primary` at 5600 s. The whole choice of centre was worth ~4 s, so it was settled on physics: `PotMinPos` keeps `SecR50` comparable with every catalogue already on disk, and stays on the dominant clump when the SecFOF percolates at large linking length, where a COM would drift into empty space between clumps.
+
+Enabled by the `STARP.Bounded` field added earlier today: the flag survives in the star slot from the Step 5b bound pass to the size pass, with no reordering in between.
+
+Compiles clean; `test_fof`, `test_slotsmanager`, `test_exchange`, `test_memory` pass on 4 ranks. No production run yet.
+
+**Files modified:** `libgadget/secondfof.c`
+
+---
+
+## 2026-08-03 — `4/SeedBHTime`: record when each star's cluster mass was spent on a BH seed
+
+New star property written to every snapshot — `PART_`, `PIG_` and `SecPIG_` alike: the scale factor at which `Seeded` flipped 0 → 1, and `-1` while the star is still unseeded. It marks the whole seedable population of a seeded group, not only the host star that became the BH; a star already converted to a BH is type 5 and carries no star slot, so it is not recorded.
+
+Kept as a separate field rather than converting `Seeded` from an int flag to a float scale factor. Repurposing looked free but is not: bigfile silently casts dtypes on read, so an existing snapshot's `i4` `4/Seeded` would load into an `f4` field as 1.0, restarting every previously seeded star as "seeded at a = 1.0" with no error. On top of that, ~20 sites use `.Seeded` as a boolean and a `-1` sentinel is truthy, so each would have inverted for unseeded stars, and every analysis notebook reads `4/Seeded` as 0/1.
+
+Backward compatible. A restart from a snapshot without the block warns and initialises from `Seeded`: 0 for already-seeded stars (real seeding time unrecoverable, and distinct from any real scale factor, which is always > 0), -1 for unseeded ones. Same mechanism as the existing `4/BirthMetallicity` fallback.
+
+Costs: memory zero — the `float` lands in the padding hole between `FormationTime` and `ClusterFormationEfficiency`, so `sizeof(struct star_particle_data)` is still 168 B (verified by compiling). CPU is two extra stores at the only two places `Seeded` is set (`fof.c` per-cluster marking, `secondfof.c` single-seed marking). Output grows by one `f4` array of N_star per snapshot, ~1 MB at 265k stars.
+
+Compiles clean; `test_fof`, `test_slotsmanager`, `test_exchange` pass on 4 ranks. No production run yet.
+
+**Files modified:** `libgadget/slotsmanager.h`, `libgadget/petaio.c`, `libgadget/fof.c`, `libgadget/secondfof.c`, `libgadget/sfr_eff.c`
+
+---
+
+## 2026-08-03 — SecPIG: per-star `4/Bounded` flag from the BHseedSecFOFbound pass
+
+The secondary-FOF catalogue now records boundness per star particle, not just as the per-group `SecBound*` totals. New SecPIG block `4/Bounded`, tri-state: `-1` not a member of any secFOF group in this catalogue (also the value everywhere when `BHseedSecFOFbound=0`), `0` member star that failed the bound test, `1` member star bound to its group. It flags bound stars whether or not they are seeded — the unseeded restriction is left to whoever consumes it.
+
+Written only to SecPIG, and write-only: it means nothing in `PART_`/`PIG_`, where it would be a stale leftover of whichever secondary FOF ran last, and it is never read back, so a restart starts from `-1`. The catalogue pass (`apply=0`) is the only writer, so the flag always describes the catalogue it is written beside, at that catalogue's linking length and `MinPrimaryLength`.
+
+Cost is close to nothing. The boundness computation already existed and already produced this flag internally; the catalogue path simply stopped throwing it away. Requesting it does make every rank sweep every group instead of only its own, but the expensive shared work (member-star replication, DM binning, the two `Allreduce`s) was paid either way, and one group holds the large majority of the member stars, so its owner was already doing that work while the other ranks waited at the barrier. Memory is genuinely zero: the new `int` lands in the trailing padding after `Seeded`, leaving `sizeof(struct star_particle_data)` at 168 B (verified by compiling both). Output adds one `int32` array of length N_star, ~1 MB at 265k stars.
+
+The flag has to live in the star slot rather than stay a transient array: the SecPIG writer copies particles into a fresh part/slot manager and re-sorts them by `(Type, GrNr)` across ranks, so a `P[]`-indexed mask would no longer line up. Slots are copied whole, so the field travels with its particle.
+
+Compiles clean; no run yet.
+
+**Files modified:** `libgadget/slotsmanager.h`, `libgadget/secondfof.c`, `libgadget/petaio.c`, `libgadget/petaio.h`, `libgadget/fofpetaio.c`, `libgadget/sfr_eff.c`
+
+---
+
+## 2026-08-02 — cpu.txt: break BH seeding down into phases
+
+BH seeding was already timed in `cpu.txt`, but as a single `FOF/Seeding` lump covering the whole of `fof_seed`. It is now split into ten leaves under `FOF/Seeding`, so the total is unchanged and the phases are visible: `Bound` (the `BHseedSecFOFbound` boundness pass), `Gate` (seeding gates plus the `SeedSecFOFcomSample` combined draw), `Export` (marked-group exchange), `CountUB` (the upper-bound seed counts, which redraw each group's cluster population), `Slots` (BH slot reservation and the tree relocation around it), `MakeOne` (the one-seed-per-group placement loop), `Extra` (`SeedInSecFOFMultipleSeeds`), `SCdraw` and `SCplace` (the per-cluster mode's ICMF draw and its host gather / placement / marking), and `Misc`.
+
+`SCdraw` and `CountUB` are the two that scale with a group's seeding budget, so they are what to watch when running with `SecFOFseedSpendOnPlaced=1`.
+
+Hierarchy and summation verified against the real `walltime.c` with a standalone harness (parent totals its leaves, no double counting under `FOF`); `test_fof` passes.
+
+**Files modified:** `libgadget/fof.c`
+
+---
+
+## 2026-08-02 — SecFOFseedSpendOnPlaced: spend a secFOF group's seeding budget only when a BH is actually placed
+
+New optional parameter `SecFOFseedSpendOnPlaced` (default 0 = unchanged behavior) for the per-cluster secFOF seeding mode. It changes what marks a group's seedable stars `Seeded=1`, i.e. what permanently removes them from the seeding budget: 0 marks them as soon as the group *requested* a seed, 1 marks them only once the group has actually *placed* a BH particle (ordinary or `MinBHSeedInSC` compensating).
+
+The two differ because placement carries gates the request does not see — with `MbhMscRelationCWmodel=1` each cluster additionally needs `M_VMS >= SeedBlackHoleMass`, and every seed needs an unseeded host star. Under the old rule a group whose drawn clusters all fall below the seed-mass floor spends its entire cluster-mass budget without ever making a BH, and is sterilised for good: that budget is also the ICMF cutoff `SCcomMcut`, so its later draws get weaker rather than stronger. This is what leaves ASTRID-eligible haloes unseeded in `output_l0.1_BH3e5_bound` (only 1.8% of drawn clusters clear the floor there). Under the new rule such a group keeps its stars unseeded and retries at the next seeding step with a budget grown by the stars formed since.
+
+The count of placed seeds is accumulated per group during the two placement phases, which already run the same selection on every rank, so it needs no extra communication and the marking loop is unchanged in cost. The seeding log line now also reports how many groups requested a seed but placed none and kept their budget.
+
+**Cost, measured on `output_l0.1_BH3e5_bound`:** a group that never seeds redraws an ever-larger cluster population every step. At z=9 the full carried-over budget is ~37x the per-step drawn cluster mass, so the sampling cost and (with `MinMscForSCdetail` lowered) the StarClusterDetails volume grow correspondingly over a run. Keep `MinMscForSCdetail` at its default when enabling this.
+
+Rejected at startup outside the per-cluster mode. Compiles clean, `test_fof` passes, parameter parsing and the guard verified end to end; no production run yet.
+
+**Files modified:** `libgadget/fof.c`, `gadget/params.c`
+
+---
+
+## 2026-08-01 — SCmasscapSecFOFstarmass: drop the truncated cluster when its remainder is sub-ICMF
+
+The draw-order truncation added earlier today shortened the cluster crossing `Mcut` to whatever stellar-mass budget was left, so the draw landed exactly on `Mcut`. That remainder is not an ICMF sample and can be arbitrarily small, and `output_l0.1_BH3e5_bound` duly produced a **26.8 Msun** star cluster — below the 100 Msun lower limit of the mass function itself, so its size, VMS mass and seed mass would all be extrapolated off the bottom of their fitted relations.
+
+The crossing cluster is now dropped whole, and the budget closed, whenever the remainder is below `msc_min_code` (100 Msun); otherwise it is shortened as before. Every emitted mass is therefore either a full ICMF draw or a remainder of at least 100 Msun. The draw lands on `Mcut` when it can and under it by less than 100 Msun when it cannot — the cap stays a cap either way, since it can now only remove mass. All three samplers share `msc_budget_take` and treat a 0 return as end-of-draw, so the identical-population invariant holds unchanged.
+
+Measured on the run that exposed it (9.62M cluster records, 2062 secFOF draws keyed on the host `(a, GrNr)`, compensation records excluded): 63 draws (3.1%) hit the cap, and in 62 of them the shortened cluster was already >= 100 Msun and is untouched. Exactly one record changes — the last of the 44 clusters of `GrNr=20` at `a=0.096975`, the only sub-100-Msun cluster in the whole file — and it disappears. Effect on that group: total drawn falls from 212,398.10 Msun (exactly its bound unseeded stellar mass) to 212,371.33 Msun. Nothing downstream changes; that cluster had `Mbh_seed = 0`.
+
+**Files modified:** `libgadget/sfr_eff.c`, `libgadget/sfr_eff.h`
+
+---
+
 ## 2026-08-01 — BHseedSecFOFbound: restrict the unseeded-star metallicity to the bound subset
 
 The bound pass restricted every *mass* the seeding decision reads — the cluster-mass budget, `SCcomMcut`, the host pool, the seed host — but deliberately left the unseeded-star metallicity summary (`SCMetalMassUnseeded`, `SCClusterMassUnseededInit`, `SCMetUnseeded{Min,Max,Sum,Sum2,LogSum,LogSum2,Hist}`) accumulated over ALL unseeded stars, because `NStarUnseeded` is its denominator and could not be recomputed there. That left a real hole: those fields are not diagnostics. Per-cluster CW seeding draws each cluster's metallicity from them — `CWmodelMetallicity` 'ave' from the metal-mass ratio, 'lognormal' from the log sums, 'uniform' from the min/max — and Z feeds the Vink winds in the collision model, so an unbound star could still shift `M_VMS` and hence the BH seed mass while contributing no mass and hosting no seed.

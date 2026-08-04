@@ -119,6 +119,21 @@ struct FOFParams
      * here because the code<->solar conversion is only set up once the units are known,
      * well after set_fof_params runs.  Only used when MbhMscRelationCWmodel=1. */
     double MinBHSeedInSC;
+    /* Per-cluster mode (SecFOFseedsumover=0) only: what marks a group's seedable star
+     * population spent (Seeded=1).  0 (default, historical behavior) = the group having
+     * merely REQUESTED a seed, i.e. drawn at least one cluster >= MinMscForBHseed;
+     * 1 = the group having actually PLACED a BH particle (ordinary or MinBHSeedInSC
+     * compensating).  With MbhMscRelationCWmodel=1 placement carries the extra
+     * M_VMS >= SeedBlackHoleMass gate that the request does not see, so under 0 a group
+     * whose every drawn cluster falls below that floor is sterilised for good: its whole
+     * (bound) cluster-mass budget is spent without a BH ever existing, and since that
+     * budget is also the ICMF cutoff SCcomMcut, its later draws get weaker rather than
+     * stronger.  Under 1 such a group keeps its stars unseeded and retries at the next
+     * seeding step with a budget grown by the stars formed since, until a cluster finally
+     * clears the floor.  NOTE the flip side: a group that never seeds redraws an
+     * ever-larger cluster population every step, so the sampling cost (and, with
+     * MinMscForSCdetail lowered, the StarClusterDetails volume) grows without bound. */
+    int SecFOFseedSpendOnPlaced;
     int FOFPotentialMin;
     /* If 1, seeded star particles (Type==4 && STARP.Seeded) are excluded from
      * the primary-linking set. Set transiently by secondfof_run when
@@ -282,6 +297,22 @@ void set_fof_params(ParameterSet * ps)
             if(param_get_double(ps, "SeedBlackHoleMass") <= 0)
                 endrun(1, "MinBHSeedInSC > 0 requires SeedBlackHoleMass > 0: it is the mass of each "
                           "compensating BH seed and the quantum the missed mass is divided by.\n");
+        }
+        /* SecFOFseedSpendOnPlaced: only the per-cluster path can request a seed and then
+         * place none -- the single-seed path's seeded-group list is built from the groups
+         * that were actually seeded -- so refuse it elsewhere instead of silently doing
+         * nothing. */
+        fof_params.SecFOFseedSpendOnPlaced = param_get_int(ps, "SecFOFseedSpendOnPlaced");
+        if(fof_params.SecFOFseedSpendOnPlaced) {
+            if(fof_params.SecFOFseedsumover || !fof_params.SeedSecFOFcomSample)
+                endrun(1, "SecFOFseedSpendOnPlaced=1 requires the per-cluster secFOF seeding mode "
+                          "(SeedSecFOFcomSample=1 and SecFOFseedsumover=0).\n");
+            message(0, "SecFOFseedSpendOnPlaced=1: a secFOF group's seedable stars are marked "
+                       "Seeded=1 only once the group has placed a BH. Groups that place none keep "
+                       "their whole cluster-mass budget and retry at the next seeding step, so "
+                       "their sampled cluster population grows from step to step -- watch the "
+                       "seeding wall time, and keep MinMscForSCdetail at its default unless the "
+                       "detail volume is affordable.\n");
         }
         fof_params.FOFPotentialMin = param_get_int(ps, "FOFPotentialMin");
     }
@@ -2609,6 +2640,13 @@ struct rs_group {
      * so every rank fills it with the same number. */
     int      n_comp;
     double   comp_sc_share; /* StarClusterMass each of those seeds carries */
+    /* BH particles this call actually placed for the group, ordinary (phase 3) plus
+     * MinBHSeedInSC compensating (phase 4).  Not communicated: both phases run the same
+     * selection on every rank -- the ownership test guards only the conversion itself --
+     * so every rank ends up with the same count, and no reduction is needed.
+     * SecFOFseedSpendOnPlaced marks the Seeded=1 population on this instead of on
+     * n_request/n_comp. */
+    int      n_placed;
     int      nstar_unseeded;/* NStarUnseeded: the group's whole host-star supply */
     int      mass_offset;   /* offset into the gathered mass array (filled after gather) */
     uint64_t SeedStarID;    /* RNG seed for the combined draw */
@@ -2979,6 +3017,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         m->n_qualify = n_qual;
         m->n_comp = 0;          /* set after gather, from the Allreduced missed mass */
         m->comp_sc_share = 0;
+        m->n_placed = 0;        /* counted during the placement phases, on every rank */
         m->nstar_unseeded = cap_stars;
         m->mass_offset = 0;     /* set after gather */
         m->SeedStarID = (uint64_t) g->SeedStarID;
@@ -3008,6 +3047,10 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         off += n_req;
     }
     int64_t nmass_local = off;
+    /* The ICMF draw itself: O(budget / <m_cluster>) per group, so this is the leaf that
+     * grows when a group's seeding budget is carried over instead of being spent
+     * (SecFOFseedSpendOnPlaced=1).  See also /FOF/Seeding/CountUB, which redraws it. */
+    walltime_measure("/FOF/Seeding/SCdraw");
 
     struct rs_group * all_rsg = (struct rs_group *) mymalloc("RSG", n_msg * sizeof(struct rs_group));
     MPI_Allgatherv(local_rsg, n_local * (int) sizeof(struct rs_group), MPI_BYTE,
@@ -3214,6 +3257,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                 n_conv_local++;
             }
             n_placed++;
+            m->n_placed++;      /* per-group, identical on every rank (SecFOFseedSpendOnPlaced) */
         }
         /* StarClusterDetails (MinMscForSCdetail): record the sampled clusters that are
          * too light to ever seed a BH.  Having no host of their own, they all carry the
@@ -3399,6 +3443,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                                        &m->metdist, &m->boundinfo, &m->gmass, SC_FLAG_COMPENSATE);
                 }
                 n_comp_placed++;
+                m->n_placed++;  /* a compensating seed is a real BH: it spends the group too */
                 comp_mass_tot += comp_unit;
             }
         }
@@ -3409,19 +3454,28 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                 comp_unit, comp_mass_tot, n_comp_short, n_comp_capped);
     }
 
-    /* Flag every remaining seedable star (unseeded & f(Z)>0) of a seeded group (n_request >= 1,
-     * or n_comp >= 1 for a group that only got compensating seeds) as Seeded=1. The group's
-     * Sum(f(Z)*ClusterMass) fed the combined draw, so its seedable
-     * population is consumed regardless of how many BHs were placed (matching the single-seed
-     * combined path, which marks these via secondfof_seed's seeded_grnr_out list; random-mode
-     * groups are absent from that list, so they are marked here). f(Z)=0 stars never participate
-     * and are left untouched; stars already converted to BHs are type 5 and skipped.
+    /* Flag every remaining seedable star (unseeded & f(Z)>0) of a seeded group as Seeded=1.
+     * The group's Sum(f(Z)*ClusterMass) fed the combined draw, so its seedable population is
+     * consumed regardless of how many BHs were placed (matching the single-seed combined path,
+     * which marks these via secondfof_seed's seeded_grnr_out list; random-mode groups are absent
+     * from that list, so they are marked here). f(Z)=0 stars never participate and are left
+     * untouched; stars already converted to BHs are type 5 and skipped.
+     *
+     * What counts as "seeded" here is SecFOFseedSpendOnPlaced:
+     *   0 (default): the group REQUESTED a seed (n_request >= 1, or n_comp >= 1 for a group
+     *     that only got compensating seeds).  Its budget is spent even if every drawn cluster
+     *     was then rejected -- by the CW model's M_VMS < SeedBlackHoleMass gate, or for want
+     *     of a host star -- which sterilises such a group permanently.
+     *   1: the group actually PLACED a BH (n_placed >= 1, ordinary or compensating).  A group
+     *     that placed none keeps its stars unseeded, so its budget carries over and it tries
+     *     again with a larger one at the next seeding step.
      *
      * BHseedSecFOFbound: filtered by bound_mask, so only the stars that actually fed the
      * restricted draw are spent.  An UNBOUND star stays Seeded=0 and keeps its cluster
      * mass, so it contributes at a later seeding search if it becomes bound -- the
      * restriction defers those stars rather than consuming them.  secondfof_seed applies
      * the same filter to the single-seed path's marking. */
+    const int spend_on_placed = fof_params.SecFOFseedSpendOnPlaced;
     int64_t n_flag = 0;
     #pragma omp parallel for reduction(+:n_flag)
     for(i = 0; i < PartManager->NumPart; i++) {
@@ -3429,11 +3483,26 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         int64_t key = P[i].GrNr;
         int lo = 0, hi = n_msg, found = -1;
         while(lo < hi) { int mid = lo + (hi - lo) / 2; if(all_rsg[mid].GrNr == key) { found = mid; break; } else if(all_rsg[mid].GrNr < key) lo = mid + 1; else hi = mid; }
-        if(found >= 0 && (all_rsg[found].n_request >= 1 || all_rsg[found].n_comp >= 1)) { STARP(i).Seeded = 1; n_flag++; }
+        if(found < 0) continue;
+        const struct rs_group * m = &all_rsg[found];
+        int spend = spend_on_placed ? (m->n_placed >= 1)
+                                    : (m->n_request >= 1 || m->n_comp >= 1);
+        if(spend) { STARP(i).Seeded = 1; STARP(i).SeedBHTime = (float) atime; n_flag++; }
     }
     int64_t n_flag_tot = 0;
     MPI_Allreduce(&n_flag, &n_flag_tot, 1, MPI_INT64, MPI_SUM, Comm);
-    message(0, "secFOF per-cluster seeding: flagged Seeded=1 for %ld star(s) in seeded groups.\n", n_flag_tot);
+    if(spend_on_placed) {
+        /* Groups the old rule would have sterilised and this one carries over. */
+        int64_t n_spared = 0;
+        for(i = 0; i < n_msg; i++)
+            if(all_rsg[i].n_placed < 1 && (all_rsg[i].n_request >= 1 || all_rsg[i].n_comp >= 1))
+                n_spared++;
+        message(0, "secFOF per-cluster seeding: flagged Seeded=1 for %ld star(s) in groups that "
+                   "placed a BH; %ld of %d group(s) requested a seed but placed none and keep their "
+                   "cluster-mass budget (SecFOFseedSpendOnPlaced=1).\n", n_flag_tot, n_spared, n_msg);
+    }
+    else
+        message(0, "secFOF per-cluster seeding: flagged Seeded=1 for %ld star(s) in seeded groups.\n", n_flag_tot);
 
     /* Free all scratch in reverse allocation order.  The phase-4 buffers sit on top of
      * miss, which sits on top of the phase-2 ones, so they go first. */
@@ -3460,6 +3529,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
     myfree(gbd);
     myfree(gbc);
     myfree(rc);
+    walltime_measure("/FOF/Seeding/SCplace");
 }
 
 /* --- SeedSecFOFcomSampleParticle: per-star-particle star-cluster sampling ---
@@ -4782,6 +4852,20 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
     if(fof_params.BHseedSecFOFbound && get_seed_in_secfof())
         fof_secfof_bound_restrict(fof, fof_params.BHseedSecFOFbound, 1, atime, CP,
                                   bound_mask, Comm);
+    /* cpu.txt breakdown of BH seeding.  /FOF/Seeding used to be one lump for the whole
+     * of fof_seed; it is now the sum of the leaves measured through this function and
+     * fof_secfof_random_seeds, so the total is unchanged and the phases are visible:
+     *   Bound    BHseedSecFOFbound boundness pass (this block)
+     *   Gate     seeding gates + the SeedSecFOFcomSample combined per-group draw
+     *   Export   marked-group exchange to the seed-hosting ranks
+     *   CountUB  upper-bound seed counts (re-draws the cluster population per group)
+     *   Slots    BH slot reservation, incl. relocating the tree around slots_reserve
+     *   MakeOne  the one-seed-per-group placement loop (gas / halo / star cluster)
+     *   Extra    SeedInSecFOFMultipleSeeds extra seeds
+     *   SCdraw   per-cluster mode: the per-group ICMF draw
+     *   SCplace  per-cluster mode: host gather, seed placement, Seeded=1 marking
+     *   Misc     bookkeeping and the seeded-group handover */
+    walltime_measure("/FOF/Seeding/Bound");
 
     char * Marked = (char *) mymalloc2("SeedMark", fof->Ngroups);
 
@@ -4901,6 +4985,7 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
             }
         }
     }
+    walltime_measure("/FOF/Seeding/Gate");
 
     struct Group * ExportGroups = (struct Group *) mymalloc("Export", sizeof(fof->Group[0]) * Nexport);
     j = 0;
@@ -4945,6 +5030,7 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
     MPI_Allreduce(&Nimport, &ntot, 1, MPI_INT, MPI_SUM, Comm);
 
     message(0, "Making %d new black hole particles.\n", ntot);
+    walltime_measure("/FOF/Seeding/Export");
 
     /* Per-secFOF multi-seeding may convert additional (2nd..N_seed) stars into BHs
      * later (fof_secfof_extra_seeds).  Those also need BH slots, so include an upper
@@ -4960,6 +5046,9 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
     int64_t n_random_ub = secfof_count_random_seed_ub(fof, rnd, bound_mask, Comm);   /* local upper bound */
     int64_t ntot_random = 0;
     MPI_Allreduce(&n_random_ub, &ntot_random, 1, MPI_INT64, MPI_SUM, Comm);
+    /* Both upper-bound counts redraw each group's cluster population, so this grows
+     * with the seeding budget exactly as SCdraw does. */
+    walltime_measure("/FOF/Seeding/CountUB");
 
     /* Do we have enough black hole slots to create this many black holes?
      * If not, allocate more slots. */
@@ -5014,6 +5103,7 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
             tree->Nodes = tree->Nodes_base - tree->firstnode;
         }
     }
+    walltime_measure("/FOF/Seeding/Slots");
 
     int ThisTask;
     MPI_Comm_rank(Comm, &ThisTask);
@@ -5025,11 +5115,13 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
     {
         fof_seed_make_one(&ImportGroups[n], ThisTask, atime, rnd);
     }
+    walltime_measure("/FOF/Seeding/MakeOne");
 
     /* Per-secFOF multi-seeding: place the extra (2nd..N_seed) BH seeds for massive
      * groups now that seed 1 exists.  Uses pre-reserved BH slots; converts the chosen
      * stars in place.  Collective (every rank participates). */
     fof_secfof_extra_seeds(fof, atime, rnd, Comm);
+    walltime_measure("/FOF/Seeding/Extra");
 
     /* Per-cluster seeding (SecFOFseedsumover=0): place one BH per sampled cluster
      * >= MinMscForBHseed on its chosen unseeded host star (random or largest
@@ -5105,7 +5197,7 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
     if(bound_mask_out)
         *bound_mask_out = bound_mask;
 
-    walltime_measure("/FOF/Seeding");
+    walltime_measure("/FOF/Seeding/Misc");
 }
 
 static int fof_compare_HaloLabel_MinID(const void *a, const void *b)

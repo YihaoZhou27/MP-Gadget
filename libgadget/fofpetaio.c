@@ -172,6 +172,10 @@ int fof_save_particles_to_bigfile(BigFile * bf, int MetalReturnOn, int OutputDeb
     register_io_blocks(&IOTable, 1, MetalReturnOn);
     if(OutputDebugFields)
         register_debug_io_blocks(&IOTable);
+    /* swap_group_ids marks the secondary-FOF catalogue, the only caller that has a
+     * meaningful STARP.Bounded to write (secondfof_run fills it just before this). */
+    if(swap_group_ids)
+        register_secfof_star_io_blocks(&IOTable);
     struct part_manager_type * halo_pman = NULL;
     struct slots_manager_type * halo_sman = NULL;
     int64_t NpigLocal = 0;

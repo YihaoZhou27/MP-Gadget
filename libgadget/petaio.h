@@ -70,6 +70,9 @@ char * petaio_get_snapshot_fname(int num, const char * OutputDir);
 void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalReturnOn);
 /* Write (but don't read) some extra output blocks useful for debugging the particle structure*/
 void register_debug_io_blocks(struct IOTable * IOTable);
+/* Write (but don't read) the star blocks that only the SecPIG particle catalogue carries,
+ * currently 4/Bounded from the BHseedSecFOFbound pass. SecPIG path only.*/
+void register_secfof_star_io_blocks(struct IOTable * IOTable);
 /* Free the entries in the IOTable.*/
 void destroy_io_blocks(struct IOTable * IOTable);
 

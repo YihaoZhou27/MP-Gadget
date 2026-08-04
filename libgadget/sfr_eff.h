@@ -67,8 +67,10 @@ double sfr_density_threshold(const double atime);
  * allow_cap  : if 1 and SCmasscapSecFOFstarmass is set, truncate the draw in order at
  *              Mcut (accept clusters until the running total reaches Mcut, shorten the
  *              crossing one to the remainder, drop the rest), so the full draw sums to
- *              exactly Mcut.  Pass 0 for the per-particle mode, whose Mcut is per-star:
- *              there the cap belongs on the group sum and the caller applies it.
+ *              exactly Mcut -- except when that remainder is below the 100 Msun ICMF
+ *              floor, where the crossing cluster is dropped whole and the draw lands
+ *              just short of Mcut.  Pass 0 for the per-particle mode, whose Mcut is
+ *              per-star: there the cap belongs on the group sum and the caller applies it.
  * Returns bhseed_msc = sum of sampled cluster masses > 1e4 Msun (code units).
  * If total_sampled_out != NULL, also returns the summed mass of ALL sampled
  * clusters there (full draw, no threshold).
@@ -86,7 +88,8 @@ double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
  * in code units. Serial only (uses the global GSL error handler).
  * SCmasscapSecFOFstarmass truncates the draw in order at Mcut before the min_seed_mass
  * test and before the descending sort, so both n_qualify and the returned masses are
- * those of the surviving prefix. */
+ * those of the surviving prefix.  Every mass it returns is either a full ICMF draw or a
+ * remainder of at least 100 Msun; a shorter remainder ends the draw instead. */
 int starcluster_combined_seed_masslist(double Mcut, double sum_mGamma,
                                        uint64_t rand_id, const RandTable * const rnd,
                                        double min_seed_mass, double * out_masses, int cap);
@@ -104,7 +107,9 @@ typedef void (*sc_detail_cb)(double mass, int draw_index, void * data);
  * Serial only (uses the global GSL error handler).
  * SCmasscapSecFOFstarmass truncates identically here: the budget is charged for every
  * drawn cluster, including those outside [mass_lo, mass_hi), so the truncation point is
- * the same one starcluster_combined_seed_masslist saw whatever window is requested. */
+ * the same one starcluster_combined_seed_masslist saw whatever window is requested.
+ * A mass_lo below 100 Msun therefore still never yields a sub-100-Msun record: the
+ * shortened cluster is dropped rather than emitted when its remainder is that small. */
 void starcluster_seed_masslist_detail(double Mcut, double sum_mGamma,
                                       uint64_t rand_id, const RandTable * const rnd,
                                       double mass_lo, double mass_hi,

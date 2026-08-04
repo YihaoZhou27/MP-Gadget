@@ -102,6 +102,11 @@ struct star_particle_data
     MyFloat BirthInternalEnergy; /*!< Internal energy of gas particle at star formation. */
     MyFloat BirthMetallicity; /*!< Total metallicity of the parent gas at star formation. Frozen: set once at formation, never modified. */
     float FormationTime;      /*!< formation time of star particle */
+    float SeedBHTime;         /*!< Scale factor at which this star's cluster mass was spent on a BH
+                               * seed, i.e. the moment Seeded went 0 -> 1; -1 while still unseeded.
+                               * Marks the whole seedable population of a seeded group, not just the
+                               * host star that became the BH.  Sits in the padding hole after
+                               * FormationTime, so it costs no memory. */
     MyFloat ClusterFormationEfficiency; /*!< Cluster formation efficiency of star particle */
     MyFloat ClusterMass; /*!< Mass of the cluster formed from this star particle (kept as a record after BH seeding; the star is flagged via Seeded instead) */
     MyFloat initClusterMass; /*!< Original ClusterMass at star formation (never modified) */
@@ -112,6 +117,15 @@ struct star_particle_data
     MyFloat StarClusterMass_sample; /*!< Sum of Nsc_sample masses sampled from n(m)~m^-2 exp(-m/Mcstar) (kept as a record after BH seeding; the star is flagged via Seeded instead) */
     MyFloat initStarClusterMass_sample; /*!< Original StarClusterMass_sample at star formation (never modified) */
     int Seeded; /*!< 1 if this star has already contributed to a BH seed (BlackholeSeedSCparticle or SeedSecFOFcomSample); excluded from all later star-cluster seeding sums. ClusterMass is kept as a record. */
+    int Bounded; /*!< BHseedSecFOFbound diagnostic, rewritten from scratch on every secondary-FOF
+                  * catalogue pass and written out as SecPIG block 4/Bounded:
+                  *   -1 = not a member of any secondary-FOF group (also the value everywhere
+                  *        when BHseedSecFOFbound is off, and before the first pass),
+                  *    0 = member star that FAILED the bound test,
+                  *    1 = member star that is gravitationally bound to its group.
+                  * Note this is "bound", not "bound and unseeded": seeded stars are tested and
+                  * flagged like any other, matching the transient mask in fof.c. Lands in the
+                  * trailing padding after Seeded, so it costs no memory. */
 };
 
 /* the following structure holds data that is stored for each SPH particle in addition to the collisionless

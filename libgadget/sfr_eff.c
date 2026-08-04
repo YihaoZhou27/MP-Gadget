@@ -917,7 +917,13 @@ static double msc_icmf_sample(const struct msc_icmf * p, double u)
  * the drawn population is truncated in DRAW ORDER at Mcut (= the group's unseeded
  * stellar mass): clusters are accepted until the running total reaches Mcut, the
  * cluster that crosses it is shortened to the remaining budget, and every later
- * cluster is dropped.  The total therefore lands exactly on Mcut.
+ * cluster is dropped.  The total therefore lands exactly on Mcut -- unless the
+ * remainder is below the ICMF floor msc_min_code (100 Msun), in which case the
+ * crossing cluster is dropped whole rather than shortened: a shortened cluster is no
+ * longer an ICMF draw, and one lighter than the mass function's own lower limit is not
+ * a cluster the model can represent (its size, VMS mass and seed mass would all be
+ * extrapolated off the bottom of their fits).  The draw then lands just under Mcut,
+ * short by less than 100 Msun.
  *
  * Draw order matters.  With StarClusterICMFcutoff = 0 the ICMF is a pure m^-2 with no
  * knowledge of the host, so a small group can draw a cluster heavier than all its
@@ -944,15 +950,22 @@ static void msc_budget_init(struct msc_budget * b, double Mcut, int allow)
 
 /* Charge one drawn cluster against the remaining budget and return the mass that
  * actually forms: the cluster itself while the budget covers it, the remainder for the
- * cluster that crosses Mcut, then 0 -- which every caller treats as end-of-draw. */
+ * cluster that crosses Mcut, then 0 -- which every caller treats as end-of-draw.
+ * A remainder below msc_min_code (the 100 Msun ICMF floor) cannot stand as a cluster,
+ * so the crossing cluster is dropped instead of shortened and the budget is closed. */
 static double msc_budget_take(struct msc_budget * b, double mass)
 {
     if(!b->on)
         return mass;
     if(b->left <= 0)
         return 0;
-    if(mass > b->left)
+    if(mass > b->left) {
+        if(b->left < sfr_params.msc_min_code) {
+            b->left = 0;    /* leftover too small to be a cluster: it forms nothing */
+            return 0;
+        }
         mass = b->left;
+    }
     b->left -= mass;
     return mass;
 }
@@ -989,7 +1002,8 @@ double starcluster_combined_bhseed_msc(double Mcut, double sum_mGamma,
      * threshold (1e4 Msun). RNG offsets +300+s, matching the per-star sampler.
      * SCmasscapSecFOFstarmass truncates the draw in order at Mcut, so the loop ends
      * as soon as the group's unseeded stellar mass is spent (bhseed_msc <=
-     * total_sampled <= Mcut).  allow_cap == 0 disables it for the per-particle sampler
+     * total_sampled <= Mcut, the gap below Mcut being at most one sub-100-Msun
+     * remainder).  allow_cap == 0 disables it for the per-particle sampler
      * (SeedSecFOFcomSampleParticle), which passes Mcut = min(M_cstar, group stellar
      * mass) per star: there the cap belongs on the group-summed total, applied by the
      * caller, not on each per-star draw. */
@@ -1196,6 +1210,10 @@ static int make_particle_star(int child, int parent, int placement, double Time,
     STARP(child).LastEnrichmentMyr = 0;
     STARP(child).TotalMassReturned = 0;
     STARP(child).Seeded = 0;
+    /* Unseeded, so no seeding time yet. */
+    STARP(child).SeedBHTime = -1;
+    /* Not in any secondary FOF group until a catalogue pass says otherwise. */
+    STARP(child).Bounded = -1;
     STARP(child).BirthDensity = oldslot.Density;
     const double a3inv = 1.0 / (Time * Time * Time);
     STARP(child).BirthInternalEnergy = oldslot.Entropy * entropy_to_u(oldslot.Density, a3inv);
