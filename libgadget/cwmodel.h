@@ -7,9 +7,14 @@
  * equilibrium.  Used as the BH seed mass when MbhMscRelationCWmodel=1
  * (SeedInSecFOFRandomStarParticle seeding path).
  *
- * C port of code_v2/WilliamModel/scmodel.py final_vms_mass() with all Params
- * defaults except inflow_rmin_factor=5 (the kappa=5 inflow normalization that
- * reproduces the published Fig. 4; see the WilliamModel NOTES.md diagnosis).
+ * C port of the AUTHOR'S ORIGINAL code (code/CWmodel_oricode,
+ * src/timescales/analysis/modelv2.py STAR-ONLY branch) -- the version that
+ * generates the published Fig. 4.  Closed-form throughout: r_min = relaxation
+ * radius (t_relax=P_orb), r_df from stellar_df_radius (q=Mc/Mstar=1), Mdot_in =
+ * 0.5*Mdot_df - Mdot_dep - Mdot_bin all *(1-f_vms), f_IMF=0.0649, binary
+ * heating ON (fixed sigma=20 km/s), and M_VMS from the direct wind equilibrium
+ * (no fml_vms iteration).  Simulation adaptations: t_merger omitted, the
+ * mean-density cap returns 0.01*M_cl, and Z is the per-cluster simulation value.
  *
  * Inputs:
  *   M_msun         cluster mass [Msun]
