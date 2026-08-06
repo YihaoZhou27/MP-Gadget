@@ -2,8 +2,11 @@
  *
  * C port of the AUTHOR'S ORIGINAL code (code/CWmodel_oricode,
  * src/timescales/analysis/modelv2.py, the STAR-ONLY branch of
- * create_dynamical_model_integral) -- i.e. the version that produces the
- * published Figure 4, not the paper's literal equations.  Every rate here is a
+ * create_dynamical_model_integral), tracking upstream commit 0f2d04a
+ * (2026-08-06, "Fixed bugs following Yihao's comments").  NOTE: that commit
+ * postdates the PUBLISHED Figure 4 and raises the inflow by 2*(1+alpha)=4.4x,
+ * i.e. M_VMS by ~+0.31 dex, so this model no longer reproduces the figure as
+ * printed in the paper.  Every rate here is a
  * closed-form antiderivative lifted directly from her integrals.py / physics
  * modules (Mdot_pl_no_bh_limits, Mdot_deplete_noBH_limits,
  * Mdot_binaries_pl_limits, r_no_relax, stellar_df_radius), so there are no
@@ -12,7 +15,7 @@
  * Model choices FROZEN at her modelv2.py defaults:
  *   e=0.5, cv=1, lnLambda=ln(0.1 N) (coulomb_log, Hamilton+18/B&T),
  *   Mstar=Mc=1 Msun, f_IMF=0.0649 (Salpeter mass_fraction[1,1.5] Msun),
- *   mass_accretion_ratio=0.5 on Mdot_df, f_vms=2e-2 (constant),
+ *   no mass_accretion_ratio on Mdot_df (deleted in 0f2d04a), f_vms=2e-2,
  *   binary heating ON with fixed sigma=20 km/s and mubs=0.153619, mubb=0.17507,
  *   r_min = relaxation radius r_no_relax (t_relax=P_orb), r_df from
  *   stellar_df_radius with q=Mc/Mstar=1 (t_df=t_relax), disruption time
@@ -55,7 +58,8 @@
  * default Salpeter IMF (alpha=2.35, 0.1-100 Msun), i.e. the mass fraction in
  * [1, 1.5] Msun = 0.0649.  (Her modelv2.py computes this per run; frozen here.) */
 #define CW_FIMF         0.0649
-#define CW_ACCR_RATIO   0.5            /* mass_accretion_ratio on Mdot_df */
+/* (CW_ACCR_RATIO: the mass_accretion_ratio=0.5 factor that used to multiply
+ * Mdot_df was removed with CWmodel_oricode commit 0f2d04a -- see the header.) */
 #define CW_FVMS         2.0e-2         /* constant VMS mass-loss fraction f_vms */
 /* Binary-heating magnitude (Mdot_binaries_pl_limits active-version defaults). */
 #define CW_MU_BS        0.153619       /* mu_bs (binary-single heating) */
@@ -216,7 +220,9 @@ static double cw_mdot_df_anti(const struct cw_cluster * cl, double ts_s, double 
     double pref_den2 = 0.34 * ((Ms * Ms / rstar) + (Mc * Mc / rcoll)) * Ms;
     double f1 = pref_num1 / pref_den1 * F1 * (3.0 - a) * (1.0 + a) * (1.0 + a) / cv / G
         * crho * crho / (1.0 - 2.0 * a) * pow(r, 1.0 - 2.0 * a);
-    double f2 = pref_num1 / pref_den1 * F2 * (3.0 - a) * (1.0 + a) / cv / cv / G / G
+    /* (1+a)^2: raised from (1+a) upstream in CWmodel_oricode commit 0f2d04a
+     * (2026-08-06) so integrate_func2 matches the printed Eq. A11 term 2. */
+    double f2 = pref_num1 / pref_den1 * F2 * (3.0 - a) * (1.0 + a) * (1.0 + a) / cv / cv / G / G
         * crho * crho / cm / (-a - 1.0) * pow(r, -1.0 - a);
     double f3 = pref_num2 / pref_den2 * F1 * (3.0 - a) * crho * crho * cm
         / (3.0 - 3.0 * a) * pow(r, 3.0 - 3.0 * a);
@@ -287,9 +293,11 @@ double cw_final_vms_mass_msun(double M_msun, double r_max_pc, double Z_massfrac,
     if(rmin >= r_df)                    /* no migration region -> no VMS */
         return 0.0;
 
-    /* Net inflow: (1-f_vms) (0.5 Mdot_df - Mdot_dep - Mdot_bin). */
-    double Mdot_df = CW_ACCR_RATIO *
-        (cw_mdot_df_anti(&cl, newts, r_df) - cw_mdot_df_anti(&cl, newts, rmin));
+    /* Net inflow: (1-f_vms) (Mdot_df - Mdot_dep - Mdot_bin).  The former
+     * mass_accretion_ratio=0.5 factor on Mdot_df was deleted upstream in
+     * CWmodel_oricode commit 0f2d04a (2026-08-06); Eq. 23 never had it. */
+    double Mdot_df =
+        cw_mdot_df_anti(&cl, newts, r_df) - cw_mdot_df_anti(&cl, newts, rmin);
     double Mdot_dep = cw_mdot_dep_anti(&cl, r_df) - cw_mdot_dep_anti(&cl, rmin);
     double Mdot_bin = cw_mdot_bin_anti(&cl, r_df) - cw_mdot_bin_anti(&cl, rmin);
     double Mdot_in = (1.0 - CW_FVMS) * (Mdot_df - Mdot_dep - Mdot_bin);   /* g/s */
