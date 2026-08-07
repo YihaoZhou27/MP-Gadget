@@ -1,5 +1,29 @@
 # MP-Gadget Development Log
 
+## 2026-08-06 — Chabrier IMF fix, CW model f_IMF, and removal of the CW metallicity floor
+
+Three related changes, all touching how the IMF and the metallicity enter the seed model.
+
+**1. `metal_return.c` Chabrier IMF: natural log -> log10.** The low-mass lognormal branch read `exp(-(log(m/0.079)/0.69)^2/2)`, but Chabrier (2003) defines the width sigma = 0.69 in log10. The pair of normalisations already in the function is the proof: at m = 1 Msun the two branches agree to 1.0000 under log10 and differ by a factor 242 under natural log. The old form made the lognormal 2.303x too narrow, collapsing the [0.3, 1] Msun mass fraction from 0.262 to 0.023.
+
+Every dying-star window lies above 1 Msun, where both versions share the same `m^-2.3` power law, so this is a **pure normalisation correction**: `compute_imf_norm` over [MINMASS, MAXMASS] = [0.1, 40] rises 0.624632 -> 0.936977 and **every mass and metal yield per unit stellar mass formed drops by exactly a factor 1.500**. No yield changes shape. The total returned mass fraction in the unit test moves 0.63 -> 0.42, which is where a Chabrier SSP should sit. SNIa are untouched (fixed `N0 = 1.3e-3` per Msun, not IMF-derived).
+
+`tests/test_metal_return.c` pinned the old buggy value (0.624632); updated to 0.936977. That the test's hard-coded number matched the buggy normalisation to six digits is itself confirmation of the diagnosis.
+
+This does **not** change the SN/wind feedback energy: `EgySpecSN`, `FactorSN`, `WindEnergyFraction` and the effective EOS are paramfile quantities and reference no IMF. It reaches feedback only indirectly, through metal-line cooling.
+
+**2. CW model now uses MP-Gadget's own IMF.** `CW_FIMF` 0.0649 -> **0.0969**: the mass fraction in [1, 1.5] Msun for the (now corrected) Chabrier normalised over [0.1, 40], replacing modelv2.py's Salpeter (alpha = 2.35, 0.1-100 Msun) value. The seed model and the metal return now assume the same IMF.
+
+Note f_IMF is **not** a rescaling of M_VMS: it multiplies `cw_mdot_df_anti` and `cw_mdot_dep_anti` but not `cw_mdot_bin_anti`, so `Mdot_in = (1-f_vms)[f_IMF (A_df - A_dep) - A_bin]` is affine in it. Clusters that only marginally beat binary heating gain far more than the naive `(0.0969/0.0649)^(1/2.1) = 1.21x`; the measured per-cluster median shift is 1.43x. The constant is tied to both `chabrier_imf` and `[MINMASS, MAXMASS]` — recompute it if either changes.
+
+**3. `CW_ZRATIO_FLOOR = 1e-4` removed.** The floor was never part of modelv2.py, which runs at a single fixed Z = 0.1 solar and so never meets a low metallicity; it existed only to stop `C -> 0` diverging once per-cluster simulation Z was fed in. It was load-bearing in the wrong way: 25.5% of seeds were being evaluated at the floor rather than at their own Z, while only 0.04% of actual star particles in the star FOF are below 1e-4 Zsun (min over `SecPIG_021` is Z/Zsun = 3.50e-6, and nothing anywhere in the run is below 1e-6 Zsun or pristine).
+
+Metallicity is now used as given. The one case still handled explicitly is Z <= 0: the wind vanishes, the equilibrium VMS mass is unbounded, and the model's own limit is that the VMS consumes the cluster — so `M_msun` is returned directly rather than letting an infinity propagate to the `cw_seed_mass_code` cap. Same answer, finite.
+
+Effect at fixed cluster (3e5 Msun, r_max = 0.7 pc): Z = 0.1 Zsun 2155 -> 2611 Msun (f_IMF only); at the run's actual minimum Z the seed goes 2.46e4 -> 9.71e4 Msun, since both the floor removal (x3.25) and f_IMF now apply.
+
+Verified: full `libgadget` test suite passes (`test_mpsort` needed a rebuild — its binary dated 2026-08-01 was linked against a `libgsl.so.25` that no longer exists on the system, unrelated to these changes). Built with `gsl/2.8` via explicit `GSL_INCL`/`GSL_LIBS`, since the tree's pkg-config lookup finds no gsl.
+
 ## 2026-08-03 — SecPIG: bound-star R50 / R90 / Rmax
 
 Three new SecPIG group blocks — `SecR50Bound`, `SecR90Bound`, `SecRmaxBound` — over the member stars the `BHseedSecFOFbound` pass flagged (`STARP.Bounded == 1`), about the same `SecPotMinPos` centre as `SecR50`/`R90`/`Rmax`, so bound/total is a ratio of like for like. Identically 0 when `BHseedSecFOFbound = 0` or a group has no bound star. Registered under `ComputeSize && SecFOFStarCluster`, so the catalogue schema does not depend on the bound switch.

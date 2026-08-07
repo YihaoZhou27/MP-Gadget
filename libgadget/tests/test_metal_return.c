@@ -26,7 +26,10 @@ void test_yields(void ** state)
     setup_metal_table_interp(&interp);
     /* Compute factor to normalise the total mass in the IMF to unity.*/
     double imf_norm = compute_imf_norm(gsl_work);
-    assert_true(fabs(imf_norm - 0.624632) <  0.01);
+    /* 0.936977 for the Chabrier (2003) lognormal with sigma = 0.69 in log10.
+     * The old expected value, 0.624632, was the normalisation of the natural-log
+     * form that chabrier_imf used before the log10 fix. */
+    assert_true(fabs(imf_norm - 0.936977) <  0.01);
 
     double agbyield = compute_agb_yield(interp.agb_mass_interp, agb_total_mass, 0.01, 1, 40, gsl_work);
     double agbyield2 = compute_agb_yield(interp.agb_mass_interp, agb_total_mass, 0.01, 1, SNAGBSWITCH, gsl_work);

@@ -14,8 +14,7 @@
  *
  * Model choices FROZEN at her modelv2.py defaults:
  *   e=0.5, cv=1, lnLambda=ln(0.1 N) (coulomb_log, Hamilton+18/B&T),
- *   Mstar=Mc=1 Msun, f_IMF=0.0649 (Salpeter mass_fraction[1,1.5] Msun),
- *   no mass_accretion_ratio on Mdot_df (deleted in 0f2d04a), f_vms=2e-2,
+ *   Mstar=Mc=1 Msun, no mass_accretion_ratio on Mdot_df (deleted in 0f2d04a), f_vms=2e-2,
  *   binary heating ON with fixed sigma=20 km/s and mubs=0.153619, mubb=0.17507,
  *   r_min = relaxation radius r_no_relax (t_relax=P_orb), r_df from
  *   stellar_df_radius with q=Mc/Mstar=1 (t_df=t_relax), disruption time
@@ -34,7 +33,11 @@
  *   - the mean-density cap (rho_mean >= CW_RHO_MEAN_CAP) short-circuits to
  *     CW_HIGHRHO_MBH_FRAC*M_cl (an MP-Gadget safety net, not in her code);
  *   - the metallicity is the per-cluster simulation Z (CWmodelMetallicity),
- *     not her hard-coded Z=0.1 solar.
+ *     not her hard-coded Z=0.1 solar, and is used with NO lower clamp (the
+ *     former CW_ZRATIO_FLOOR = 1e-4 has been removed); Z <= 0 returns M_cl,
+ *     the model's own zero-wind limit;
+ *   - f_IMF is MP-Gadget's Chabrier value (0.0969) rather than modelv2.py's
+ *     Salpeter 0.0649, so the seed model uses the same IMF as the metal return.
  *
  * All internal calculations are in CGS with the same physical constants as the
  * Python model.  Self-contained: only math.h, no simulation state. */
@@ -54,10 +57,29 @@
 #define CW_E            0.5            /* orbital eccentricity (Rose et al. 2020) */
 #define CW_CV           1.0            /* Eq. 12 sigma coefficient (get_veldisp_constant) */
 #define CW_LAM          0.1            /* Coulomb log: ln(lam*N) = coulomb_log(...) */
-/* IMF mass fraction f^IMF_{M*}: imf.mass_fraction(Mstar, Mstar+0.5 Msun) for the
- * default Salpeter IMF (alpha=2.35, 0.1-100 Msun), i.e. the mass fraction in
- * [1, 1.5] Msun = 0.0649.  (Her modelv2.py computes this per run; frozen here.) */
-#define CW_FIMF         0.0649
+/* IMF mass fraction f^IMF_{M*} = imf.mass_fraction(Mstar, Mstar+0.5 Msun), i.e. the
+ * fraction of the IMF's MASS in [1, 1.5] Msun.
+ *
+ * modelv2.py assumes a Salpeter IMF (alpha=2.35 over 0.1-100 Msun), giving 0.0649,
+ * and that is what this port used to carry.  MP-Gadget's own IMF is the Chabrier
+ * (2003) of libgadget/metal_return.c:chabrier_imf, normalised over
+ * [MINMASS, MAXMASS] = [0.1, 40] Msun (metal_tables.h), for which the same fraction
+ * is 0.0969 -- 1.494x the Salpeter value.  Using the simulation's own IMF here keeps
+ * the seed model consistent with the metal return and star formation it runs
+ * alongside.
+ *
+ * CAUTION: this number is tied to metal_return.c's chabrier_imf AND to
+ * [MINMASS, MAXMASS].  If either changes, recompute it as
+ *     int_1^1.5 m xi(m) dm / int_MINMASS^MAXMASS m xi(m) dm.
+ * (It is frozen rather than integrated at runtime to keep this file self-contained:
+ * only math.h, no simulation state.)
+ *
+ * NOTE f_IMF is NOT a simple rescaling of M_VMS.  It multiplies cw_mdot_df_anti and
+ * cw_mdot_dep_anti but NOT cw_mdot_bin_anti, so Mdot_in is affine in f_IMF:
+ *   Mdot_in = (1-f_vms) [ f_IMF (A_df - A_dep) - A_bin ].
+ * Clusters that only marginally beat the binary-heating term gain much more than the
+ * naive (0.0969/0.0649)^(1/2.1) = 1.21x. */
+#define CW_FIMF         0.0969
 /* (CW_ACCR_RATIO: the mass_accretion_ratio=0.5 factor that used to multiply
  * Mdot_df was removed with CWmodel_oricode commit 0f2d04a -- see the header.) */
 #define CW_FVMS         2.0e-2         /* constant VMS mass-loss fraction f_vms */
@@ -74,10 +96,10 @@
 #define CW_RHO_MEAN_CAP     6.0e7      /* Msun/pc^3 */
 #define CW_HIGHRHO_MBH_FRAC 0.01       /* seed mass fraction of M_cl above the cap */
 /* Metallicity for the Vink 2018 wind: Z/Zsun with Zsun=0.0134 (the code's
- * convention, cf. get_seed_metallicity_factor), floored so pristine (Z=0)
- * clusters keep a finite wind (C -> 0 would make M_VMS diverge). */
+ * convention, cf. get_seed_metallicity_factor).  Used as given -- the former
+ * CW_ZRATIO_FLOOR = 1e-4 lower clamp has been removed; see the Z <= 0 note in
+ * cw_final_vms_mass_msun. */
 #define CW_ZSUN         0.0134
-#define CW_ZRATIO_FLOOR 1.0e-4
 
 /* Derived cluster structure (Cluster with Mstar=Mc=1 Msun). */
 struct cw_cluster {
@@ -305,11 +327,20 @@ double cw_final_vms_mass_msun(double M_msun, double r_max_pc, double Z_massfrac,
         return 0.0;
 
     /* Equilibrium VMS mass (direct): (1-f_vms)Mdot_in = C M^2.1, C = 1e-9.13 Z^0.74,
-     * Z = Z/Zsun.  No fml_vms iteration (f_vms is the constant CW_FVMS above). */
+     * Z = Z/Zsun.  No fml_vms iteration (f_vms is the constant CW_FVMS above).
+     *
+     * The metallicity is used as given: there is no lower clamp.  (A Z/Zsun >= 1e-4
+     * floor used to sit here purely to stop C -> 0 diverging; it was not part of
+     * modelv2.py, which runs at a single fixed Z = 0.1 solar.)  The only case that
+     * still needs handling is Z <= 0 exactly: the wind vanishes, so the equilibrium
+     * VMS mass is unbounded and the model's own limit is that the VMS consumes the
+     * whole cluster.  Return that limit directly rather than letting an infinity
+     * propagate -- cw_seed_mass_code caps at M_msun anyway, so this is the same
+     * answer, just finite. */
     double Mdot_in_msun_yr = Mdot_in / CW_MSUN * CW_YR;
     double Z_over_Zsun = Z_massfrac / CW_ZSUN;
-    if(Z_over_Zsun < CW_ZRATIO_FLOOR)
-        Z_over_Zsun = CW_ZRATIO_FLOOR;
+    if(Z_over_Zsun <= 0.0)
+        return M_msun;
     double C = pow(10.0, -9.13) * pow(Z_over_Zsun, 0.74);
     return pow(Mdot_in_msun_yr / C, 1.0 / 2.1);
 }

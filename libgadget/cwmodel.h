@@ -12,16 +12,19 @@
  * 0f2d04a (2026-08-06), which POSTDATES the published Fig. 4 and yields ~+0.31
  * dex higher M_VMS than that figure.  Closed-form throughout: r_min = relaxation
  * radius (t_relax=P_orb), r_df from stellar_df_radius (q=Mc/Mstar=1), Mdot_in =
- * Mdot_df - Mdot_dep - Mdot_bin all *(1-f_vms), f_IMF=0.0649, binary
+ * Mdot_df - Mdot_dep - Mdot_bin all *(1-f_vms), binary
  * heating ON (fixed sigma=20 km/s), and M_VMS from the direct wind equilibrium
  * (no fml_vms iteration).  Simulation adaptations: t_merger omitted, the
- * mean-density cap returns 0.01*M_cl, and Z is the per-cluster simulation value.
+ * mean-density cap returns 0.01*M_cl, Z is the per-cluster simulation value with
+ * no lower clamp, and f_IMF is MP-Gadget's Chabrier 0.0969 (not Salpeter 0.0649).
  *
  * Inputs:
  *   M_msun         cluster mass [Msun]
  *   r_max_pc       cluster (virial) radius [pc]; = 1.4 * effective radius
  *   Z_massfrac     cluster metal mass fraction (absolute Z); converted to
- *                  Z/Zsun with Zsun=0.0134 and floored at Z/Zsun=1e-4
+ *                  Z/Zsun with Zsun=0.0134 and used as given (no lower clamp).
+ *                  Z <= 0 means no wind, so the equilibrium VMS mass is
+ *                  unbounded and M_msun (the whole cluster) is returned
  *   t_universe_sec age of the universe at the seeding redshift [s]
  *                  (simulation cosmology; enters t_d = min(t_ms,t_uni,t_cc))
  *   alpha          density power-law index rho ~ r^-alpha (CWmodelAlpha input,

@@ -142,11 +142,24 @@ static void
 metal_return_reduce(const int place, TreeWalkResultMetals * remote, const enum TreeWalkReduceMode mode, TreeWalk * tw);
 
 /* The Chabrier IMF used for computing SnII and AGB yields.
- * See 1305.2913 eq 3*/
+ * See 1305.2913 eq 3
+ *
+ * The lognormal width sigma = 0.69 of Chabrier (2003) is defined in log10, not in
+ * natural log.  This used to read log(mass/0.079), which made the low-mass branch
+ * ln(10) = 2.303x too narrow and left a factor ~242 discontinuity at 1 Msun.  The
+ * proof that log10 is intended is the pair of normalisations already here: at
+ * mass = 1 the two branches evaluate to 0.237912 and 0.237912 under log10, but
+ * differ by 242x under natural log.
+ *
+ * Fixing this raises the [0.1, 40] Msun normalisation (compute_imf_norm) from
+ * 0.624632 to 0.936977, i.e. every mass and metal yield per unit stellar mass
+ * formed drops by exactly a factor 1.500.  The dying-star windows all lie above
+ * 1 Msun, where the two versions share the same power law, so nothing else about
+ * the yields changes shape -- it is a pure normalisation correction. */
 static double chabrier_imf(double mass)
 {
     if(mass <= 1) {
-        return 0.852464 / mass * exp(- pow(log(mass / 0.079)/ 0.69, 2)/2);
+        return 0.852464 / mass * exp(- pow(log10(mass / 0.079)/ 0.69, 2)/2);
     }
     else {
         return 0.237912 * pow(mass, -2.3);
