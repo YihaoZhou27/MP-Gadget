@@ -51,7 +51,27 @@ struct BaseGroup {
  * group sums).  Bin 0 is underflow (Z <= 10^LOGMIN, including pristine Z=0),
  * bins 1..NBIN-2 are log-spaced across [LOGMIN,LOGMAX], bin NBIN-1 is overflow
  * (Z > 10^LOGMAX).  With 62 interior bins the resolution is ~0.13 dex, far
- * finer than the physical scatter. */
+ * finer than the physical scatter.
+ *
+ * DO NOT raise LOGMIN for the extra resolution.  It is a real trade-off, not just a
+ * plotting range, because CWmodelMetallicity 'starsample' draws per-cluster
+ * metallicities off this histogram and the underflow bin returns the group's EXACT
+ * zmin for every draw that lands in it -- there is no width to interpolate across.
+ * Raising LOGMIN buys resolution but pushes more stars into that bin, where they all
+ * collapse onto a single value that may sit far below the floor; since
+ * M_VMS ~ (Z/Zsun)^-0.352, an over-weighted metal-poor value inflates seed masses.
+ * Measured on paper_runs (41,701 unseeded stars; per-group |error| on <Z^-0.352> over
+ * the groups that actually seed):
+ *
+ *   LOGMIN   dlog     underflow   median |err|   max |err|
+ *    -7.0   0.129 dex    0.045%      0.0054        0.027     <-- current
+ *    -6.0   0.113 dex    0.690%      0.0052        0.436
+ *    -5.0   0.097 dex    4.885%      0.0898        3.344
+ *
+ * The median barely moves; the TAIL is what degrades, and the groups it degrades are
+ * the metal-poor ones that make the massive seeds.  -6.0 was tried and reverted on that
+ * basis.  Revisit only if the underflow bin is changed to interpolate between zmin and
+ * 10^LOGMIN instead of returning zmin flat, which would make the floor nearly free. */
 #define SC_MET_HIST_NBIN   64
 #define SC_MET_HIST_LOGMIN (-7.0)
 #define SC_MET_HIST_LOGMAX (1.0)

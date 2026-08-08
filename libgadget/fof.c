@@ -46,9 +46,10 @@
 
 /* CWmodelMetallicity modes: how the per-cluster metallicity fed to the CW
  * seed-mass model is chosen (see cw_sample_cluster_met). */
-#define CW_MET_AVE       0   /* host group's unseeded-star metal mass ratio (default) */
-#define CW_MET_LOGNORMAL 1   /* per-cluster Gaussian draw in log10(Z) (equal-weight mean/std) */
-#define CW_MET_UNIFORM   2   /* per-cluster uniform draw in log10(Z) on [min,max] */
+#define CW_MET_AVE        0   /* host group's unseeded-star metal mass ratio (default) */
+#define CW_MET_LOGNORMAL  1   /* per-cluster Gaussian draw in log10(Z) (equal-weight mean/std) */
+#define CW_MET_UNIFORM    2   /* per-cluster uniform draw in log10(Z) on [min,max] */
+#define CW_MET_STARSAMPLE 3   /* per-cluster draw from the group's EMPIRICAL unseeded-star MDF */
 
 struct FOFParams
 {
@@ -179,6 +180,8 @@ void set_fof_params(ParameterSet * ps)
             fof_params.CWmodelMetallicity = CW_MET_LOGNORMAL;
         else if(strcmp(cwmet, "uniform") == 0)
             fof_params.CWmodelMetallicity = CW_MET_UNIFORM;
+        else if(strcmp(cwmet, "starsample") == 0)
+            fof_params.CWmodelMetallicity = CW_MET_STARSAMPLE;
         else
             fof_params.CWmodelMetallicity = -1;
         fof_params.SeedSeedFOFMassiveBoundStar = param_get_int(ps, "SeedSeedFOFMassiveBoundStar");
@@ -214,7 +217,7 @@ void set_fof_params(ParameterSet * ps)
          * reason -- each cluster's host is drawn from all unseeded stars -- and is now
          * supported: fof_seed hands fof_secfof_random_seeds the transient per-particle
          * bound flag from fof_secfof_bound_restrict, which filters the host pool and
-         * with it the seed count (nsel = min(n_request, navail)).
+         * with it the seed count (the pass stops once the bound hosts are used up).
          *
          * Supporting the two above needs the flag carried further; until then, refuse
          * the combination rather than silently produce a restriction that does not hold. */
@@ -257,7 +260,8 @@ void set_fof_params(ParameterSet * ps)
            (fof_params.CWmodelAlpha <= 0 || fof_params.CWmodelAlpha >= 3))
             endrun(1, "CWmodelAlpha must be in (0, 3); got %g.\n", fof_params.CWmodelAlpha);
         if(fof_params.MbhMscRelationCWmodel && fof_params.CWmodelMetallicity < 0)
-            endrun(1, "CWmodelMetallicity must be 'ave', 'lognormal' or 'uniform'; got '%s'.\n", cwmet);
+            endrun(1, "CWmodelMetallicity must be 'ave', 'lognormal', 'uniform' or "
+                      "'starsample'; got '%s'.\n", cwmet);
         if(fof_params.MbhMscRelationCWmodel && fof_params.BHseedMassScaleMsc)
             message(0, "MbhMscRelationCWmodel=1: BHseedMassScaleMsc=1 is ignored; the seed mass is "
                        "M_VMS from the CW model, with SeedBlackHoleMass as the lower seed-mass limit.\n");
@@ -2619,9 +2623,10 @@ static int secfof_random_group_eligible(const struct Group * g)
  * per-particle bound flag produced by fof_secfof_bound_restrict.  Only the bound stars
  * contributed f(Z)*ClusterMass to the group's restricted budget, so only they may host
  * one of its seeds.  Filtering here is enough to cap the seed COUNT as well: the host
- * pool feeds `navail` in phase 3, and every group places nsel = min(n_request, navail)
- * seeds, so n_request's NStarUnseeded cap (which still counts unbound stars, see
- * fof_secfof_bound_restrict) can never place more seeds than there are bound hosts. */
+ * pool feeds `navail` in phase 3, and the placement loop stops as soon as it has spent
+ * `navail` hosts, so a group can never place more seeds than it has bound hosts -- no
+ * matter how many clusters its draw qualified (which still counts unbound stars, see
+ * fof_secfof_bound_restrict). */
 static int secfof_random_seedable_star(int64_t i, const char * bound_mask)
 {
     if(bound_mask && !bound_mask[i])
@@ -2633,7 +2638,10 @@ static int secfof_random_seedable_star(int64_t i, const char * bound_mask)
 /* One random-seed group, gathered to every rank. */
 struct rs_group {
     int64_t  GrNr;
-    int      n_request;     /* seeds to place = min(n_qualify, NStarUnseeded) */
+    int      n_request;     /* clusters to TEST this pass = n_qualify (every drawn cluster
+                             * at or above MinMscForBHseed).  Not the seed count: only the
+                             * ones whose M_VMS clears SeedBlackHoleMass consume a host
+                             * star, and the pass stops early if those run out. */
     int      n_qualify;     /* uncapped count of clusters >= MinMscForBHseed (for the shortage message) */
     /* MinBHSeedInSC compensating seeds owed to this group, floor(missed / SeedBlackHoleMass).
      * Not communicated: it is computed after the gather from the Allreduced missed mass,
@@ -2669,6 +2677,13 @@ struct rs_group {
      * per-cluster draw; the 'uniform' bounds come from metdist.min/max. */
     double   met_logmean;
     double   met_logstd;
+    /* The group's log10(BirthMetallicity) histogram over its UNSEEDED stars (a copy of
+     * Group.SCMetUnseededHist; nstar_unseeded is its total count), for the
+     * CWmodelMetallicity 'starsample' per-cluster draw.  Carried per group rather than
+     * re-derived because every rank must draw the same Z for the same cluster, and only
+     * the owner rank holds the Group.  Costs SC_MET_HIST_NBIN floats per eligible group,
+     * which is negligible: the groups number in the hundreds, not the millions. */
+    float    met_hist[SC_MET_HIST_NBIN];
 };
 static int cmp_rs_group_grnr(const void * a, const void * b)
 {
@@ -2711,16 +2726,35 @@ static double rs_star_key(uint64_t id, const RandTable * const rnd)
  *               unseeded stars (equal weight per star), Box-Muller, clipped to
  *               the group's [min,max] log10(Z);
  *   'uniform'   log10(Z) ~ Uniform[log10(Zmin), log10(Zmax)] of the group.
+ *   'starsample' Z of a uniformly-random unseeded star of the group: an
+ *               inverse-CDF draw off the group's own log10(Z) histogram, i.e. a
+ *               draw from the EMPIRICAL stellar MDF rather than from a fitted
+ *               shape.  Unlike 'lognormal' it carries the real metal-poor tail,
+ *               which is what sets the massive-seed end of the M_VMS
+ *               distribution.  Resolution is the histogram bin, 8/(NBIN-2) dex.
  * log10 bounds are floored at SC_MET_HIST_LOGMIN, matching the accumulated log
  * sums (covers pristine Z=0).  The draw mixes the host star ID (as rs_star_key)
- * with stream offsets +800/+801, clear of the mass sampler's and the reff
- * sampler's (+700/+701) streams, so every rank computes the same Z for the same
- * cluster. */
+ * with stream offsets +800/+801 ('starsample' uses +802), clear of the mass
+ * sampler's and the reff sampler's (+700/+701) streams, so every rank computes
+ * the same Z for the same cluster. */
 static double cw_sample_cluster_met(const struct rs_group * m, uint64_t star_id,
                                     const RandTable * const rnd)
 {
     if(fof_params.CWmodelMetallicity == CW_MET_AVE)
         return m->met_unseeded;
+    if(fof_params.CWmodelMetallicity == CW_MET_STARSAMPLE) {
+        /* Feeding a uniform deviate to the percentile function IS the inverse-CDF
+         * draw, so this samples one unseeded star at random (with replacement --
+         * the star supplies a metallicity here, not a particle, so reuse is both
+         * allowed and exactly what sampling the group's MDF means).  Drawn off the
+         * histogram, which spans ALL the group's unseeded stars, rather than off the
+         * gathered candidate list, which is pre-truncated to the top n_request by
+         * f(Z)*ClusterMass and so is a mass-biased subset. */
+        uint64_t hs = star_id * 6364136223846793005ULL + 1442695040888963407ULL;
+        double u = get_random_number(hs + 802, rnd);
+        return sc_met_hist_percentile(m->met_hist, m->nstar_unseeded,
+                                      m->metdist.min, m->metdist.max, u);
+    }
     double lzmin = (m->metdist.min > 0) ? log10(m->metdist.min) : SC_MET_HIST_LOGMIN;
     if(lzmin < SC_MET_HIST_LOGMIN) lzmin = SC_MET_HIST_LOGMIN;
     double lzmax = (m->metdist.max > 0) ? log10(m->metdist.max) : SC_MET_HIST_LOGMIN;
@@ -2979,11 +3013,23 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
 
     /* ---- Phase 1: per-owned-group draw -> (rs_group, descending mass list). ---- */
     int n_local = 0;
-    int64_t ub_mass = 0;    /* upper bound on local masses = sum of NStarUnseeded */
+    /* Exact local mass count = sum of n_qualify.  Every drawn cluster at or above
+     * MinMscForBHseed is kept and evaluated (the seeding pass is no longer truncated to
+     * the host-star supply), so NStarUnseeded is no longer an upper bound on it and the
+     * count has to come from the draw itself.  The count-only path of
+     * starcluster_combined_seed_masslist (out_masses = NULL, cap = 0) allocates nothing
+     * and walks the identical RNG sequence, so the second call below returns exactly the
+     * same n_qualify -- this pre-pass is the buffer size, not an estimate.  Cost is one
+     * extra ICMF draw per owned group; SCdraw is 0.19 s over a whole run against 1254 s
+     * in the FOF walk it sits next to. */
+    int64_t ub_mass = 0;
     for(i = 0; i < fof->Ngroups; i++)
         if(secfof_random_group_eligible(&fof->Group[i])) {
             n_local++;
-            ub_mass += fof->Group[i].NStarUnseeded;
+            ub_mass += starcluster_combined_seed_masslist(
+                    fof->Group[i].SCcomMcut, fof->Group[i].StarClusterMassUnseeded,
+                    (uint64_t) fof->Group[i].SeedStarID, rnd,
+                    fof_params.MinMscForBHseed, NULL, 0);
         }
 
     int * rc = (int *) mymalloc("RSrc", NTask * sizeof(int));
@@ -3006,11 +3052,15 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
     for(i = 0; i < fof->Ngroups; i++) {
         struct Group * g = &fof->Group[i];
         if(!secfof_random_group_eligible(g)) continue;
-        int cap_stars = g->NStarUnseeded;
+        /* Keep EVERY qualifying cluster: the host-star supply limits how many BHs can be
+         * made, not how many clusters may be tested.  The buffer holds exactly the sum of
+         * n_qualify (see ub_mass above), so the remaining capacity is by construction at
+         * least this group's n_qualify and the copy always fits. */
+        int cap_rest = (int) ((ub_mass - off > INT_MAX) ? INT_MAX : ub_mass - off);
         int n_qual = starcluster_combined_seed_masslist(
                 g->SCcomMcut, g->StarClusterMassUnseeded, (uint64_t) g->SeedStarID,
-                rnd, fof_params.MinMscForBHseed, &masses_local[off], cap_stars);
-        int n_req = (n_qual > cap_stars) ? cap_stars : n_qual;   /* = number of masses filled */
+                rnd, fof_params.MinMscForBHseed, &masses_local[off], cap_rest);
+        int n_req = n_qual;                     /* = number of masses filled */
         struct rs_group * m = &local_rsg[k++];
         m->GrNr = g->base.GrNr;
         m->n_request = n_req;
@@ -3018,7 +3068,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         m->n_comp = 0;          /* set after gather, from the Allreduced missed mass */
         m->comp_sc_share = 0;
         m->n_placed = 0;        /* counted during the placement phases, on every rank */
-        m->nstar_unseeded = cap_stars;
+        m->nstar_unseeded = g->NStarUnseeded;
         m->mass_offset = 0;     /* set after gather */
         m->SeedStarID = (uint64_t) g->SeedStarID;
         m->capped = g->SCcomMcut;
@@ -3044,6 +3094,10 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
             m->met_logmean = SC_MET_HIST_LOGMIN;
             m->met_logstd = 0;
         }
+        /* The log10(Z) histogram itself, for the 'starsample' per-cluster draw.  Its
+         * total count is nstar_unseeded, the same denominator sc_met_unseeded_stats
+         * uses, so the two describe the same star set under BHseedSecFOFbound too. */
+        memcpy(m->met_hist, g->SCMetUnseededHist, sizeof(m->met_hist));
         off += n_req;
     }
     int64_t nmass_local = off;
@@ -3119,8 +3173,12 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         elig[e].local_index = (int) i;
         e++;
     }
-    /* Pre-truncate locally to at most n_request per group (lowest random key first):
-     * the global top-n_request by key is a subset of the per-rank top-n_request. */
+    /* Pre-truncate locally to at most min(n_request, NStarUnseeded) per group (lowest
+     * random key first): the global top-limit by key is a subset of the per-rank
+     * top-limit.  Since n_request is now the CLUSTER count, which is unbounded by the
+     * star supply, the NStarUnseeded term is what keeps this gather at its old size --
+     * a group can never host more seeds than it has stars, so gathering more than that
+     * would buy nothing. */
     qsort(elig, e, sizeof(struct rs_cand), cmp_rs_cand);
     int n_keep = 0;
     {
@@ -3129,11 +3187,14 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
             int64_t gr = elig[c].GrNr;
             int gi = -1;
             { int lo = 0, hi = n_msg; while(lo < hi) { int mid = lo + (hi - lo) / 2; if(all_rsg[mid].GrNr == gr) { gi = mid; break; } else if(all_rsg[mid].GrNr < gr) lo = mid + 1; else hi = mid; } }
-            int limit = (gi >= 0) ? all_rsg[gi].n_request : 0;
+            int limit = 0;
+            if(gi >= 0)
+                limit = (all_rsg[gi].n_request < all_rsg[gi].nstar_unseeded) ?
+                        all_rsg[gi].n_request : all_rsg[gi].nstar_unseeded;
             /* MinMscForSCdetail / MinBHSeedInSC: a group whose draw produced no seeding
              * cluster still needs one candidate gathered, to serve as the reference star
-             * of its sub-threshold pass.  Seeding is unaffected: nsel = min(n_request=0,
-             * navail) is still 0 for those groups. */
+             * of its sub-threshold pass.  Seeding is unaffected: a group with
+             * n_request = 0 enters the placement loop with nothing to test. */
             if(need_refstar && gi >= 0 && limit < 1)
                 limit = 1;
             int taken = 0;
@@ -3177,20 +3238,42 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         int bstart = ac;
         while(ac < n_call && allc[ac].GrNr == m->GrNr) ac++;
         int navail = ac - bstart;
-        int nsel = (m->n_request < navail) ? m->n_request : navail;
+        /* EVERY qualifying cluster is evaluated -- the loop is bounded by the cluster
+         * count alone.  The host-star supply bounds one thing only: how many of them may
+         * go on to make a BH particle.  So `h` is a cursor that advances ONLY when a seed
+         * is actually placed (a cluster rejected by the M_VMS gate costs no star; under
+         * the old positional pairing it silently consumed one, and with ~99% of tested
+         * clusters failing that gate a star-limited group spent nearly its whole budget
+         * on rejections), and running out of stars stops the SEEDING, not the modelling:
+         * the M_VMS of every remaining cluster is still computed, recorded, and counted
+         * towards the MinBHSeedInSC missed mass. */
+        int nsel = m->n_request;
+        int h = 0;
+        int n_unhosted = 0;     /* cleared SeedBlackHoleMass but the group had no star left */
         /* The group's reference star: host of its most massive cluster, and the single
          * writer of everything that belongs to the group rather than to one cluster. */
         const int is_ref_owner = (navail > 0) && (allc[bstart].owner_task == ThisTask);
 
         int s;
         for(s = 0; s < nsel; s++) {
-            struct rs_cand * cc = &allc[bstart + s];
-            double m_sc = all_masses[m->mass_offset + s];   /* descending; arbitrary->random star */
-            /* Effective radius from the size-mass relation (0.5 dex scatter,
-             * reproducibly keyed on the host star ID): recorded in the
-             * StarClusterDetails seed record, and the cluster size input of the
-             * CW seed-mass model.  Deterministic, so every rank agrees. */
-            double reff_pc = starcluster_sample_reff_pc(m_sc, (uint64_t) cc->ID, rnd);
+            double m_sc = all_masses[m->mass_offset + s];   /* descending */
+            /* Per-cluster draws are keyed on the group's seed star mixed with the
+             * cluster's position in the group draw, NOT on a host star: the host is only
+             * chosen once M_VMS has cleared the gate, so keying on it would be circular.
+             * Same construction as the sub-threshold pass in sc_detail_record_cluster,
+             * whose clusters share one host for the same reason -- but XORed with a
+             * stream tag, because that pass keys on the reference star allc[bstart],
+             * which for SeedInSecFOFRandomStarParticle=0 IS the SeedStarID star.  Without
+             * the tag the two keyspaces coincide and seeding cluster s would draw the
+             * same radius and metallicity as sub-threshold cluster s, correlating two
+             * independent populations.  Deterministic, so every rank draws the same
+             * radius and metallicity for the same cluster. */
+            uint64_t ckey = (m->SeedStarID ^ 0xA5A5A5A5A5A5A5A5ULL)
+                          + 0x9E3779B97F4A7C15ULL * (uint64_t)(s + 1);
+            /* Effective radius from the size-mass relation (0.5 dex scatter): recorded in
+             * the StarClusterDetails seed record, and the cluster size input of the CW
+             * seed-mass model. */
+            double reff_pc = starcluster_sample_reff_pc(m_sc, ckey, rnd);
             /* MbhMscRelationCWmodel: seed mass = M_VMS of the Williams et al.
              * 2026 collision model for this cluster (mass, virial radius
              * r_max=1.4*Reff, host-group unseeded-star metal mass ratio, age of
@@ -3200,10 +3283,10 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
              * (handled inside cw_final_vms_mass_msun).  BHseedMassScaleMsc is
              * ignored in this mode; SeedBlackHoleMass instead acts as the LOWER
              * seed-mass limit: a cluster whose M_VMS < SeedBlackHoleMass (which
-             * covers M_VMS=0, no net inflow -> no VMS forms) seeds no BH, but
-             * is consumed like the seeded ones (its host star stays in the
-             * group's Seeded=1 marking below).  Computed identically on every
-             * rank. */
+             * covers M_VMS=0, no net inflow -> no VMS forms) seeds no BH and
+             * takes no host star.  The group's seedable stars are still spent by
+             * the Seeded=1 marking below, which is a per-GROUP decision.
+             * Computed identically on every rank. */
             MyFloat seed_mass_override = 0;
             /* Metallicity written to this cluster's StarClusterDetails record:
              * the Z actually fed to the CW model (= met_unseeded in 'ave' mode
@@ -3211,8 +3294,8 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
             double z_record = m->met_unseeded;
             if(fof_params.MbhMscRelationCWmodel) {
                 /* Per-cluster CW-model metallicity (CWmodelMetallicity mode);
-                 * keyed on the host star ID, so every rank agrees. */
-                double z_cw = cw_sample_cluster_met(m, cc->ID, rnd);
+                 * keyed on the cluster, so every rank agrees. */
+                double z_cw = cw_sample_cluster_met(m, ckey, rnd);
                 z_record = z_cw;
                 double mvms_code = cw_seed_mass_code(m_sc, reff_pc, z_cw, t_uni_sec, thresh_code);
                 if(mvms_code < seed_mass_floor_code) {
@@ -3226,12 +3309,14 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                         miss[n_msg + i] += m_sc;
                     }
                     /* StarClusterDetails: record the skipped cluster too.  No BH is
-                     * created (the candidate star stays a star and supplies the
-                     * record's ID/Pos), but Mbh_seed still carries the model M_VMS
-                     * that fell short of SeedBlackHoleMass -- Flag, not Mbh_seed,
-                     * is what says no BH exists. */
-                    if(cc->owner_task == ThisTask)
-                        scinfo_record_seed(cc->local_index, atime, m_sc, m->sc_mass_total,
+                     * created and no host star was taken, so -- like the sub-threshold
+                     * records below -- it carries the group's reference star
+                     * (allc[bstart]) as ID/Pos, written once by that star's owner.
+                     * Mbh_seed still carries the model M_VMS that fell short of
+                     * SeedBlackHoleMass; Flag, not Mbh_seed, is what says no BH exists. */
+                    if(is_ref_owner)
+                        scinfo_record_seed(allc[bstart].local_index, atime, m_sc,
+                                           m->sc_mass_total,
                                            m->stellar_mass_total, m->scmass_seeded,
                                            z_record, reff_pc,
                                            mvms_code, m->bh_ngb, m->GrNr, &m->metdist,
@@ -3240,6 +3325,14 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                 }
                 seed_mass_override = (MyFloat) mvms_code;
             }
+            /* The cluster cleared the gate, so NOW it wants a host star -- and only now
+             * does the cursor advance.  If the group has none left the seed is simply
+             * lost: no BH, no StarClusterDetails row (that would need a fifth Flag value,
+             * and this is reported at group level below instead), and no contribution to
+             * the compensating-seed missed mass, which could not be placed either. */
+            if(h >= navail) { n_unhosted++; continue; }
+            struct rs_cand * cc = &allc[bstart + h];
+            h++;
             if(cc->owner_task == ThisTask) {
                 MyFloat payload = bhdyn ? (MyFloat) m_sc : 0;   /* StarClusterMass (dynamics + evolution) */
                 blackhole_make_one(cc->local_index, atime, rnd, 1,
@@ -3278,12 +3371,16 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
             miss[i]         += ctx.missed_bh;
             miss[n_msg + i] += ctx.missed_sc;
         }
-        /* Shortage: more eligible clusters than unseeded stars available. */
-        if(m->n_qualify > nsel) {
+        /* Shortage: the group ran out of unseeded host stars while clusters that had
+         * already cleared SeedBlackHoleMass were still coming.  Every cluster was still
+         * modelled and recorded; what was lost is BH particles.  Only seeding clusters
+         * consume a star now, so this fires far more rarely than the old cluster-count
+         * cap -- it means the group genuinely placed a BH on every star it had. */
+        if(n_unhosted > 0) {
             n_short++;
             message(0, "secFOF per-cluster seeding group GrNr=%ld: %d eligible cluster(s) >= MinMscForBHseed "
-                       "but only %d unseeded f(Z)>0 host star(s); seeded %d, skipped %d.\n",
-                    (long) m->GrNr, m->n_qualify, navail, nsel, m->n_qualify - nsel);
+                       "but only %d unseeded f(Z)>0 host star(s); seeded %d, unhosted %d.\n",
+                    (long) m->GrNr, m->n_qualify, navail, h, n_unhosted);
         }
     }
 
