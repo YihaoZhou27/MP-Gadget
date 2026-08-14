@@ -435,6 +435,9 @@ fof_alloc_group(const struct BaseGroup * base, const int NgroupsExt);
 static void fof_assign_grnr(struct BaseGroup * base, const int NgroupsExt, MPI_Comm Comm);
 
 void fof_label_primary(struct fof_particle_list * HaloLabel, ForceTree * tree, MPI_Comm Comm);
+/* Chooses between the treewalk and the grid linker; see fof_set_grid_linking. */
+static void fof_label_primary_dispatch(struct fof_particle_list * HaloLabel,
+                                       ForceTree * tree, MPI_Comm Comm);
 
 typedef struct {
     TreeWalkQueryBase base;
@@ -489,7 +492,7 @@ fof_fof(DomainDecomp * ddecomp, const int StoreGrNr, MPI_Comm Comm)
     walltime_measure("/FOF/Build");
 
     /* Fill FOFP_List of primary */
-    fof_label_primary(HaloLabel, &dmtree, Comm);
+    fof_label_primary_dispatch(HaloLabel, &dmtree, Comm);
     walltime_measure("/FOF/Primary");
 
     /* Fill FOFP_List of secondary */
@@ -696,6 +699,706 @@ fof_primary_ngbiter(TreeWalkQueryFOF * I,
         TreeWalkResultFOF * O,
         TreeWalkNgbIterFOF * iter,
         LocalTreeWalk * lv);
+
+/* ===================================================================
+ * Grid-based primary linking.  See plan/secfof_grid_linking_plan.md.
+ *
+ * The treewalk linker costs O(N * n_ngb) because it enumerates every
+ * neighbour pair; for the second (star) FOF n_ngb reaches ~1.6e5 and the
+ * pass becomes 62% of the run.  A FOF group is only the connected
+ * components of the "within l" graph, so a spanning subgraph suffices.
+ *
+ * Bin particles into cubic cells of side a <= l/sqrt(3): the cell body
+ * diagonal a*sqrt(3) <= l, so every pair inside one cell is within l with
+ * NO distance test and the cell collapses to a single union-find node.
+ * Then only nearby cell pairs need probing, each stopping at its first hit,
+ * and pairs whose roots already agree are skipped outright.
+ *
+ * The primary set for the star FOF is small (~1e5-1e6), so it is gathered
+ * to every rank and the identical deterministic computation is run
+ * redundantly.  That removes the convergence loop and the domain-imbalance
+ * problem entirely.  It is a constant-factor mitigation, NOT strong
+ * scaling: see fof_grid_preflight() for the guards that keep it in the
+ * regime where that is acceptable.
+ * =================================================================== */
+
+/* 0 = existing treewalk, 1 = grid, 2 = run both and compare (validation).
+ * Transient, set only by secondfof.c around its fof_fof() calls -- the same
+ * pattern as FOFPrimaryUnseededStarsOnly.  Selection is by CALL CONTEXT, not
+ * by the type mask, because fof_fof() is shared with the halo FOF. */
+static int fof_grid_linking_mode = 0;
+
+/* Which linker actually ran last: 0 = treewalk, 1 = grid. Set by the dispatch
+ * so tests can assert that a fallback really happened rather than inferring it
+ * from the answer (a fallback and a correct grid run produce the same labels,
+ * so the labels alone cannot distinguish them). */
+static int fof_grid_path_taken = 0;
+
+void fof_set_grid_linking(int mode)
+{
+    fof_grid_linking_mode = mode;
+}
+
+int fof_get_grid_path_taken(void)
+{
+    return fof_grid_path_taken;
+}
+
+/* One replicated primary particle.  Task/Index identify the owner so the
+ * component labels can be written back, and ID is the FOF label source. */
+struct fof_grid_part
+{
+    double Pos[3];
+    MyIDType ID;
+    int Task;
+    int Index;
+};
+
+/* Sort by cell key, then ID.  The ID tie-break makes the ordering independent
+ * of the MPI_Allgatherv arrival order, so a given rank count always walks the
+ * cells in the same sequence.  (Connected components do not depend on the
+ * order, but a stable order keeps the counters reproducible.) */
+struct fof_grid_key { int64_t key; MyIDType id; int idx; };
+
+static int fof_grid_cmp_key(const void * a, const void * b)
+{
+    const struct fof_grid_key * x = (const struct fof_grid_key *) a;
+    const struct fof_grid_key * y = (const struct fof_grid_key *) b;
+    if(x->key != y->key) return (x->key > y->key) - (x->key < y->key);
+    return (x->id > y->id) - (x->id < y->id);
+}
+
+/* One neighbour-cell offset. `rank` is |d|^2, used to order the stencil
+ * nearest-first; see the traversal comment in fof_label_primary_grid. */
+struct fof_grid_sten { int d[3]; int64_t rank; };
+
+static int fof_grid_cmp_sten(const void * a, const void * b)
+{
+    const struct fof_grid_sten * x = (const struct fof_grid_sten *) a;
+    const struct fof_grid_sten * y = (const struct fof_grid_sten *) b;
+    if(x->rank != y->rank) return (x->rank > y->rank) - (x->rank < y->rank);
+    /* Lexicographic tie-break so the order is fully determined and every rank
+     * walks the stencil identically. */
+    int k;
+    for(k = 0; k < 3; k++)
+        if(x->d[k] != y->d[k]) return (x->d[k] > y->d[k]) - (x->d[k] < y->d[k]);
+    return 0;
+}
+
+/* Union-find over CELLS (not particles): ~12x fewer nodes than the particle
+ * union-find, and single threaded, so no locking at all. */
+static int64_t fof_grid_find(int64_t x, int64_t * par)
+{
+    int64_t r = x;
+    while(par[r] != r) r = par[r];
+    while(par[x] != r) { int64_t n = par[x]; par[x] = r; x = n; }
+    return r;
+}
+
+/* Largest cells-per-axis whose cube still fits a signed 64-bit cell key.
+ * 2097152^3 is exactly INT64_MAX+1, so the last usable value is one below. */
+#define FOF_GRID_MAX_NCELL ((int64_t) 2097151)
+
+/* Cell geometry, shared by the preflight and the linker so the two can never
+ * disagree about whether a configuration is griddable.  Returns 0 (leaving the
+ * outputs untouched) when it is not; the caller must then use the treewalk.
+ *
+ * The cell size is adjusted DOWNWARD: ncell = floor(BoxSize/target) would give
+ * a >= target and a diagonal that can EXCEED l, collapsing particles the
+ * treewalk leaves disconnected.  The margin below is because the build uses
+ * -ffast-math and a diagonal landing one ulp above l would silently merge a
+ * corner-to-corner pair.  Shrinking the cell is safe in both directions: the
+ * collapse guarantee only strengthens, and the stencil radius is derived from
+ * l/a so it grows to match. */
+static int fof_grid_geometry(double l, double BoxSize, int64_t * ncell_out, double * a_out)
+{
+    if(!isfinite(l) || l <= 0 || !isfinite(BoxSize) || BoxSize <= 0)
+        return 0;
+
+    const double diag_max = l * (1.0 - 1e-12);
+    const double target = diag_max / sqrt(3.0);
+    /* Test the double BEFORE narrowing: for a small enough l the quotient
+     * exceeds the int64 range entirely and that cast would be undefined. */
+    const double nc_d = ceil(BoxSize / target);
+    if(!isfinite(nc_d) || nc_d > (double) FOF_GRID_MAX_NCELL)
+        return 0;
+
+    int64_t ncell = (int64_t) nc_d;
+    if(ncell < 1) ncell = 1;
+    double a = BoxSize / ncell;
+    while(!(sqrt(3.0) * a < diag_max)) {
+        if(ncell >= FOF_GRID_MAX_NCELL)
+            return 0;
+        ncell++;
+        a = BoxSize / ncell;
+    }
+    *ncell_out = ncell;
+    *a_out = a;
+    return 1;
+}
+
+/* Count the local particles eligible as primary-linking anchors.  This must
+ * match fof_primary_haswork()/fof_primary_ngbiter() exactly. */
+static int64_t fof_grid_count_local(int64_t * n_exceptional)
+{
+    int64_t n = 0, nx = 0;
+    int i;
+    for(i = 0; i < PartManager->NumPart; i++) {
+        if(!fof_is_primary_link(i))
+            continue;
+        /* Garbage and swallowed are handled ASYMMETRICALLY by the treewalk:
+         * excluded as initiating targets (treewalk.c) but a swallowed Type==4
+         * particle survives in the tree and can still act as a passive
+         * neighbour.  Rather than encode that traversal-dependent rule in a
+         * symmetric graph, the preflight refuses the grid path whenever any
+         * such particle exists.  Counted here, gated in fof_grid_preflight. */
+        if(P[i].IsGarbage || P[i].Swallowed)
+            nx++;
+        n++;
+    }
+    *n_exceptional = nx;
+    return n;
+}
+
+/* Collective: decide whether every rank may take the grid path.  Returns the
+ * same answer on all ranks (all reductions are over Comm), because fof_fof()
+ * must not diverge. */
+static int fof_grid_preflight(MPI_Comm Comm)
+{
+    int NTask;
+    MPI_Comm_size(Comm, &NTask);
+
+    /* (0) Geometry.  Some linking lengths need more cells per axis than a
+     * 64-bit key can address -- e.g. the SecondFOFLinkingLength default of 0.01
+     * in a 12500 box needs 2165064.  Checked HERE rather than in the linker so
+     * an unsupported geometry collectively selects the treewalk instead of
+     * aborting the run.  l and BoxSize are identical on every rank, so this
+     * early return is uniform and cannot deadlock the reductions below. */
+    const double l_chk = fof_params.FOFHaloComovingLinkingLength;
+    int64_t ncell_chk = 0;
+    double a_chk = 0;
+    if(!fof_grid_geometry(l_chk, PartManager->BoxSize, &ncell_chk, &a_chk)) {
+        message(0, "FOF grid: linking length %g in box %g is not griddable "
+                   "(needs more than %ld cells per axis, or is non-positive); "
+                   "using the treewalk.\n",
+                   l_chk, PartManager->BoxSize, FOF_GRID_MAX_NCELL);
+        return 0;
+    }
+
+    int64_t n_exceptional_local = 0;
+    int64_t n_local = fof_grid_count_local(&n_exceptional_local);
+
+    int64_t in[2], tot[2] = {0, 0};
+    in[0] = n_local; in[1] = n_exceptional_local;
+    MPI_Allreduce(in, tot, 2, MPI_INT64, MPI_SUM, Comm);
+    const int64_t n_total = tot[0], n_exceptional = tot[1];
+
+    if(n_total <= 0) {
+        message(0, "FOF grid: no primary-linking particles; using the treewalk.\n");
+        return 0;
+    }
+    /* (1) Exceptional particles: preserve current behaviour exactly. */
+    if(n_exceptional > 0) {
+        message(0, "FOF grid: %ld primary particles are garbage/swallowed; falling back "
+                   "to the treewalk to preserve its asymmetric handling.\n", n_exceptional);
+        return 0;
+    }
+    /* (2) MPI_Allgatherv counts and displacements are int, and the ones used
+     * below are BYTE counts, so the ceiling is INT_MAX/sizeof(record).  An
+     * overflow is silent, so check rather than trust. */
+    const int64_t maxrec = (int64_t) INT_MAX / (int64_t) sizeof(struct fof_grid_part);
+    int64_t maxlocal = 0;
+    MPI_Allreduce(&n_local, &maxlocal, 1, MPI_INT64, MPI_MAX, Comm);
+    if(maxlocal > maxrec || n_total > maxrec) {
+        message(0, "FOF grid: %ld primary particles (max %ld on a rank) exceeds the int "
+                   "byte range of MPI_Allgatherv (max %ld); using the treewalk.\n",
+                   n_total, maxlocal, maxrec);
+        return 0;
+    }
+    /* (3) Memory budget.  The replicated arrays scale with the GLOBAL count and
+     * do not shrink by adding ranks, so this is the real limit on the approach.
+     *
+     * EVERY block the linker allocates must be counted, including the per-rank
+     * GridLoc compaction buffer and the allocator's per-block cost: mymalloc
+     * rounds each request up to ALIGNMENT and then adds another ALIGNMENT for
+     * the header (utils/memory.c), so a block costs up to 2*ALIGNMENT more than
+     * it asks for.  Missing a term here is not harmless -- the preflight would
+     * pass and the allocator would abort moments later, which is exactly the
+     * failure the fallback exists to prevent.
+     *
+     * Worst case is one occupied cell per particle, which is what ncell_est
+     * assumes; in practice ncells is ~10x smaller.
+     *
+     * Each rank tests its OWN peak against its OWN free space and the verdicts
+     * are ANDed.  n_local, NumPart and the free space all differ across ranks,
+     * so comparing one rank's need against another's headroom would be
+     * meaningless. */
+    const int64_t ncell_est = n_total;          /* <= one occupied cell per particle */
+    const int64_t alloc_block = 2 * 4096;       /* ALIGNMENT round-up + header, memory.c */
+    /* counts, displs, loc, all, gk, cstart, ccount, ckey, par, sten, cminid,
+     * cmintask are the 12 blocks live at peak.  cb/db during the Allgatherv are
+     * freed before the cell arrays, so they are not part of that peak -- counted
+     * anyway (14 blocks, 4*NTask ints) because being conservative here costs
+     * ~16 KB and being wrong costs an aborted run.  The stencil itself is a few
+     * hundred offsets; bounded generously below. */
+    int64_t nblocks = 14;
+    int64_t need = (int64_t) NTask * 4 * (int64_t) sizeof(int)          /* counts,displs,cb,db */
+                 + n_local   * (int64_t) sizeof(struct fof_grid_part)   /* GridLoc  */
+                 + n_total   * (int64_t) sizeof(struct fof_grid_part)   /* GridAll  */
+                 + n_total   * (int64_t) sizeof(struct fof_grid_key)    /* GridKey  */
+                 + ncell_est * (int64_t) (4 * sizeof(int64_t))          /* start,count,key,parent */
+                 + ncell_est * (int64_t) sizeof(MyIDType)               /* component MinID */
+                 + ncell_est * (int64_t) sizeof(int)                    /* component MinIDTask */
+                 + (int64_t) 4096 * (int64_t) sizeof(struct fof_grid_sten); /* stencil, generous */
+    if(fof_grid_linking_mode == 2) {
+        /* A/B holds a full copy of the treewalk's labels alive across the whole
+         * grid run (allocated by the dispatcher before it calls the linker). */
+        need += (int64_t) PartManager->NumPart * (int64_t) sizeof(struct fof_particle_list);
+        nblocks++;
+    }
+    need += nblocks * alloc_block;
+
+    const int64_t freeb = (int64_t) mymalloc_freebytes();
+    /* 25% margin on top: HaloLabel is live, the caller's allocations sit
+     * underneath us, and the tree may still be allocated in A/B mode. */
+    const int ok_local = (need <= freeb - freeb / 4);
+    int ok = 0;
+    MPI_Allreduce(&ok_local, &ok, 1, MPI_INT, MPI_MIN, Comm);
+    if(!ok) {
+        /* Report the binding rank's numbers, not this one's. */
+        int64_t need_max = 0, freeb_min = 0;
+        MPI_Allreduce(&need, &need_max, 1, MPI_INT64, MPI_MAX, Comm);
+        MPI_Allreduce((void *) &freeb, &freeb_min, 1, MPI_INT64, MPI_MIN, Comm);
+        message(0, "FOF grid: peak need up to %.2f GB/rank against %.2f GB free on the "
+                   "tightest rank (25%% margin); using the treewalk.\n",
+                   need_max / 1073741824.0, freeb_min / 1073741824.0);
+        return 0;
+    }
+    return 1;
+}
+
+/* Grid primary linking.  Same contract as fof_label_primary(): on return
+ * HaloLabel[i].MinID / .MinIDTask are set for EVERY local particle.
+ * Requires fof_grid_preflight() to have returned 1 on all ranks. */
+static void fof_label_primary_grid(struct fof_particle_list * HaloLabel, MPI_Comm Comm)
+{
+    int ThisTask, NTask, i;
+    MPI_Comm_rank(Comm, &ThisTask);
+    MPI_Comm_size(Comm, &NTask);
+
+    const double BoxSize = PartManager->BoxSize;
+    const double l = fof_params.FOFHaloComovingLinkingLength;
+    const double l2 = l * l;
+
+    /* Recorded so the summary below can report the peak the linker actually
+     * took, which is what the fof_grid_preflight budget has to bound. */
+    const int64_t used_on_entry = (int64_t) mymalloc_usedbytes();
+
+    message(0, "Start linking particles on a grid (presently allocated=%g MB)\n",
+            used_on_entry / (1024.0 * 1024.0));
+
+    /* Every particle starts as its own group, exactly as the treewalk path
+     * does.  Non-primary particles keep this singleton label; fof_label_secondary
+     * reassigns them afterwards and fof_compile_base drops the short groups. */
+    #pragma omp parallel for
+    for(i = 0; i < PartManager->NumPart; i++) {
+        HaloLabel[i].MinID = P[i].ID;
+        HaloLabel[i].MinIDTask = ThisTask;
+    }
+
+    /* ---- 1. compact the local primary set ---- */
+    int64_t nx_dummy = 0;
+    const int64_t n_local = fof_grid_count_local(&nx_dummy);
+
+    int * counts = (int *) mymalloc("GridCnt", sizeof(int) * NTask);
+    int * displs = (int *) mymalloc("GridDsp", sizeof(int) * NTask);
+    int n_local_int = (int) n_local;
+    MPI_Allgather(&n_local_int, 1, MPI_INT, counts, 1, MPI_INT, Comm);
+    int64_t n_total = 0;
+    for(i = 0; i < NTask; i++) {
+        displs[i] = (int) n_total;
+        n_total += counts[i];
+    }
+
+    struct fof_grid_part * loc = (struct fof_grid_part *)
+        mymalloc("GridLoc", sizeof(struct fof_grid_part) * (n_local > 0 ? n_local : 1));
+    {
+        int64_t k = 0;
+        for(i = 0; i < PartManager->NumPart; i++) {
+            if(!fof_is_primary_link(i))
+                continue;
+            int d;
+            for(d = 0; d < 3; d++)
+                loc[k].Pos[d] = fof_periodic_wrap(P[i].Pos[d], BoxSize);
+            loc[k].ID = P[i].ID;
+            loc[k].Task = ThisTask;
+            loc[k].Index = i;
+            k++;
+        }
+    }
+
+    /* ---- 2. replicate it ---- */
+    struct fof_grid_part * all = (struct fof_grid_part *)
+        mymalloc("GridAll", sizeof(struct fof_grid_part) * (n_total > 0 ? n_total : 1));
+    {
+        int * cb = (int *) mymalloc("GridCb", sizeof(int) * NTask);
+        int * db = (int *) mymalloc("GridDb", sizeof(int) * NTask);
+        for(i = 0; i < NTask; i++) {
+            cb[i] = counts[i] * (int) sizeof(struct fof_grid_part);
+            db[i] = displs[i] * (int) sizeof(struct fof_grid_part);
+        }
+        MPI_Allgatherv(loc, n_local_int * (int) sizeof(struct fof_grid_part), MPI_BYTE,
+                       all, cb, db, MPI_BYTE, Comm);
+        myfree(db);
+        myfree(cb);
+    }
+
+    /* ---- 3. cell geometry ----
+     * Computed by the same helper the preflight used, so the two cannot
+     * disagree.  The conceptual grid is ncell^3 cells, far beyond INT_MAX, so
+     * every key and cell index below is int64; only occupied cells are stored.
+     * A failure here means the preflight let through a geometry it should have
+     * rejected, i.e. a programming error rather than a user configuration. */
+    int64_t ncell = 0;
+    double a = 0;
+    if(!fof_grid_geometry(l, BoxSize, &ncell, &a))
+        endrun(1, "FOF grid: geometry rejected inside the linker for l=%g box=%g, but "
+                  "fof_grid_preflight accepted it. This is a bug, not a configuration "
+                  "problem.\n", l, BoxSize);
+
+    /* ---- 4. keys, sort, occupied cells ---- */
+    struct fof_grid_key * gk = (struct fof_grid_key *)
+        mymalloc("GridKey", sizeof(struct fof_grid_key) * (n_total > 0 ? n_total : 1));
+    {
+        int64_t p;
+        for(p = 0; p < n_total; p++) {
+            int64_t c[3];
+            int d;
+            for(d = 0; d < 3; d++) {
+                c[d] = (int64_t) floor(all[p].Pos[d] / a);
+                /* Defensive: a coordinate exactly at BoxSize, or FP round-up,
+                 * must not produce an out-of-range index. */
+                c[d] %= ncell;
+                if(c[d] < 0) c[d] += ncell;
+            }
+            gk[p].key = (c[0] * ncell + c[1]) * ncell + c[2];
+            gk[p].id = all[p].ID;
+            gk[p].idx = (int) p;
+        }
+    }
+    qsort(gk, n_total, sizeof(struct fof_grid_key), fof_grid_cmp_key);
+
+    int64_t ncells = 0;
+    {
+        int64_t p;
+        for(p = 0; p < n_total; p++)
+            if(p == 0 || gk[p].key != gk[p - 1].key) ncells++;
+    }
+
+    int64_t * cstart = (int64_t *) mymalloc("GridCs", sizeof(int64_t) * (ncells > 0 ? ncells : 1));
+    int64_t * ccount = (int64_t *) mymalloc("GridCc", sizeof(int64_t) * (ncells > 0 ? ncells : 1));
+    int64_t * ckey   = (int64_t *) mymalloc("GridCk", sizeof(int64_t) * (ncells > 0 ? ncells : 1));
+    {
+        int64_t p, c = -1;
+        for(p = 0; p < n_total; p++) {
+            if(p == 0 || gk[p].key != gk[p - 1].key) {
+                c++;
+                cstart[c] = p;
+                ccount[c] = 0;
+                ckey[c] = gk[p].key;
+            }
+            ccount[c]++;
+        }
+    }
+
+    /* ---- 5. link cells ----
+     * Step 1 of the algorithm (collapsing each cell) is implicit: a cell IS a
+     * union-find node, so all its members are already one component. */
+    int64_t * par = (int64_t *) mymalloc("GridPar", sizeof(int64_t) * (ncells > 0 ? ncells : 1));
+    {
+        int64_t c;
+        for(c = 0; c < ncells; c++) par[c] = c;
+    }
+
+    /* Neighbour stencil, generated from the ACTUAL cell size with an INCLUSIVE
+     * bound.  treewalk.c rejects only r2 > l^2, so r2 == l^2 IS a link and the
+     * comparison here must allow equality -- with a ~ l/sqrt(3) that is exactly
+     * what keeps the eight (+-2,+-2,+-2) corners in the stencil.  The range
+     * comes from l/a rather than being hard-coded to +-2.
+     *
+     * The canonical HALF stencil (d lexicographically > 0) normally visits each
+     * unordered cell pair exactly once, because for any pair {A,B} exactly one
+     * of the displacements A->B and B->A is lexicographically positive.
+     *
+     * That argument fails when periodic wrapping makes two in-range offsets
+     * congruent mod ncell -- a "half-period alias".  Two distinct offsets with
+     * |d_k| <= R can only be congruent if 2R >= ncell, and the clamp below
+     * forces R <= ncell/2, so aliasing is possible IFF 2R == ncell.  (Concrete
+     * case: ncell = 2, where +1 and -1 reach the same cell, so the same
+     * positive offset generates the pair from both ends.)  Above that threshold
+     * the half stencil is provably exactly-once; at it, fall back to the full
+     * stencil and take each pair only from the lower cell index, which is
+     * exactly-once no matter how the offsets alias.
+     *
+     * The distinction is cost-free in production: paper_runs has ncell = 8874
+     * against 2R = 6.  Aliasing only ever cost redundant probes, never a wrong
+     * answer -- union-find is idempotent -- but on a tiny grid an unsuccessful
+     * pair would be probed twice at full N_A * N_B.
+     *
+     * The stencil is sorted NEAREST-FIRST and traversed offset-major (see the
+     * loop below), which is not cosmetic -- see the comment there. */
+    int R = (int) ceil(l / a) + 1;
+    if((int64_t) R > ncell / 2) R = (int) (ncell / 2);
+    const int half_ok = (ncell > 2 * (int64_t) R);
+
+    const int64_t nsten_max = (int64_t) (2 * R + 1) * (2 * R + 1) * (2 * R + 1);
+    struct fof_grid_sten * sten = (struct fof_grid_sten *)
+        mymalloc("GridSten", sizeof(struct fof_grid_sten) * (nsten_max > 0 ? nsten_max : 1));
+    int64_t nsten = 0;
+    {
+        int dx, dy, dz, d;
+        for(dx = -R; dx <= R; dx++)
+        for(dy = -R; dy <= R; dy++)
+        for(dz = -R; dz <= R; dz++) {
+            if(dx == 0 && dy == 0 && dz == 0) continue;
+            if(half_ok) {
+                /* canonical half: keep only lexicographically positive offsets */
+                if(dx < 0) continue;
+                if(dx == 0 && dy < 0) continue;
+                if(dx == 0 && dy == 0 && dz < 0) continue;
+            }
+            /* Lower bound on the separation between two cells at this offset,
+             * using the PERIODIC index displacement so small boxes (where
+             * wrapping brings cells back together) are handled. */
+            const int dd[3] = {dx, dy, dz};
+            double gap2 = 0;
+            for(d = 0; d < 3; d++) {
+                int64_t ad = dd[d] < 0 ? -dd[d] : dd[d];
+                if(ad > ncell - ad) ad = ncell - ad;
+                const double g = a * (double) (ad > 1 ? ad - 1 : 0);
+                gap2 += g * g;
+            }
+            if(gap2 > l2) continue;
+            if(!half_ok) {
+                /* Two offsets congruent mod ncell reach the SAME neighbour from
+                 * the same cell, so keeping both probes that pair twice -- the
+                 * lower-index guard in the loop below cannot catch this, since
+                 * both copies come from the same cell and both pass it.  Reduce
+                 * each component to (-ncell/2, ncell/2] and drop repeats.  Only
+                 * reachable when 2R == ncell, and the stencil is at most
+                 * (2R+1)^3 entries, so the O(n^2) scan costs nothing. */
+                int cf[3], k, dup = 0;
+                int64_t q;
+                for(k = 0; k < 3; k++) {
+                    int64_t v = ((int64_t) dd[k] % ncell + ncell) % ncell;
+                    if(2 * v > ncell) v -= ncell;
+                    cf[k] = (int) v;
+                }
+                for(q = 0; q < nsten && !dup; q++) {
+                    int same = 1;
+                    for(k = 0; k < 3; k++) {
+                        int64_t w = ((int64_t) sten[q].d[k] % ncell + ncell) % ncell;
+                        if(2 * w > ncell) w -= ncell;
+                        if((int) w != cf[k]) { same = 0; break; }
+                    }
+                    if(same) dup = 1;
+                }
+                if(dup) continue;
+            }
+            sten[nsten].d[0] = dx;
+            sten[nsten].d[1] = dy;
+            sten[nsten].d[2] = dz;
+            sten[nsten].rank = (int64_t) dx * dx + (int64_t) dy * dy + (int64_t) dz * dz;
+            nsten++;
+        }
+        qsort(sten, nsten, sizeof(struct fof_grid_sten), fof_grid_cmp_sten);
+    }
+
+    int64_t n_probe = 0, n_skip = 0, n_link = 0, n_eval = 0;
+    {
+        int64_t s, c;
+        /* OFFSET-MAJOR traversal: every cell at the nearest offset, then every
+         * cell at the next, and so on.
+         *
+         * This ordering IS the algorithm's performance.  Visiting all the
+         * nearest-neighbour pairs first merges the dense component almost
+         * immediately, after which every remaining pair is an O(1)
+         * find(A)==find(B) skip.  The obvious cell-major nesting (all offsets
+         * of cell 0, then cell 1, ...) probes cell 0's far offsets before the
+         * component exists, so those probes run in full and mostly FAIL -- and
+         * a failed pair costs the whole N_A * N_B product.
+         *
+         * Measured on PART_022 (321,770 stars): offset-major 4.41e4 distance
+         * evaluations with 93.9% of pairs skipped, cell-major 1.82e8 with only
+         * 69.1% skipped.  A factor of 4131 for a loop interchange. */
+        for(s = 0; s < nsten; s++) {
+            const int dx = sten[s].d[0], dy = sten[s].d[1], dz = sten[s].d[2];
+            for(c = 0; c < ncells; c++) {
+                const int64_t cz = ckey[c] % ncell;
+                const int64_t cy = (ckey[c] / ncell) % ncell;
+                const int64_t cx = ckey[c] / ncell / ncell;
+                int d;
+                const int64_t nix = ((cx + dx) % ncell + ncell) % ncell;
+                const int64_t niy = ((cy + dy) % ncell + ncell) % ncell;
+                const int64_t niz = ((cz + dz) % ncell + ncell) % ncell;
+                const int64_t nkey = (nix * ncell + niy) * ncell + niz;
+                if(nkey == ckey[c]) continue;     /* wrapped onto itself */
+
+                /* locate the neighbour cell (ckey is sorted ascending) */
+                int64_t lo = 0, hi = ncells - 1, j = -1;
+                while(lo <= hi) {
+                    const int64_t mid = (lo + hi) / 2;
+                    if(ckey[mid] == nkey) { j = mid; break; }
+                    if(ckey[mid] < nkey) lo = mid + 1; else hi = mid - 1;
+                }
+                if(j < 0) continue;               /* unoccupied */
+                /* Full-stencil (aliasing) branch: take each unordered pair only
+                 * from the lower cell index.  Not needed when half_ok, where the
+                 * stencil itself is already exactly-once. */
+                if(!half_ok && c >= j) continue;
+
+                /* Already connected by some other path: no edge between these
+                 * two cells can change the components.  This is where the bulk
+                 * of the saving comes from once a component has grown. */
+                int64_t ra = fof_grid_find(c, par), rb = fof_grid_find(j, par);
+                if(ra == rb) { n_skip++; continue; }
+
+                n_probe++;
+                int linked = 0;
+                int64_t ia, ib;
+                for(ia = cstart[c]; ia < cstart[c] + ccount[c] && !linked; ia++) {
+                    const double * pa = all[gk[ia].idx].Pos;
+                    for(ib = cstart[j]; ib < cstart[j] + ccount[j]; ib++) {
+                        const double * pb = all[gk[ib].idx].Pos;
+                        double r2 = 0;
+                        for(d = 0; d < 3; d++) {
+                            const double dxx = NEAREST(pa[d] - pb[d], BoxSize);
+                            r2 += dxx * dxx;
+                        }
+                        n_eval++;
+                        /* Inclusive, matching the treewalk's "reject r2 > h2". */
+                        if(r2 <= l2) { linked = 1; break; }
+                    }
+                }
+                if(linked) {
+                    ra = fof_grid_find(c, par);
+                    rb = fof_grid_find(j, par);
+                    if(ra != rb) {
+                        if(ra < rb) par[rb] = ra; else par[ra] = rb;
+                        n_link++;
+                    }
+                }
+            }
+        }
+    }
+
+    /* ---- 6. component labels ----
+     * MinID is computed EXPLICITLY as the minimum member ID, and MinIDTask as
+     * the owner of that particle.  Neither is taken from the union root or the
+     * input order: MPI_Allgatherv ordering changes with the rank count and the
+     * domain decomposition. */
+    MyIDType * cminid = (MyIDType *) mymalloc("GridMin", sizeof(MyIDType) * (ncells > 0 ? ncells : 1));
+    int * cmintask = (int *) mymalloc("GridMinT", sizeof(int) * (ncells > 0 ? ncells : 1));
+    {
+        int64_t c, p;
+        for(c = 0; c < ncells; c++) { cminid[c] = 0; cmintask[c] = -1; }
+        for(c = 0; c < ncells; c++) {
+            const int64_t r = fof_grid_find(c, par);
+            for(p = cstart[c]; p < cstart[c] + ccount[c]; p++) {
+                const struct fof_grid_part * q = &all[gk[p].idx];
+                if(cmintask[r] < 0 || q->ID < cminid[r]) {
+                    cminid[r] = q->ID;
+                    cmintask[r] = q->Task;
+                }
+            }
+        }
+        /* ---- 7. write back, local particles only ---- */
+        for(c = 0; c < ncells; c++) {
+            const int64_t r = fof_grid_find(c, par);
+            for(p = cstart[c]; p < cstart[c] + ccount[c]; p++) {
+                const struct fof_grid_part * q = &all[gk[p].idx];
+                if(q->Task != ThisTask) continue;
+                HaloLabel[q->Index].MinID = cminid[r];
+                HaloLabel[q->Index].MinIDTask = cmintask[r];
+            }
+        }
+    }
+
+    int64_t ncomp = 0;
+    {
+        int64_t c;
+        for(c = 0; c < ncells; c++) if(fof_grid_find(c, par) == c) ncomp++;
+    }
+    /* Peak here, with every block still live -- compare against the
+     * fof_grid_preflight budget, which must always exceed it. */
+    const int64_t used_peak = (int64_t) mymalloc_usedbytes() - used_on_entry;
+    message(0, "Grid link: %ld parts, %ld cells (a=%g l=%g R=%d), %ld comps; "
+               "probes %ld (skipped %ld, linked %ld), %ld distance evals; "
+               "peak %.1f MB/rank.\n",
+               n_total, ncells, a, l, R, ncomp, n_probe, n_skip, n_link, n_eval,
+               used_peak / 1048576.0);
+
+    /* LIFO: free in exact reverse order of allocation.  Allocation order is
+     * counts, displs, loc, all, gk, cstart, ccount, ckey, par, sten, cminid,
+     * cmintask -- note sten sits between par and cminid, so it must be freed
+     * before par, not after. */
+    myfree(cmintask);
+    myfree(cminid);
+    myfree(sten);
+    myfree(par);
+    myfree(ckey);
+    myfree(ccount);
+    myfree(cstart);
+    myfree(gk);
+    myfree(all);
+    myfree(loc);
+    myfree(displs);
+    myfree(counts);
+
+    message(0, "Local groups found.\n");
+}
+
+/* Dispatch used by fof_fof().  Collective: every rank takes the same branch. */
+static void fof_label_primary_dispatch(struct fof_particle_list * HaloLabel,
+                                       ForceTree * tree, MPI_Comm Comm)
+{
+    if(fof_grid_linking_mode == 0 || !fof_grid_preflight(Comm)) {
+        fof_grid_path_taken = 0;
+        fof_label_primary(HaloLabel, tree, Comm);
+        return;
+    }
+    fof_grid_path_taken = 1;
+    if(fof_grid_linking_mode == 1) {
+        fof_label_primary_grid(HaloLabel, Comm);
+        return;
+    }
+    /* Mode 2: run both and require identical labels.  Debug/validation only --
+     * it pays the full cost of the slow path on purpose. */
+    fof_label_primary(HaloLabel, tree, Comm);
+    struct fof_particle_list * ref = (struct fof_particle_list *)
+        mymalloc("GridAB", sizeof(struct fof_particle_list) * PartManager->NumPart);
+    memcpy(ref, HaloLabel, sizeof(struct fof_particle_list) * PartManager->NumPart);
+
+    fof_label_primary_grid(HaloLabel, Comm);
+
+    int64_t bad = 0, badtask = 0;
+    int i;
+    for(i = 0; i < PartManager->NumPart; i++) {
+        if(ref[i].MinID != HaloLabel[i].MinID) bad++;
+        else if(ref[i].MinIDTask != HaloLabel[i].MinIDTask) badtask++;
+    }
+    int64_t bad_tot = 0, badtask_tot = 0;
+    MPI_Allreduce(&bad, &bad_tot, 1, MPI_INT64, MPI_SUM, Comm);
+    MPI_Allreduce(&badtask, &badtask_tot, 1, MPI_INT64, MPI_SUM, Comm);
+    myfree(ref);
+
+    if(bad_tot > 0 || badtask_tot > 0)
+        endrun(1, "FOF grid A/B mismatch: %ld particles differ in MinID and %ld more in "
+                  "MinIDTask. The grid linker is NOT reproducing the treewalk.\n",
+                  bad_tot, badtask_tot);
+    message(0, "FOF grid A/B: labels identical on all %ld local particles.\n",
+               (int64_t) PartManager->NumPart);
+}
 
 void fof_label_primary(struct fof_particle_list * HaloLabel, ForceTree * tree, MPI_Comm Comm)
 {

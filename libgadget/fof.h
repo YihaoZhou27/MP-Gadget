@@ -23,6 +23,17 @@ void fof_set_params(int PrimaryLinkTypes, int SecondaryLinkTypes,
 /* Restrict the primary-linking set to unseeded star particles (drop seeded
  * stars). Set transiently by the second FOF when SecFOFUnseededPart=1. */
 void fof_set_primary_unseeded_only(int flag);
+/* Primary-linking algorithm: 0 = treewalk, 1 = grid, 2 = run both and endrun on
+ * any label mismatch. Set transiently by the second FOF around its fof_fof()
+ * calls, so the halo FOF always keeps the treewalk. A collective preflight can
+ * still force the treewalk; see fof_grid_preflight in fof.c.
+ * SecondFOFGridLinking defaults to 0: the grid path is not yet validated in a
+ * production run (see plan/secfof_grid_linking_plan.md Section 13). */
+void fof_set_grid_linking(int mode);
+/* Which primary linker actually ran on the last fof_fof(): 0 = treewalk,
+ * 1 = grid. For tests: a preflight fallback and a correct grid run produce the
+ * same labels, so the labels alone cannot tell them apart. */
+int fof_get_grid_path_taken(void);
 void fof_get_seed_params(int *BlackHoleSeedStarCluster, int *BlackHoleSeedHaloBased,
                          int *BlackHoleSeedGasBased);
 void fof_set_seed_params(int BlackHoleSeedStarCluster, int BlackHoleSeedHaloBased,

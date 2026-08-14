@@ -35,6 +35,7 @@ struct SecondFOFParams {
     int MinLength;
     int MinPrimaryLength;   /* drop groups with fewer primary-link particles from the catalog (0 = off) */
     int ComputeSize;        /* compute R50, R90, Rmax */
+    int GridLinking;        /* primary linker: 0 = treewalk, 1 = grid, 2 = A/B compare */
     int SecFOFonly;          /* skip primary FOF catalog, only save SecPIG */
     int SeedInSecFOFasStarCluster; /* use StarCluster BH-seeding in sec FOF catalog */
     int SeedSecFOFcomSample; /* combined per-secFOF star-cluster sampling for BH seeding */
@@ -59,6 +60,10 @@ void set_secondfof_params(ParameterSet * ps)
         sfof_params.MinLength = param_get_int(ps, "SecondFOFMinLength");
         sfof_params.MinPrimaryLength = param_get_int(ps, "SecondFOFMinPrimaryLength");
         sfof_params.ComputeSize = param_get_int(ps, "SecondFOFSize");
+        sfof_params.GridLinking = param_get_int(ps, "SecondFOFGridLinking");
+        if(sfof_params.GridLinking < 0 || sfof_params.GridLinking > 2)
+            endrun(1, "SecondFOFGridLinking must be 0 (treewalk), 1 (grid) or 2 (A/B compare), got %d.\n",
+                      sfof_params.GridLinking);
         sfof_params.SecFOFonly = param_get_int(ps, "SecFOFonly");
         sfof_params.SeedInSecFOFasStarCluster = param_get_int(ps, "SeedInSecFOFasStarCluster");
         sfof_params.SecFOFStarCluster = param_get_int(ps, "SecFOFStarCluster");
@@ -950,7 +955,12 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
     for(i = 0; i < PartManager->NumPart; i++)
         P[i].SecGrNr = P[i].GrNr;
 
+    /* Select the grid primary linker for this call only, so the halo FOF is
+     * never redirected. fof_fof runs a collective preflight and silently keeps
+     * the treewalk if the grid path is not safe here. */
+    fof_set_grid_linking(sfof_params.GridLinking);
     FOFGroups secfof = fof_fof(ddecomp, 1, Comm);
+    fof_set_grid_linking(0);
 
     /* fof_seed returns, per locally-seeded group, the GrNr and (for
      * SeedSecFOFcomSampleParticle) the per-group tot_msc_fof = BHSeedMsc and
@@ -1129,10 +1139,13 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential,
     /* When enabled, restrict the primary-linking set to unseeded stars for the
      * duration of this fof_fof() call only (reset immediately afterwards). */
     fof_set_primary_unseeded_only(sfof_params.SecFOFUnseededPart);
+    /* Likewise select the grid primary linker for this call only. */
+    fof_set_grid_linking(sfof_params.GridLinking);
 
     /* Step 4: Run the FOF algorithm */
     FOFGroups fof = fof_fof(ddecomp, 1, Comm);
 
+    fof_set_grid_linking(0);
     fof_set_primary_unseeded_only(0);
 
     /* Step 5: Copy GrNr -> SecGrNr */
