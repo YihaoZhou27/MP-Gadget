@@ -115,12 +115,6 @@ void starcluster_seed_masslist_detail(double Mcut, double sum_mGamma,
                                       double mass_lo, double mass_hi,
                                       sc_detail_cb cb, void * cbdata);
 
-/* Metallicity-dependent BH-seeding factor f(Z) in [0,1], applied to the per-star
- * cluster mass (Gamma*m_star) used for star-cluster BH seeding. Z is the absolute
- * star metallicity (BirthMetallicity). Returns 1 when the feature is disabled
- * (StarClusterSeedMetallicityMax <= Min). See definition in sfr_eff.c. */
-double get_seed_metallicity_factor(double Z);
-
 /* Whether SCmasscapSecFOFstarmass is enabled (cap SC mass at the group's unseeded
  * stellar mass). Used by the per-particle seeder to cap the group-summed mass. */
 int get_scmasscap_secfof_starmass(void);

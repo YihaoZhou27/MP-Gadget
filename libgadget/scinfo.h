@@ -63,16 +63,14 @@ struct __attribute__((__packed__)) SCseedinfo {
      *   Sum m_star               StellarMassTotal    StellarMassUnseeded  BoundStarMass  BoundStarMassUnseeded
      *   Sum Gamma*m_star     StarClusterMassTotal    SCMass_unseeded      BoundSCMass    BoundSCMassUnseeded
      *
-     * None of these carry the metallicity seeding factor f(Z), so any ratio between
-     * them is meaningful.  SCMass_seeded + SCMass_unseeded == StarClusterMassTotal. */
+     * All are plain mass sums, so any ratio between them is meaningful.
+     * SCMass_seeded + SCMass_unseeded == StarClusterMassTotal. */
     double   StellarMassUnseeded;  /* Sum m_star over UNSEEDED stars (unrestricted). */
     double   SCMass_unseeded;      /* Sum Gamma*m_star over UNSEEDED stars (unrestricted). */
-    /* The number actually handed to the cluster sampler for this group: the
-     * f(Z)-WEIGHTED sum over the unseeded stars, restricted to the bound ones when
-     * BHseedSecFOFbound > 0.  This is the single field that says what drove the seed.
-     * It equals BoundSCMassUnseeded (bound modes) or SCMass_unseeded (feature off)
-     * whenever f(Z) == 1 for every contributing star, i.e. when
-     * StarClusterSeedMetallicityMax <= Min; otherwise it is strictly smaller. */
+    /* The number actually handed to the cluster sampler for this group: the sum over
+     * the unseeded stars, restricted to the bound ones when BHseedSecFOFbound > 0.
+     * This is the single field that says what drove the seed; it equals
+     * BoundSCMassUnseeded (bound modes) or SCMass_unseeded (feature off). */
     double   SCMassSeedBudget;
     double   Metallicity;          /* Unseeded-star metal mass ratio: Sum(BirthMet*initClusterMass)/Sum(initClusterMass). */
     double   Reff;                 /* Effective radius [pc] (per-cluster SecFOFseedsumover=0 seeding only; 0 otherwise). */
@@ -101,11 +99,9 @@ struct __attribute__((__packed__)) SCseedinfo {
      *     BoundStarMass          / StellarMassTotal          (stellar mass)
      *     BoundSCMass            / StarClusterMassTotal      (cluster mass, all stars)
      *     BoundSCMassUnseeded    / StarClusterMassTotal      (cluster mass, unseeded)
-     * BoundSCMass* deliberately carry NO f(Z) factor, matching StarClusterMassTotal, so
-     * every one of those is a ratio of like for like.  The f(Z)-weighted sum that
-     * actually set this seed's budget is recorded separately as SCMassSeedBudget; it
-     * equals BoundSCMassUnseeded whenever f(Z) == 1 everywhere
-     * (StarClusterSeedMetallicityMax <= Min).
+     * BoundSCMass* use the same definition as StarClusterMassTotal, so every one of
+     * those is a ratio of like for like.  The sum that actually set this seed's budget
+     * is recorded separately as SCMassSeedBudget; it equals BoundSCMassUnseeded.
      * All are 0 when BHseedSecFOFbound = 0 (no bound selection was made). */
     double   BoundStarMass;        /* Sum m_star over BOUND member stars (seeded + unseeded). */
     double   BoundStarMassUnseeded;/* Sum m_star over BOUND UNSEEDED stars. */
@@ -124,8 +120,8 @@ struct __attribute__((__packed__)) SCseedinfo {
 struct SCboundinfo {
     double mass;          /* Sum m_star over BOUND member stars */
     double mass_unseeded; /* Sum m_star over BOUND UNSEEDED stars */
-    double scmass;          /* Sum Gamma*m_star over BOUND stars (no f(Z)) */
-    double scmass_unseeded; /* Sum Gamma*m_star over BOUND UNSEEDED stars (no f(Z)) */
+    double scmass;          /* Sum Gamma*m_star over BOUND stars */
+    double scmass_unseeded; /* Sum Gamma*m_star over BOUND UNSEEDED stars */
     double rdm;           /* DM sphere radius [comoving] */
     double mdm;           /* DM mass inside rdm */
     int    num;           /* count of BOUND member stars */
@@ -137,8 +133,8 @@ struct SCboundinfo {
  * records all-zero. */
 struct SCgroupmass {
     double stellar_unseeded; /* Sum m_star over UNSEEDED stars */
-    double sc_unseeded;      /* Sum Gamma*m_star over UNSEEDED stars (no f(Z)) */
-    double sc_budget;        /* the f(Z)-weighted, bound-restricted sum given to the sampler */
+    double sc_unseeded;      /* Sum Gamma*m_star over UNSEEDED stars */
+    double sc_budget;        /* the bound-restricted sum given to the sampler */
 };
 
 /* Distribution stats of one host group's unseeded-star metallicity, passed to

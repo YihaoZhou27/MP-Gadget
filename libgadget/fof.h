@@ -127,7 +127,12 @@ struct Group
      * in secondary FOF (where groups have no gas). */
     int seed_index_star;
     int seed_task_star;
-    MyFloat MaxStarClusterMass; /*!< Largest ClusterMass (or StarClusterMass_sample) among type-4 particles */
+    /* Largest host-star RANKING KEY among the group's unseeded type-4 particles:
+     * ClusterMass (or StarClusterMass_sample when StarClusterSampling=1), times the
+     * optional Z^-beta weight when SecFOFseedHostZBeta > 0.  A ranking key, not a
+     * mass -- never sum it into a budget.  double (not MyFloat) so the argmax here
+     * and the double-precision one of the BHseedSecFOFbound pass order identically. */
+    double MaxStarClusterMass;
 
     /***********************/
     MyFloat StarClusterMass; /*!< TOTAL ClusterMass over ALL hosted stars (seeded + unseeded). Catalogue output (SCMass). */
@@ -189,14 +194,13 @@ struct Group
      * owning rank only, from the globally gathered member list. */
     MyFloat SCBoundStarMass;         /*!< Sum of m_star over BOUND member stars (seeded + unseeded). */
     MyFloat SCBoundStarMassUnseeded; /*!< Sum of m_star over BOUND UNSEEDED stars (the new SCcomMcut). */
-    /* Cluster mass of the bound subset, NOT f(Z)-weighted and NOT the seeding budget.
-     * They use the same definition as StarClusterMass / SCMass_seeded above -- plain
-     * Sum(ClusterMass) = Sum(Gamma*m_star) -- so the bound fractions are ratios of like
-     * for like: SCBoundClusterMass/StarClusterMass over all stars, and
+    /* Cluster mass of the bound subset.  They use the same definition as
+     * StarClusterMass / SCMass_seeded above -- plain Sum(ClusterMass) = Sum(Gamma*m_star)
+     * -- so the bound fractions are ratios of like for like:
+     * SCBoundClusterMass/StarClusterMass over all stars, and
      * SCBoundClusterMassUnseeded/(StarClusterMass - SCMass_seeded) over the unseeded
-     * ones.  The seeding budget is the f(Z)-weighted unseeded sum, which the apply pass
-     * writes into StarClusterMassUnseeded; the two differ whenever f(Z) < 1 somewhere
-     * (i.e. StarClusterSeedMetallicityMax > Min). */
+     * ones.  The seeding budget is the unseeded sum, which the apply pass writes into
+     * StarClusterMassUnseeded. */
     MyFloat SCBoundClusterMass;         /*!< Sum of ClusterMass over BOUND stars (seeded + unseeded). */
     MyFloat SCBoundClusterMassUnseeded; /*!< Sum of ClusterMass over BOUND UNSEEDED stars. */
     int     NStarBound;              /*!< Count of BOUND member stars (seeded + unseeded). */

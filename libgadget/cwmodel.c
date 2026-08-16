@@ -96,7 +96,7 @@
 #define CW_RHO_MEAN_CAP     6.0e7      /* Msun/pc^3 */
 #define CW_HIGHRHO_MBH_FRAC 0.01       /* seed mass fraction of M_cl above the cap */
 /* Metallicity for the Vink 2018 wind: Z/Zsun with Zsun=0.0134 (the code's
- * convention, cf. get_seed_metallicity_factor).  Used as given -- the former
+ * convention).  Used as given -- the former
  * CW_ZRATIO_FLOOR = 1e-4 lower clamp has been removed; see the Z <= 0 note in
  * cw_final_vms_mass_msun. */
 #define CW_ZSUN         0.0134

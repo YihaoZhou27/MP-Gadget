@@ -820,12 +820,10 @@ secondfof_register_io_blocks(int MetalReturnOn, int ComputeSize, int SecFOFStarC
          * These are diagnostics only -- SecSCMass, SecMassByType and SecLengthByType
          * above still describe ALL member stars in every mode.
          * SecBoundSCMass / SecBoundSCMass_unseeded use the SAME definition as SecSCMass
-         * (plain Sum(Gamma*m_star), no f(Z) factor), so the bound fractions are
+         * (plain Sum(Gamma*m_star)), so the bound fractions are
          *     SecBoundSCMass          / SecSCMass                        (all stars)
          *     SecBoundSCMass_unseeded / (SecSCMass - SecSCMass_seeded)   (unseeded)
-         * The f(Z)-weighted unseeded sum that actually drives seeding is NOT output
-         * here; it equals SecBoundSCMass_unseeded whenever f(Z) == 1 everywhere, i.e.
-         * when StarClusterSeedMetallicityMax <= Min. */
+         * SecBoundSCMass_unseeded is the unseeded sum that actually drives seeding. */
         IO_REG(SecBoundStarMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);
         IO_REG(SecBoundStarMassUnseeded, "f4", 1, PTYPE_FOF_GROUP, IOTable);
         IO_REG(SecBoundSCMass, "f4", 1, PTYPE_FOF_GROUP, IOTable);

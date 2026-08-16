@@ -85,9 +85,17 @@ struct FOFParams
      * cluster >= MinMscForBHseed seeds its own BH on a distinct unseeded star). */
     int SecFOFseedsumover;
     /* Host-star choice of the per-cluster mode (SecFOFseedsumover=0): 1 = random
-     * unseeded stars; 0 = the unseeded stars with the largest f(Z)-scaled
-     * cluster-forming mass f(Z)*ClusterMass. Ignored when SecFOFseedsumover=1. */
+     * unseeded stars; 0 = the unseeded stars with the largest cluster-forming mass
+     * ClusterMass. Ignored when SecFOFseedsumover=1. */
     int SeedInSecFOFRandomStarParticle;
+    /* Exponent beta of the Z-dependent host-star ranking proxy: every ranked
+     * host-star choice (which unseeded star converts into the BH particle) uses
+     * the key Gamma*m_star * Z^-beta instead of the raw Gamma*m_star, preferring
+     * metal-poor stars at fixed cluster-forming mass.  Z is the star's frozen
+     * BirthMetallicity (absolute mass fraction), floored at 10^SC_MET_HIST_LOGMIN.
+     * <= 0 (default 0) disables the weight entirely.  RANKING ONLY: the seeding
+     * budgets, the cluster draw and the seed masses are untouched. */
+    double SecFOFseedHostZBeta;
     /* if 1, the per-cluster (SecFOFseedsumover=0) seed mass is M_VMS from the
      * Williams et al. 2026 stellar-collision model (cwmodel.c).
      * BHseedMassScaleMsc is ignored; SeedBlackHoleMass is the lower seed-mass
@@ -169,6 +177,19 @@ void set_fof_params(ParameterSet * ps)
         fof_params.SeedInSecFOFMultipleSeeds = param_get_int(ps, "SeedInSecFOFMultipleSeeds");
         fof_params.SecFOFseedsumover = param_get_int(ps, "SecFOFseedsumover");
         fof_params.SeedInSecFOFRandomStarParticle = param_get_int(ps, "SeedInSecFOFRandomStarParticle");
+        fof_params.SecFOFseedHostZBeta = param_get_double(ps, "SecFOFseedHostZBeta");
+        if(fof_params.SecFOFseedHostZBeta > 0) {
+            message(0, "SecFOFseedHostZBeta=%g: seed host stars are ranked by the proxy "
+                       "Gamma*m_star * Z^-beta (frozen BirthMetallicity, floored at 10^%g "
+                       "absolute) instead of raw Gamma*m_star. Ranking only: seeding budgets, "
+                       "cluster draws and seed masses are unchanged.\n",
+                    fof_params.SecFOFseedHostZBeta, SC_MET_HIST_LOGMIN);
+            if(fof_params.SeedInSecFOFRandomStarParticle)
+                message(0, "SecFOFseedHostZBeta > 0 with SeedInSecFOFRandomStarParticle=1: the "
+                           "per-cluster hosts stay random (the proxy only replaces ranked "
+                           "choices); the group reference star / RNG seed still moves to the "
+                           "largest-proxy star.\n");
+        }
         fof_params.MbhMscRelationCWmodel = param_get_int(ps, "MbhMscRelationCWmodel");
         fof_params.CWmodelAlpha = param_get_double(ps, "CWmodelAlpha");
         /* CWmodelMetallicity: string -> mode; -1 keeps the unrecognised value an
@@ -1630,6 +1651,26 @@ static void fof_reduce_base_group(void * pdst, void * psrc) {
     /* preserve the dst FirstPos so all other base group gets the same FirstPos */
 }
 
+/* Z-dependent host-star ranking weight (SecFOFseedHostZBeta > 0): multiplies the
+ * Gamma*m_star ranking key by Z^-beta, Z = the star's frozen BirthMetallicity
+ * floored at 10^SC_MET_HIST_LOGMIN (the same pristine-star floor the unseeded-star
+ * metallicity statistics use), so metal-poor stars are preferred as seed hosts at
+ * fixed cluster-forming mass.  Any constant normalisation of Z cancels in a
+ * ranking, so the absolute mass fraction is used directly.  Returns exactly 1 when
+ * the feature is off (beta <= 0), keeping every ranking the raw Gamma*m_star one.
+ * RANKING ONLY: no caller may feed a weighted key into a mass sum, budget or gate. */
+static inline double
+sc_seed_host_zweight(double zbirth)
+{
+    const double beta = fof_params.SecFOFseedHostZBeta;
+    if(beta <= 0)
+        return 1;
+    const double zfloor = pow(10.0, SC_MET_HIST_LOGMIN);
+    if(!(zbirth > zfloor))
+        zbirth = zfloor;
+    return pow(zbirth, -beta);
+}
+
 /* Seed-host ordering: (scm DESCENDING, ID ASCENDING).  Returns 1 if the candidate
  * (scm, id) beats the incumbent (best_scm, best_id); have_best = 0 means there is no
  * incumbent yet, in which case the candidate must still clear the scm > 0 sentinel.
@@ -1642,7 +1683,7 @@ static void fof_reduce_base_group(void * pdst, void * psrc) {
  * cluster population.  "Keep the first maximum encountered" would make that depend on
  * local particle index order and on the rank-merge order -- i.e. on the domain
  * decomposition -- and would let BHseedSecFOFbound change the seeding decision even
- * when every star is bound.  Exact ties are rare when scm is f(Z)*ClusterMass (Gamma
+ * when every star is bound.  Exact ties are rare when scm is ClusterMass (Gamma
  * and m_star are both continuous) but expected when StarClusterSampling drives scm
  * from the discrete StarClusterMass_sample, which is 0 for every star whose per-star
  * draw sampled no cluster. */
@@ -1895,12 +1936,7 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
         if(STARP(index).Seeded) {
             gdst->SCMass_seeded += STARP(index).ClusterMass;
         } else {
-            /* Metallicity-dependent seeding factor f(Z) scales the per-star
-             * cluster mass that drives seeding (ClusterMass = Gamma*m_star is kept
-             * raw). The sampled mass StarClusterMass_sample already carries f(Z)
-             * (its Poisson rate was scaled at formation), so it is not rescaled. */
-            double fseed = get_seed_metallicity_factor(STARP(index).BirthMetallicity);
-            gdst->StarClusterMassUnseeded += fseed * STARP(index).ClusterMass;
+            gdst->StarClusterMassUnseeded += STARP(index).ClusterMass;
             gdst->StarClusterMassSampleUnseeded += STARP(index).StarClusterMass_sample;
             gdst->SCcomMcut += P[index].Mass;
             /* Same sum, kept for the detail records because the bound restriction
@@ -1932,13 +1968,16 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
                 gdst->SCMetUnseededLogSum2 += lzb * lzb;
             }
 
-            /* Track the unseeded star with the largest (f(Z)-scaled) ClusterMass
-             * (or StarClusterMass_sample when StarClusterSampling=1) as the seed
-             * particle for star-cluster BH seeding in secondary FOF. For
-             * SeedSecFOFcomSample use f(Z)*ClusterMass and record its ID as the RNG
-             * seed for the combined draw. */
-            MyFloat scm = (fof_params.StarClusterSampling && !fof_params.SeedSecFOFcomSample) ?
-                STARP(index).StarClusterMass_sample : fseed * STARP(index).ClusterMass;
+            /* Track the unseeded star with the largest ranking key -- ClusterMass (or
+             * StarClusterMass_sample when StarClusterSampling=1), optionally
+             * Z-weighted (SecFOFseedHostZBeta) -- as the seed particle for
+             * star-cluster BH seeding in secondary FOF. For SeedSecFOFcomSample use
+             * ClusterMass and record its ID as the RNG seed for the combined draw.
+             * double, mirroring the sb_star.scm expression term for term, so this
+             * argmax and the BHseedSecFOFbound one order identically. */
+            double scm = (fof_params.StarClusterSampling && !fof_params.SeedSecFOFcomSample) ?
+                (double) STARP(index).StarClusterMass_sample : (double) STARP(index).ClusterMass;
+            scm *= sc_seed_host_zweight(STARP(index).BirthMetallicity);
             if(sc_seed_host_better(scm, P[index].ID, gdst->MaxStarClusterMass,
                                    gdst->SeedStarID, gdst->seed_task_star >= 0)) {
                 gdst->MaxStarClusterMass = scm;
@@ -2892,7 +2931,8 @@ static int ms_find(const struct ms_group * msg, int n, int64_t gr)
 /* One eligible extra-seed candidate star (far enough from seed 1). */
 struct ms_cand {
     int64_t  GrNr;
-    double   mGamma;       /* ClusterMass = m_star*Gamma (ranking key) */
+    double   mGamma;       /* ranking key: ClusterMass = m_star*Gamma, optionally
+                            * Z-weighted (SecFOFseedHostZBeta); never a mass */
     uint64_t ID;           /* tiebreak / identity */
     double   pos[3];       /* position (for logging the seed locations) */
     int      owner_task;
@@ -3140,8 +3180,9 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
         double dz = NEAREST(P[i].Pos[2] - msg[c].seed1pos[2], box);
         if(dx * dx + dy * dy + dz * dz <= sep2) continue;
         elig[e].GrNr = P[i].GrNr;
-        /* Rank extra-seed candidates by the f(Z)-scaled cluster mass. */
-        elig[e].mGamma = get_seed_metallicity_factor(STARP(i).BirthMetallicity) * STARP(i).ClusterMass;
+        /* Rank extra-seed candidates by the cluster mass (Z-weighted when
+         * SecFOFseedHostZBeta > 0; a pure ranking key, never used as a mass). */
+        elig[e].mGamma = STARP(i).ClusterMass * sc_seed_host_zweight(STARP(i).BirthMetallicity);
         elig[e].ID = (uint64_t) P[i].ID;
         elig[e].pos[0] = P[i].Pos[0];
         elig[e].pos[1] = P[i].Pos[1];
@@ -3257,7 +3298,7 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
  * seeds its OWN BH (mass SeedBlackHoleMass*m_sc when BHseedMassScaleMsc=1, else
  * SeedBlackHoleMass), each hosted on a distinct unseeded star of the group chosen by
  * SeedInSecFOFRandomStarParticle: 1 = randomly sampled; 0 = the stars with the
- * largest f(Z)-scaled cluster-forming mass f(Z)*ClusterMass.  Mutually exclusive
+ * largest cluster-forming mass ClusterMass.  Mutually exclusive
  * with the other secFOF multi-seed / sampling-variant flags (checked in
  * set_fof_params).  Distributed exactly like fof_secfof_extra_seeds: the
  * per-group cluster-mass lists and the unseeded candidate stars are gathered to every
@@ -3317,14 +3358,11 @@ static int secfof_random_group_eligible(const struct Group * g)
     return 1;
 }
 
-/* Whether particle i can HOST a per-cluster BH seed: an unseeded type-4 star (in a group)
- * with a positive metallicity-dependent seeding factor f(Z). The group sampling mass is
- * Sum(f(Z)*ClusterMass), so f(Z)=0 stars contribute nothing and must not host a seed; the
- * host pool, seed-cap and Seeded-flagging are all restricted to f(Z)>0 stars to match.
+/* Whether particle i can HOST a per-cluster BH seed: an unseeded type-4 star (in a group).
  *
  * BHseedSecFOFbound: `bound_mask` (NULL when the restriction is off) is the transient
  * per-particle bound flag produced by fof_secfof_bound_restrict.  Only the bound stars
- * contributed f(Z)*ClusterMass to the group's restricted budget, so only they may host
+ * contributed ClusterMass to the group's restricted budget, so only they may host
  * one of its seeds.  Filtering here is enough to cap the seed COUNT as well: the host
  * pool feeds `navail` in phase 3, and the placement loop stops as soon as it has spent
  * `navail` hosts, so a group can never place more seeds than it has bound hosts -- no
@@ -3334,8 +3372,7 @@ static int secfof_random_seedable_star(int64_t i, const char * bound_mask)
 {
     if(bound_mask && !bound_mask[i])
         return 0;
-    return P[i].Type == 4 && P[i].GrNr >= 0 && !STARP(i).Seeded
-        && get_seed_metallicity_factor(STARP(i).BirthMetallicity) > 0;
+    return P[i].Type == 4 && P[i].GrNr >= 0 && !STARP(i).Seeded;
 }
 
 /* One random-seed group, gathered to every rank. */
@@ -3362,7 +3399,7 @@ struct rs_group {
     int      mass_offset;   /* offset into the gathered mass array (filled after gather) */
     uint64_t SeedStarID;    /* RNG seed for the combined draw */
     double   capped;        /* SCcomMcut (group unseeded stellar mass) = mass-function cutoff */
-    double   sum_mgamma;    /* StarClusterMassUnseeded: the draw's Sum(f(Z)*ClusterMass).
+    double   sum_mgamma;    /* StarClusterMassUnseeded: the draw's Sum(ClusterMass).
                              * With capped and SeedStarID this fully determines the group's
                              * cluster population, so any rank can redraw it identically
                              * (used for the MinMscForSCdetail records). */
@@ -3399,7 +3436,7 @@ struct rs_cand {
     int64_t  GrNr;
     double   key;               /* ordering key: reproducible random in [0,1)
                                  * (SeedInSecFOFRandomStarParticle=1) or
-                                 * -f(Z)*ClusterMass (=0, largest first) */
+                                 * -ClusterMass (=0, largest first) */
     uint64_t ID;
     float    metallicity;       /* host star's frozen BirthMetallicity */
     float    metals[NMETALS];   /* species mass fractions, rescaled to sum to metallicity */
@@ -3452,7 +3489,7 @@ static double cw_sample_cluster_met(const struct rs_group * m, uint64_t star_id,
          * allowed and exactly what sampling the group's MDF means).  Drawn off the
          * histogram, which spans ALL the group's unseeded stars, rather than off the
          * gathered candidate list, which is pre-truncated to the top n_request by
-         * f(Z)*ClusterMass and so is a mass-biased subset. */
+         * ClusterMass and so is a mass-biased subset. */
         uint64_t hs = star_id * 6364136223846793005ULL + 1442695040888963407ULL;
         double u = get_random_number(hs + 802, rnd);
         return sc_met_hist_percentile(m->met_hist, m->nstar_unseeded,
@@ -3557,7 +3594,7 @@ static int64_t secfof_count_random_seed_ub(FOFGroups * fof, const RandTable * co
 
     int64_t cnt = 0;
     for(i = 0; i < PartManager->NumPart; i++) {
-        if(!secfof_random_seedable_star(i, bound_mask)) continue;   /* host pool: unseeded & f(Z)>0 (& bound) */
+        if(!secfof_random_seedable_star(i, bound_mask)) continue;   /* host pool: unseeded (& bound) */
         int lo = 0, hi = n_tot, found = -1;
         int64_t key = P[i].GrNr;
         while(lo < hi) {
@@ -3845,20 +3882,20 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
             (n_star_local > 0 ? n_star_local : 1) * sizeof(struct rs_cand));
     int e = 0;
     for(i = 0; i < PartManager->NumPart; i++) {
-        if(!secfof_random_seedable_star(i, bound_mask)) continue;   /* host pool: unseeded & f(Z)>0 (& bound) */
+        if(!secfof_random_seedable_star(i, bound_mask)) continue;   /* host pool: unseeded (& bound) */
         int lo = 0, hi = n_msg, found = -1; int64_t key = P[i].GrNr;
         while(lo < hi) { int mid = lo + (hi - lo) / 2; if(all_rsg[mid].GrNr == key) { found = mid; break; } else if(all_rsg[mid].GrNr < key) lo = mid + 1; else hi = mid; }
         if(found < 0) continue;
         elig[e].GrNr = P[i].GrNr;
         /* Host-star ordering: SeedInSecFOFRandomStarParticle=1 draws a reproducible
-         * random key; =0 ranks by descending f(Z)-scaled cluster-forming mass
+         * random key; =0 ranks by descending cluster-forming mass ClusterMass,
+         * optionally Z-weighted (SecFOFseedHostZBeta > 0: ClusterMass * Z^-beta)
          * (negated so the ascending key sort takes the largest first, generalizing
-         * the sum-over mode's largest-f(Z)*ClusterMass host pick). */
+         * the sum-over mode's largest-key host pick). */
         if(fof_params.SeedInSecFOFRandomStarParticle)
             elig[e].key = rs_star_key((uint64_t) P[i].ID, rnd);
         else
-            elig[e].key = -get_seed_metallicity_factor(STARP(i).BirthMetallicity)
-                * STARP(i).ClusterMass;
+            elig[e].key = -STARP(i).ClusterMass * sc_seed_host_zweight(STARP(i).BirthMetallicity);
         elig[e].ID = (uint64_t) P[i].ID;
         /* Host-star metallicity: frozen BirthMetallicity for the scalar; species mass
          * fractions taken from the star's current Metals[] but rescaled so they sum to
@@ -4082,7 +4119,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         if(n_unhosted > 0) {
             n_short++;
             message(0, "secFOF per-cluster seeding group GrNr=%ld: %d eligible cluster(s) >= MinMscForBHseed "
-                       "but only %d unseeded f(Z)>0 host star(s); seeded %d, unhosted %d.\n",
+                       "but only %d unseeded host star(s); seeded %d, unhosted %d.\n",
                     (long) m->GrNr, m->n_qualify, navail, h, n_unhosted);
         }
     }
@@ -4116,7 +4153,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
      * pool right for free -- the stars converted above are type 5 and so no longer
      * seedable, while the candidates left standing (the hosts of the no-VMS clusters and
      * the reference stars) are still unseeded and stay in the running, in the same
-     * f(Z)*ClusterMass order.
+     * ClusterMass order.
      * NOTE clusters dropped for want of a host star (the shortage message above) are not
      * compensated: their M_VMS is never evaluated, and a group short of host stars has
      * none to spare for compensating seeds either. */
@@ -4162,8 +4199,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
             if(fof_params.SeedInSecFOFRandomStarParticle)
                 elig_c[ec].key = rs_star_key((uint64_t) P[i].ID, rnd);
             else
-                elig_c[ec].key = -get_seed_metallicity_factor(STARP(i).BirthMetallicity)
-                    * STARP(i).ClusterMass;
+                elig_c[ec].key = -STARP(i).ClusterMass * sc_seed_host_zweight(STARP(i).BirthMetallicity);
             elig_c[ec].ID = (uint64_t) P[i].ID;
             float zbirth = STARP(i).BirthMetallicity;
             double zcur = STARP(i).Metallicity;
@@ -4254,12 +4290,12 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                 comp_unit, comp_mass_tot, n_comp_short, n_comp_capped);
     }
 
-    /* Flag every remaining seedable star (unseeded & f(Z)>0) of a seeded group as Seeded=1.
-     * The group's Sum(f(Z)*ClusterMass) fed the combined draw, so its seedable population is
+    /* Flag every remaining seedable star (unseeded) of a seeded group as Seeded=1.
+     * The group's Sum(ClusterMass) fed the combined draw, so its seedable population is
      * consumed regardless of how many BHs were placed (matching the single-seed combined path,
      * which marks these via secondfof_seed's seeded_grnr_out list; random-mode groups are absent
-     * from that list, so they are marked here). f(Z)=0 stars never participate and are left
-     * untouched; stars already converted to BHs are type 5 and skipped.
+     * from that list, so they are marked here). Stars already converted to BHs are type 5
+     * and skipped.
      *
      * What counts as "seeded" here is SecFOFseedSpendOnPlaced:
      *   0 (default): the group REQUESTED a seed (n_request >= 1, or n_comp >= 1 for a group
@@ -4279,7 +4315,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
     int64_t n_flag = 0;
     #pragma omp parallel for reduction(+:n_flag)
     for(i = 0; i < PartManager->NumPart; i++) {
-        if(!secfof_random_seedable_star(i, bound_mask)) continue;   /* unseeded & f(Z)>0 & bound */
+        if(!secfof_random_seedable_star(i, bound_mask)) continue;   /* unseeded & bound */
         int64_t key = P[i].GrNr;
         int lo = 0, hi = n_msg, found = -1;
         while(lo < hi) { int mid = lo + (hi - lo) / 2; if(all_rsg[mid].GrNr == key) { found = mid; break; } else if(all_rsg[mid].GrNr < key) lo = mid + 1; else hi = mid; }
@@ -4446,10 +4482,8 @@ static void fof_secfof_particle_sample(FOFGroups * fof, const RandTable * const 
         /* allow_cap = 0: the cap is applied below on the group-summed tot_msc_fof,
          * not on each per-star draw (whose cutoff is the per-star m_cut). */
         double full = 0;
-        /* Scale the per-star Poisson rate (sum_mGamma = Gamma*m_star) by f(Z). */
-        double fseed = get_seed_metallicity_factor(STARP(i).BirthMetallicity);
         double msc_star = starcluster_combined_bhseed_msc(
-                m_cut, fseed * STARP(i).ClusterMass, (uint64_t) P[i].ID, rnd, &full, 0);
+                m_cut, STARP(i).ClusterMass, (uint64_t) P[i].ID, rnd, &full, 0);
         part_tot[c] += msc_star;
         part_full[c] += full;
     }
@@ -4503,11 +4537,16 @@ struct bound_member {
     double   Pos[3];
     double   Vel[3];
     double   Mass;
-    double   mGamma;            /* STARP(i).ClusterMass if unseeded star, else 0 */
+    double   mGamma;            /* STARP(i).ClusterMass if unseeded star, else 0.
+                                 * RAW: summed into the bound seeding budget, so the
+                                 * optional Z weight is applied only in the seed-host
+                                 * argmax below, never here. */
     MyIDType ID;                /* particle ID (becomes SeedStarID if chosen as seed) */
     int      OrigTask;          /* rank that owns this particle */
     int      OrigIndex;         /* local index of this particle on OrigTask */
     int      is_unseeded_star;  /* 1 if Type==4 && !STARP.Seeded, else 0 */
+    float    zbirth;            /* frozen BirthMetallicity if unseeded star, else 0
+                                 * (feeds sc_seed_host_zweight in the host argmax) */
 };
 
 static int cmp_bound_member_grnr(const void * a, const void * b)
@@ -4641,13 +4680,14 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
             m->OrigTask = ThisTask;
             m->OrigIndex = i;
             if(P[i].Type == 4 && !STARP(i).Seeded) {
-                /* f(Z)-scaled cluster mass: the bound sum overwrites
-                 * StarClusterMassUnseeded below, so apply f(Z) here too. */
-                m->mGamma = get_seed_metallicity_factor(STARP(i).BirthMetallicity) * STARP(i).ClusterMass;
+                /* Cluster mass: the bound sum overwrites StarClusterMassUnseeded below. */
+                m->mGamma = STARP(i).ClusterMass;
                 m->is_unseeded_star = 1;
+                m->zbirth = STARP(i).BirthMetallicity;
             } else {
                 m->mGamma = 0;
                 m->is_unseeded_star = 0;
+                m->zbirth = 0;
             }
         }
     }
@@ -4734,11 +4774,12 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
         const double Vref2 = bm_global[start + kstar].Vel[2];
 
         /* Pass B: over UNSEEDED stars, sum the bound ones and track the bound star
-         * with the largest m*Gamma (ties broken by smaller ID for reproducibility)
-         * as the new seed location.
+         * with the largest ranking key -- m*Gamma, optionally Z-weighted
+         * (SecFOFseedHostZBeta) -- as the new seed location (ties broken by smaller
+         * ID for reproducibility).  The budget sum stays on the RAW mGamma.
          * Bound iff 0.5*|Vel - Vref|^2 <= atime * G * pot_mag (E <= 0 marginally bound). */
         double M_bound_mGamma = 0, M_bound_starmass = 0;
-        double best_mGamma = -1.0;
+        double best_key = -1.0;
         const struct bound_member * best = NULL;
         for(a = 0; a < N; a++) {
             const struct bound_member * pa = &bm_global[start + a];
@@ -4751,9 +4792,10 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
             if(ke <= pe) {
                 M_bound_mGamma += pa->mGamma;
                 M_bound_starmass += pa->Mass;
-                if(pa->mGamma > best_mGamma ||
-                   (best && pa->mGamma == best_mGamma && pa->ID < best->ID)) {
-                    best_mGamma = pa->mGamma;
+                double key = pa->mGamma * sc_seed_host_zweight(pa->zbirth);
+                if(key > best_key ||
+                   (best && key == best_key && pa->ID < best->ID)) {
+                    best_key = key;
                     best = pa;
                 }
             }
@@ -4791,7 +4833,7 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
  * For every secondary-FOF group, flag the member star particles that are
  * gravitationally bound to (all member stars + the local dark matter), and — when
  * `apply` is set — feed only the bound UNSEEDED stars to the seeding machinery by
- * overwriting StarClusterMassUnseeded (-> bound Sum(f(Z)*Gamma*m_star)) and
+ * overwriting StarClusterMassUnseeded (-> bound Sum(Gamma*m_star)) and
  * SCcomMcut (-> bound Sum(m_star)) in place, exactly as
  * fof_secfof_bound_massive_restrict does for its own threshold-gated variant.
  *
@@ -4870,10 +4912,10 @@ struct sb_star {
     double   Pos[3];
     double   Vel[3];
     double   Mass;
-    double   mGamma;            /* f(Z)*ClusterMass for an UNSEEDED star, else 0 */
-    /* Raw ClusterMass (= Gamma*m_star) of EVERY star, seeded or not, with no f(Z)
-     * factor.  Kept separate from mGamma because the two answer different questions:
-     * mGamma is the seeding budget (f(Z)-weighted, unseeded only, replaces
+    double   mGamma;            /* ClusterMass for an UNSEEDED star, else 0 */
+    /* ClusterMass (= Gamma*m_star) of EVERY star, seeded or not.  Kept separate from
+     * mGamma because the two answer different questions: mGamma is the seeding budget
+     * (unseeded only, replaces
      * StarClusterMassUnseeded), while this feeds the SCBoundClusterMass* diagnostics,
      * which must use the same definition as the catalogue's StarClusterMass so the
      * bound fraction is a ratio of like for like. */
@@ -5091,16 +5133,17 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
              * summary can be rebuilt over the BOUND subset (see the apply branch). */
             m->zbirth = STARP(i).BirthMetallicity;
             m->initscm = STARP(i).initClusterMass;
-            /* f(Z)-scaled cluster mass: the bound sum replaces
-             * StarClusterMassUnseeded, which carries f(Z) too. */
-            m->mGamma = m->is_unseeded ?
-                get_seed_metallicity_factor(STARP(i).BirthMetallicity) * STARP(i).ClusterMass : 0;
+            /* Cluster mass: the bound sum replaces StarClusterMassUnseeded. */
+            m->mGamma = m->is_unseeded ? STARP(i).ClusterMass : 0;
             /* Unweighted and for every star: the same quantity add_particle_to_group
              * sums into StarClusterMass. */
             m->scmass = STARP(i).ClusterMass;
             m->msample = m->is_unseeded ? STARP(i).StarClusterMass_sample : 0;
             m->scm = (fof_params.StarClusterSampling && !fof_params.SeedSecFOFcomSample) ?
                 m->msample : m->mGamma;
+            /* Same optional Z weight as add_particle_to_group's scm, so the bound
+             * host argmax orders exactly like the unrestricted one. */
+            m->scm *= sc_seed_host_zweight(m->zbirth);
         }
         int * cb = (int *) mymalloc2("SBscb", sizeof(int) * NTask);
         int * db = (int *) mymalloc2("SBsdb", sizeof(int) * NTask);
@@ -5410,9 +5453,9 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
         }
 
         double bound_mass = 0, bound_mass_uns = 0, bound_mgamma = 0, bound_msample = 0;
-        /* Diagnostic cluster masses, unweighted by f(Z), matching the catalogue's
-         * StarClusterMass definition: over ALL bound stars, and over the bound
-         * UNSEEDED ones.  Separate from bound_mgamma, which is the seeding budget. */
+        /* Diagnostic cluster masses matching the catalogue's StarClusterMass
+         * definition: over ALL bound stars, and over the bound UNSEEDED ones.
+         * Separate from bound_mgamma, which is the seeding budget. */
         double bound_scm_all = 0, bound_scm_uns = 0;
         int nbound = 0;
         /* 0, not -1: the same sentinel add_particle_to_group starts MaxStarClusterMass
@@ -5509,10 +5552,9 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
         if(grp) {
             grp->SCBoundStarMass = bound_mass;
             grp->SCBoundStarMassUnseeded = bound_mass_uns;
-            /* Diagnostics, NOT the seeding budget: unweighted by f(Z), so they are
-             * directly comparable to the catalogue's StarClusterMass / SCMass_seeded.
-             * The f(Z)-weighted, unseeded-only budget goes into StarClusterMassUnseeded
-             * in the apply branch below. */
+            /* Diagnostics, NOT the seeding budget: directly comparable to the
+             * catalogue's StarClusterMass / SCMass_seeded.  The unseeded-only budget
+             * goes into StarClusterMassUnseeded in the apply branch below. */
             grp->SCBoundClusterMass = bound_scm_all;
             grp->SCBoundClusterMassUnseeded = bound_scm_uns;
             grp->NStarBound = nbound;
@@ -5538,7 +5580,7 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
              * (SeedInSecFOFMultipleSeeds, SecFOFseedsumover=0) and sizes their slot
              * reservation.  Restricting it tightens both, which is correct -- an unbound
              * star can never host a seed -- and stays a valid upper bound on the seeds
-             * actually placed: the host pool is (bound && unseeded && f(Z)>0), a subset
+             * actually placed: the host pool is (bound && unseeded), a subset
              * of the bound unseeded stars counted here. */
             double old = fof_params.StarClusterSampling && !fof_params.SeedSecFOFcomSample ?
                 grp->StarClusterMassSampleUnseeded : grp->StarClusterMassUnseeded;
@@ -5925,7 +5967,7 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
 
     /* Per-cluster seeding (SecFOFseedsumover=0): place one BH per sampled cluster
      * >= MinMscForBHseed on its chosen unseeded host star (random or largest
-     * f(Z)*ClusterMass, per SeedInSecFOFRandomStarParticle).  Self-contained
+     * ClusterMass, per SeedInSecFOFRandomStarParticle).  Self-contained
      * multi-seed pass (mutually exclusive with the paths above); uses pre-reserved
      * BH slots.  Collective (every rank participates). */
     fof_secfof_random_seeds(fof, atime, rnd, CP, bound_mask, Comm);

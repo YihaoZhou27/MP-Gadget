@@ -1,5 +1,21 @@
 # MP-Gadget Development Log
 
+## 2026-08-13 (late) — `SecFOFseedHostZBeta`: Z-dependent host-star ranking for BH seeding
+
+New optional parameter `SecFOFseedHostZBeta` (default 0). When > 0, every *ranked* choice of which unseeded star particle converts into a BH seed uses the proxy `Gamma*m_star * Z^-beta` (Z = the star's frozen birth metallicity, pristine stars floored at the metallicity histogram's floor) instead of the raw `Gamma*m_star`, so metal-poor stars are preferred as seed hosts at fixed cluster-forming mass. When <= 0 the ranking — and the whole run — is bit-for-bit the historical behavior.
+
+The weight covers all five host-selection sites: the per-group seed-1 argmax, the per-cluster ordinary and compensating host orderings, the multi-seed extra hosts, and the bound-host repointing of both bound-restriction passes. It is **ranking only**: seeding budgets, cluster draws, gates and seed masses are untouched (unlike the deleted f(Z) budget factor below, which this feature replaces in spirit but not in mechanism). One knock-on to be aware of: the group's reference star / RNG seed moves with the ranking, so per-group cluster-draw realizations differ from a raw-ranked run (same statistics). Motivated by the notebook diagnostics: the CW-model seeding gate scales as m_crit ~ Z^beta with beta ≈ 0.27–0.38, flat over the whole threshold range, and the raw sort picks hosts ~0.4 dex *above* their group's mean log Z while packing multi-seed BHs ~10x closer together than the Z-weighted proxy would.
+
+Compiles clean; default-off runs are unaffected.
+
+## 2026-08-13 — Removed the metallicity-dependent seeding factor f(Z)
+
+The star-cluster BH-seeding budget is no longer weighted by star metallicity. The per-star cluster-forming mass `Gamma*m_star` now enters every seeding path raw: the group budgets, the per-star Poisson cluster count, the host-star ranking and the host-eligibility test. Metal-rich stars are neither down-weighted nor barred from hosting a seed.
+
+`StarClusterSeedMetallicityMin` and `StarClusterSeedMetallicityMax` are **deleted**, not defaulted off — a paramfile that still lists either one will abort at startup with "Parameter is unknown", so those lines must be removed from existing paramfiles before running this build.
+
+Metallicity still enters the seed **mass** through the CW model's own Vink-wind Z scaling (`MbhMscRelationCWmodel`); only the weighting of the seeding budget is gone. Since f(Z) was off by default — and was force-disabled whenever the CW model was on — runs configured that way are bitwise unaffected. Full libgadget test suite passes.
+
 ## 2026-08-08 — Grid primary linker for the second FOF (`SecondFOFGridLinking`)
 
 The star FOF was 62% of the run's wall clock and got no faster with more nodes: ~90% of stars land on one rank because the domain is balanced by particle count, and the treewalk enumerates every neighbour pair when the median star has 1.6e5 neighbours inside the linking length. New alternative primary linker for the **second FOF only** — the halo FOF is untouched and still uses the treewalk.

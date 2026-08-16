@@ -64,11 +64,6 @@ static struct SFRParams
     int StarClusterICMFcutoff; /* if 1, ICMF has exp(-m/Mcut) cutoff; if 0, pure power law m^-2 on [1e2,1e8] */
     int SeedSecFOFcomSample; /* combined per-secFOF cluster sampling for BH seeding; skips per-star sampling */
     int SCmasscapSecFOFstarmass; /* if 1, cap the combined-sampled SC mass at the group's unseeded stellar mass */
-    /* Metallicity-dependent seeding factor f(Z) thresholds, as log10(Z/Zsun) (Zsun=0.0134).
-     * f=1 for log10(Z/Zsun) <= Min, f=0 for >= Max, log-linear decline between.
-     * If Max <= Min (default both 0) the feature is disabled (f=1). */
-    double StarClusterSeedMetallicityMin;
-    double StarClusterSeedMetallicityMax;
     /* If > 0, use this fixed effective radius (in pc) for every seeded star cluster
      * instead of the size-mass relation. Default 0 (use the size-mass relation). */
     double StarClusterFixReff;
@@ -206,22 +201,6 @@ void set_sfr_params(ParameterSet * ps)
         if(sfr_params.SeedSecFOFcomSample && !sfr_params.StarClusterOn)
             endrun(0, "SeedSecFOFcomSample = 1 requires StarClusterOn = 1\n");
         sfr_params.SCmasscapSecFOFstarmass = param_get_int(ps, "SCmasscapSecFOFstarmass");
-        sfr_params.StarClusterSeedMetallicityMin = param_get_double(ps, "StarClusterSeedMetallicityMin");
-        sfr_params.StarClusterSeedMetallicityMax = param_get_double(ps, "StarClusterSeedMetallicityMax");
-        if(sfr_params.StarClusterSeedMetallicityMax < sfr_params.StarClusterSeedMetallicityMin)
-            endrun(0, "StarClusterSeedMetallicityMax (%g) must be >= StarClusterSeedMetallicityMin (%g). Set them equal to disable the metallicity-dependent seeding factor.\n",
-                   sfr_params.StarClusterSeedMetallicityMax, sfr_params.StarClusterSeedMetallicityMin);
-        /* MbhMscRelationCWmodel supplies its own metallicity dependence (the
-         * Vink-wind Z scaling of M_VMS), so the metallicity-dependent seeding
-         * factor f(Z) is disabled: force Max = Min, i.e. f(Z) = 1 for all Z. */
-        if(param_get_int(ps, "MbhMscRelationCWmodel")
-           && sfr_params.StarClusterSeedMetallicityMax > sfr_params.StarClusterSeedMetallicityMin) {
-            message(0, "MbhMscRelationCWmodel=1: disabling the metallicity-dependent seeding factor f(Z) "
-                       "(forcing StarClusterSeedMetallicityMax = StarClusterSeedMetallicityMin = %g); "
-                       "the CW model's Z dependence applies instead.\n",
-                    sfr_params.StarClusterSeedMetallicityMin);
-            sfr_params.StarClusterSeedMetallicityMax = sfr_params.StarClusterSeedMetallicityMin;
-        }
         sfr_params.StarClusterFixReff = param_get_double(ps, "StarClusterFixReff");
         if(sfr_params.StarClusterFixReff < 0)
             endrun(0, "StarClusterFixReff (%g) must be >= 0.\n", sfr_params.StarClusterFixReff);
@@ -799,33 +778,6 @@ static double msc_ave_from_cutoff(double Mcut)
     return 0;
 }
 
-/* Metallicity-dependent BH-seeding factor f(Z), applied to the per-star cluster
- * mass (Gamma*m_star) used for star-cluster BH seeding. Z is the absolute star
- * metallicity (mass fraction; the frozen BirthMetallicity), normalized to solar.
- *   f = 1                                   for log10(Z/Zsun) <= Min
- *   f = (Max - log10(Z/Zsun)) / (Max - Min) for Min < log10(Z/Zsun) < Max
- *   f = 0                                   for log10(Z/Zsun) >= Max
- * Min/Max are StarClusterSeedMetallicityMin/Max (log10 thresholds). When
- * Max <= Min (default both 0) the feature is disabled and f = 1. */
-double get_seed_metallicity_factor(double Z)
-{
-    const double Zsun = 0.0134;
-    double zmin = sfr_params.StarClusterSeedMetallicityMin;
-    double zmax = sfr_params.StarClusterSeedMetallicityMax;
-    /* Disabled (also guards the degenerate zmax == zmin denominator). */
-    if(zmax <= zmin)
-        return 1.0;
-    /* Metal-free (or unset) gas: maximal seeding. Also avoids log10(0). */
-    if(Z <= 0)
-        return 1.0;
-    double logZ = log10(Z / Zsun);
-    if(logZ <= zmin)
-        return 1.0;
-    if(logZ >= zmax)
-        return 0.0;
-    return (zmax - logZ) / (zmax - zmin);
-}
-
 /* ---------------- shared ICMF draw (used by every star-cluster sampler) ----------------
  * The three samplers below (summed seed mass, per-cluster mass list, and the
  * StarClusterDetails full-population pass) MUST draw the identical cluster
@@ -1305,13 +1257,9 @@ static int make_particle_star(int child, int parent, int placement, double Time,
             if(STARP(child).Msc_ave <= 0)
                 skip_sampling = 1;
 
-            /* Number of star clusters. The Poisson rate is scaled by the
-             * metallicity-dependent seeding factor f(Z): N = f(Z)*Gamma*m_star/<m>.
-             * ClusterMass (= Gamma*m_star) itself is kept raw; only the sampled
-             * count/mass carry f(Z). oldslot.Metallicity == the star's BirthMetallicity. */
-            double fseed = get_seed_metallicity_factor(oldslot.Metallicity);
+            /* Number of star clusters: N = Gamma*m_star/<m>. */
             if(STARP(child).Msc_ave > 0)
-                STARP(child).NumStarCluster = fseed * STARP(child).ClusterMass / STARP(child).Msc_ave;
+                STARP(child).NumStarCluster = STARP(child).ClusterMass / STARP(child).Msc_ave;
             else
                 STARP(child).NumStarCluster = 0;
 
