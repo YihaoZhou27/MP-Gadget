@@ -341,6 +341,14 @@ double cw_final_vms_mass_msun(double M_msun, double r_max_pc, double Z_massfrac,
     double Z_over_Zsun = Z_massfrac / CW_ZSUN;
     if(Z_over_Zsun <= 0.0)
         return M_msun;
-    double C = pow(10.0, -9.13) * pow(Z_over_Zsun, 0.74);
-    return pow(Mdot_in_msun_yr / C, 1.0 / 2.1);
+    double C = pow(10.0, -9.13) * pow(Z_over_Zsun, CW_WIND_ZEXP);
+    return pow(Mdot_in_msun_yr / C, 1.0 / CW_WIND_MEXP);
+}
+
+double
+cw_host_zcrit_massfrac(double Z_cl_massfrac, double M_vms, double M_thr)
+{
+    if(!(Z_cl_massfrac > 0) || !(M_vms > 0) || !(M_thr > 0))
+        return Z_cl_massfrac;
+    return Z_cl_massfrac * pow(M_vms / M_thr, CW_WIND_MEXP / CW_WIND_ZEXP);
 }

@@ -40,7 +40,10 @@ static const double cfe_table_CFE[N_CFE_TABLE] = {
 
 /*
  * Log-linear interpolation for Cluster Formation Efficiency.
- * Matches the Python: interp1d(log10(Poverk), log10(CFE), kind="linear", fill_value="extrapolate")
+ * Matches the Python: interp1d(log10(Poverk), log10(CFE), kind="linear", fill_value="extrapolate"),
+ * except that the result is capped at 1: Gamma is a mass fraction, and the upward extrapolation
+ * of the last table segment (slope d logCFE/d logP ~ 0.04) would otherwise exceed 1 for
+ * P/k_B > 2.2e10 K cm^-3 (reached by the densest star-forming gas at high z, giving Gamma up to ~1.1).
  */
 double get_cluster_formation_efficiency(double Pressure_over_kB)
 {
@@ -71,5 +74,9 @@ double get_cluster_formation_efficiency(double Pressure_over_kB)
     double logC1 = log10(cfe_table_CFE[hi]);
 
     double t = (logP - logP0) / (logP1 - logP0);
-    return pow(10.0, logC0 + t * (logC1 - logC0));
+    double cfe = pow(10.0, logC0 + t * (logC1 - logC0));
+    /* Cluster formation efficiency is a mass fraction: cap the extrapolation at 1. */
+    if(cfe > 1.0)
+        cfe = 1.0;
+    return cfe;
 }

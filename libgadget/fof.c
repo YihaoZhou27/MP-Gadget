@@ -44,6 +44,12 @@
 #define LARGE 1e29
 #define MAXITER 400
 
+/* Solar metallicity used to convert SecFOFseedHostZFloor (given in Zsun) to the
+ * absolute mass fraction the host-ranking weight compares BirthMetallicity
+ * against.  Same value as CW_ZSUN in cwmodel.c, so the floor and the CW
+ * seed-mass model speak the same Zsun. */
+#define SC_HOST_ZSUN 0.0134
+
 /* CWmodelMetallicity modes: how the per-cluster metallicity fed to the CW
  * seed-mass model is chosen (see cw_sample_cluster_met). */
 #define CW_MET_AVE        0   /* host group's unseeded-star metal mass ratio (default) */
@@ -96,6 +102,29 @@ struct FOFParams
      * <= 0 (default 0) disables the weight entirely.  RANKING ONLY: the seeding
      * budgets, the cluster draw and the seed masses are untouched. */
     double SecFOFseedHostZBeta;
+    /* Metallicity floor of that ranking key, in Zsun (SC_HOST_ZSUN): the key becomes
+     * Gamma*m_star * max(Z, Zfloor)^-beta, so every star below the floor gets the same
+     * weight and the raw Gamma*m_star decides among them.  <= 0 (default 0) means no
+     * floor beyond the pristine 10^SC_MET_HIST_LOGMIN one.  Only acts when
+     * SecFOFseedHostZBeta > 0.  SecFOFseedHostZFloorAbs is the derived absolute
+     * mass fraction actually compared against BirthMetallicity (0 when off). */
+    double SecFOFseedHostZFloor;
+    double SecFOFseedHostZFloorAbs;
+    /* SecFOFseedHostZcrit (0/1, default 0): per-cluster CW-model seeding only.  When
+     * 1, the host star of every ordinary seed must satisfy BirthMetallicity <=
+     * Z_crit = Z_cl * (M_VMS / SeedBlackHoleMass)^(2.1/0.74) -- the metallicity at
+     * which that same cluster would just have reached the seed-mass floor
+     * (cw_host_zcrit_massfrac) -- so a seed is placed on a star whose environment
+     * could have produced it.  Among the stars passing the mask the usual ranking
+     * key (raw Gamma*m_star, or the SecFOFseedHostZBeta-weighted one, or the
+     * SeedInSecFOFRandomStarParticle random key) decides; if NO unseeded star
+     * passes, the lowest-metallicity unseeded star hosts the seed (fallback).
+     * Combines with SecFOFseedHostZBeta > 0: mask first, Z-weighted ranking among
+     * the survivors.  Requires the per-cluster mode and MbhMscRelationCWmodel=1
+     * (M_VMS and Z_cl exist per cluster there only); MinBHSeedInSC compensating
+     * seeds carry no per-cluster M_VMS and are not masked.  MASK ONLY: budgets,
+     * cluster draws, gates and seed masses are untouched. */
+    int SecFOFseedHostZcrit;
     /* if 1, the per-cluster (SecFOFseedsumover=0) seed mass is M_VMS from the
      * Williams et al. 2026 stellar-collision model (cwmodel.c).
      * BHseedMassScaleMsc is ignored; SeedBlackHoleMass is the lower seed-mass
@@ -178,19 +207,73 @@ void set_fof_params(ParameterSet * ps)
         fof_params.SecFOFseedsumover = param_get_int(ps, "SecFOFseedsumover");
         fof_params.SeedInSecFOFRandomStarParticle = param_get_int(ps, "SeedInSecFOFRandomStarParticle");
         fof_params.SecFOFseedHostZBeta = param_get_double(ps, "SecFOFseedHostZBeta");
-        if(fof_params.SecFOFseedHostZBeta > 0) {
-            message(0, "SecFOFseedHostZBeta=%g: seed host stars are ranked by the proxy "
-                       "Gamma*m_star * Z^-beta (frozen BirthMetallicity, floored at 10^%g "
-                       "absolute) instead of raw Gamma*m_star. Ranking only: seeding budgets, "
-                       "cluster draws and seed masses are unchanged.\n",
-                    fof_params.SecFOFseedHostZBeta, SC_MET_HIST_LOGMIN);
-            if(fof_params.SeedInSecFOFRandomStarParticle)
-                message(0, "SecFOFseedHostZBeta > 0 with SeedInSecFOFRandomStarParticle=1: the "
-                           "per-cluster hosts stay random (the proxy only replaces ranked "
-                           "choices); the group reference star / RNG seed still moves to the "
-                           "largest-proxy star.\n");
+        fof_params.SecFOFseedHostZFloor = param_get_double(ps, "SecFOFseedHostZFloor");
+        fof_params.SecFOFseedHostZFloorAbs = 0;
+        if(fof_params.SecFOFseedHostZFloor > 0) {
+            /* never below the pristine floor the weight applies anyway */
+            const double zfloor_pristine = pow(10.0, SC_MET_HIST_LOGMIN);
+            fof_params.SecFOFseedHostZFloorAbs = fof_params.SecFOFseedHostZFloor * SC_HOST_ZSUN;
+            if(fof_params.SecFOFseedHostZFloorAbs < zfloor_pristine)
+                fof_params.SecFOFseedHostZFloorAbs = zfloor_pristine;
         }
+        /* The host-search criteria (beta / floor / Z_crit mask) are described in one
+         * message further down, once MbhMscRelationCWmodel and SeedBlackHoleMass are
+         * read as well. */
         fof_params.MbhMscRelationCWmodel = param_get_int(ps, "MbhMscRelationCWmodel");
+        fof_params.SecFOFseedHostZcrit = param_get_int(ps, "SecFOFseedHostZcrit");
+        if(fof_params.SecFOFseedHostZcrit) {
+            /* Z_crit needs a per-cluster (M_VMS, Z_cl) pair, which only the per-cluster
+             * CW-model path has; refuse it elsewhere instead of silently doing nothing. */
+            if(fof_params.SecFOFseedsumover || !fof_params.SeedSecFOFcomSample
+               || fof_params.SeedSecFOFcomSampleParticle || !fof_params.MbhMscRelationCWmodel)
+                endrun(1, "SecFOFseedHostZcrit=1 requires the per-cluster secFOF seeding mode "
+                          "(SeedSecFOFcomSample=1, SecFOFseedsumover=0, SeedSecFOFcomSampleParticle=0) "
+                          "with MbhMscRelationCWmodel=1: Z_crit is built from each cluster's "
+                          "CW-model M_VMS and metallicity.\n");
+            if(param_get_double(ps, "SeedBlackHoleMass") <= 0)
+                endrun(1, "SecFOFseedHostZcrit=1 requires SeedBlackHoleMass > 0: it is the M_thr "
+                          "of Z_crit = Z_cl (M_VMS/M_thr)^(2.1/0.74).\n");
+        }
+        if(fof_params.SecFOFseedHostZBeta > 0 || fof_params.SecFOFseedHostZcrit) {
+            /* One message describing the whole host-star search criterion. */
+            char key[256], mask[512];
+            if(fof_params.SecFOFseedHostZBeta > 0 && fof_params.SecFOFseedHostZFloor > 0)
+                snprintf(key, sizeof(key), "Gamma*m_star * max(Z, %g)^-%g (SecFOFseedHostZBeta=%g, "
+                         "SecFOFseedHostZFloor=%g Zsun with Zsun=%g: stars below the floor share one "
+                         "weight, so raw Gamma*m_star decides among them)",
+                         fof_params.SecFOFseedHostZFloorAbs, fof_params.SecFOFseedHostZBeta,
+                         fof_params.SecFOFseedHostZBeta, fof_params.SecFOFseedHostZFloor, SC_HOST_ZSUN);
+            else if(fof_params.SecFOFseedHostZBeta > 0)
+                snprintf(key, sizeof(key), "Gamma*m_star * Z^-%g (SecFOFseedHostZBeta=%g; Z = frozen "
+                         "BirthMetallicity, pristine stars floored at 10^%g absolute)",
+                         fof_params.SecFOFseedHostZBeta, fof_params.SecFOFseedHostZBeta, SC_MET_HIST_LOGMIN);
+            else
+                snprintf(key, sizeof(key), "raw Gamma*m_star (SecFOFseedHostZBeta <= 0)");
+            if(fof_params.SecFOFseedHostZcrit)
+                snprintf(mask, sizeof(mask), "only unseeded stars with BirthMetallicity <= Z_crit = "
+                         "Z_cl * (M_VMS / SeedBlackHoleMass=%g)^(%g/%g) may host the seed, Z_cl and M_VMS "
+                         "being the cluster's own CW-model inputs/outputs; if none passes, the "
+                         "lowest-metallicity unseeded star hosts it (SecFOFseedHostZcrit=1)",
+                         param_get_double(ps, "SeedBlackHoleMass"), CW_WIND_MEXP, CW_WIND_ZEXP);
+            else
+                snprintf(mask, sizeof(mask), "no metallicity mask (SecFOFseedHostZcrit=0)");
+            message(0, "secFOF seed host search: %s; the seed goes to the largest-key star of that set. "
+                       "%s. Ranking/mask only: seeding budgets, cluster draws, gates and seed masses "
+                       "are unchanged.\n",
+                    fof_params.SeedInSecFOFRandomStarParticle
+                        ? "per-cluster hosts are drawn at RANDOM (SeedInSecFOFRandomStarParticle=1); "
+                          "the Z-weighted key only moves the group reference star / RNG seed"
+                        : key, mask);
+            if(fof_params.SecFOFseedHostZcrit)
+                message(0, "SecFOFseedHostZcrit=1: the per-cluster host gather keeps EVERY unseeded "
+                           "(bound) star of a requesting group, not just the top n_request by key, "
+                           "so a masked pick can reach below the ranking cut. MinBHSeedInSC "
+                           "compensating seeds are not masked (they carry no per-cluster M_VMS).\n");
+        }
+        else if(fof_params.SecFOFseedHostZFloor > 0)
+            message(0, "SecFOFseedHostZFloor=%g is set but SecFOFseedHostZBeta <= 0: the floor "
+                       "only acts on the Z-weighted ranking and has no effect in this run.\n",
+                    fof_params.SecFOFseedHostZFloor);
         fof_params.CWmodelAlpha = param_get_double(ps, "CWmodelAlpha");
         /* CWmodelMetallicity: string -> mode; -1 keeps the unrecognised value an
          * error below when the CW model is actually enabled. */
@@ -1652,12 +1735,16 @@ static void fof_reduce_base_group(void * pdst, void * psrc) {
 }
 
 /* Z-dependent host-star ranking weight (SecFOFseedHostZBeta > 0): multiplies the
- * Gamma*m_star ranking key by Z^-beta, Z = the star's frozen BirthMetallicity
- * floored at 10^SC_MET_HIST_LOGMIN (the same pristine-star floor the unseeded-star
- * metallicity statistics use), so metal-poor stars are preferred as seed hosts at
- * fixed cluster-forming mass.  Any constant normalisation of Z cancels in a
- * ranking, so the absolute mass fraction is used directly.  Returns exactly 1 when
- * the feature is off (beta <= 0), keeping every ranking the raw Gamma*m_star one.
+ * Gamma*m_star ranking key by max(Z, Zfloor)^-beta, Z = the star's frozen
+ * BirthMetallicity.  Zfloor is the pristine-star floor 10^SC_MET_HIST_LOGMIN (the
+ * same one the unseeded-star metallicity statistics use), raised to
+ * SecFOFseedHostZFloor (converted to an absolute mass fraction at parameter time)
+ * when that is set: every star below the floor then gets the same weight and the
+ * raw Gamma*m_star decides among them, which keeps the Z-preference from being
+ * dominated by the rare very-metal-poor stars of the outskirts.  Any constant
+ * normalisation of Z cancels in a ranking, so the absolute mass fraction is used
+ * directly.  Returns exactly 1 when the feature is off (beta <= 0), keeping every
+ * ranking the raw Gamma*m_star one.
  * RANKING ONLY: no caller may feed a weighted key into a mass sum, budget or gate. */
 static inline double
 sc_seed_host_zweight(double zbirth)
@@ -1665,7 +1752,9 @@ sc_seed_host_zweight(double zbirth)
     const double beta = fof_params.SecFOFseedHostZBeta;
     if(beta <= 0)
         return 1;
-    const double zfloor = pow(10.0, SC_MET_HIST_LOGMIN);
+    double zfloor = pow(10.0, SC_MET_HIST_LOGMIN);
+    if(fof_params.SecFOFseedHostZFloorAbs > zfloor)
+        zfloor = fof_params.SecFOFseedHostZFloorAbs;
     if(!(zbirth > zfloor))
         zbirth = zfloor;
     return pow(zbirth, -beta);
@@ -3721,6 +3810,9 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
     const double comp_min = min_bh_seed_in_sc_code();
     const double comp_unit = get_bh_seed_mass();
     const int comp_on = secfof_percluster_seeding() && comp_min > 0 && comp_unit > 0;
+    /* SecFOFseedHostZcrit: host mask Z_star <= Z_crit(cluster) for the ordinary seeds
+     * (parameter-only, validated at startup to imply MbhMscRelationCWmodel=1). */
+    const int zcrit_on = fof_params.SecFOFseedHostZcrit != 0;
     /* The sub-MinMscForBHseed redraw serves the detail records and the compensation sum;
      * run it over the union of their windows.  A cluster lighter than comp_min cannot
      * contribute, because cw_seed_mass_code caps M_VMS at the cluster mass. */
@@ -3931,6 +4023,13 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
             if(gi >= 0)
                 limit = (all_rsg[gi].n_request < all_rsg[gi].nstar_unseeded) ?
                         all_rsg[gi].n_request : all_rsg[gi].nstar_unseeded;
+            /* SecFOFseedHostZcrit: the masked pick is "largest key among the stars with
+             * Z <= Z_crit", and Z_crit is only known per cluster in phase 3, so the
+             * global top-n_request by key is no longer a superset of the possible hosts.
+             * Gather every seedable star of a requesting group instead (the fallback,
+             * the lowest-Z unseeded star, needs the whole pool too). */
+            if(zcrit_on && gi >= 0 && all_rsg[gi].n_request >= 1)
+                limit = all_rsg[gi].nstar_unseeded;
             /* MinMscForSCdetail / MinBHSeedInSC: a group whose draw produced no seeding
              * cluster still needs one candidate gathered, to serve as the reference star
              * of its sub-threshold pass.  Seeding is unaffected: a group with
@@ -3971,6 +4070,16 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
      * compensating-seed counts are identical everywhere without a second collective. */
     double * miss = (double *) mymalloc("RSmiss", 2 * (n_msg > 0 ? n_msg : 1) * sizeof(double));
     memset(miss, 0, 2 * (n_msg > 0 ? n_msg : 1) * sizeof(double));
+    /* SecFOFseedHostZcrit: per-candidate "already hosts a seed" flags.  The unmasked
+     * path consumes candidates in key order through the cursor h and needs none; the
+     * masked pick can take any unused candidate, so it has to remember which are gone.
+     * Allocated on top of miss (freed right before it) so the LIFO order holds. */
+    char * host_used = NULL;
+    if(zcrit_on) {
+        host_used = (char *) mymalloc("RSused", (n_call > 0 ? n_call : 1) * sizeof(char));
+        memset(host_used, 0, (n_call > 0 ? n_call : 1) * sizeof(char));
+    }
+    int64_t n_zcrit_bind = 0, n_zcrit_fallback = 0;   /* SecFOFseedHostZcrit statistics */
     int ac = 0;
     for(i = 0; i < n_msg; i++) {
         struct rs_group * m = &all_rsg[i];
@@ -3990,7 +4099,8 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         int nsel = m->n_request;
         int h = 0;
         int n_unhosted = 0;     /* cleared SeedBlackHoleMass but the group had no star left */
-        /* The group's reference star: host of its most massive cluster, and the single
+        /* The group's reference star: the largest-key candidate (host of its most massive
+         * seeding cluster unless SecFOFseedHostZcrit masks it away), and the single
          * writer of everything that belongs to the group rather than to one cluster. */
         const int is_ref_owner = (navail > 0) && (allc[bstart].owner_task == ThisTask);
 
@@ -4028,6 +4138,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
              * the Seeded=1 marking below, which is a per-GROUP decision.
              * Computed identically on every rank. */
             MyFloat seed_mass_override = 0;
+            double mvms_seed = 0;   /* this cluster's M_VMS in code units (SecFOFseedHostZcrit) */
             /* Metallicity written to this cluster's StarClusterDetails record:
              * the Z actually fed to the CW model (= met_unseeded in 'ave' mode
              * and outside the CW model). */
@@ -4064,6 +4175,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                     continue;
                 }
                 seed_mass_override = (MyFloat) mvms_code;
+                mvms_seed = mvms_code;
             }
             /* The cluster cleared the gate, so NOW it wants a host star -- and only now
              * does the cursor advance.  If the group has none left the seed is simply
@@ -4071,7 +4183,45 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
              * and this is reported at group level below instead), and no contribution to
              * the compensating-seed missed mass, which could not be placed either. */
             if(h >= navail) { n_unhosted++; continue; }
-            struct rs_cand * cc = &allc[bstart + h];
+            struct rs_cand * cc;
+            if(!zcrit_on) {
+                cc = &allc[bstart + h];
+            }
+            else {
+                /* SecFOFseedHostZcrit: the largest-key UNUSED candidate whose frozen
+                 * BirthMetallicity is at or below this cluster's Z_crit = Z_cl (M_VMS /
+                 * SeedBlackHoleMass)^(2.1/0.74) -- the metallicity at which this same
+                 * cluster would just have reached the seed-mass floor, so the host is a
+                 * star whose environment could have made this seed.  If no unused star
+                 * passes, fall back to the lowest-metallicity unused one (the closest
+                 * to satisfying the gate).  The candidates are sorted by key (largest
+                 * first), so the first unused one that passes is the pick; the linear
+                 * scans run only for the (few) clusters that clear the M_VMS gate.
+                 * (mvms_seed > 0 here: it cleared seed_mass_floor_code > 0.) */
+                double zcrit = cw_host_zcrit_massfrac(z_record, mvms_seed, seed_mass_floor_code);
+                int k, kpick = -1, kfirst = -1;
+                for(k = 0; k < navail; k++) {
+                    if(host_used[bstart + k]) continue;
+                    if(kfirst < 0) kfirst = k;      /* what the unmasked rule would pick */
+                    if((double) allc[bstart + k].metallicity <= zcrit) { kpick = k; break; }
+                }
+                if(kpick < 0) {
+                    /* nobody passes: lowest Z among the unused (ties: first in key order) */
+                    double zmin = 0;
+                    for(k = 0; k < navail; k++) {
+                        if(host_used[bstart + k]) continue;
+                        if(kpick < 0 || (double) allc[bstart + k].metallicity < zmin) {
+                            kpick = k;
+                            zmin = allc[bstart + k].metallicity;
+                        }
+                    }
+                    n_zcrit_fallback++;
+                }
+                else if(kpick != kfirst)
+                    n_zcrit_bind++;     /* the mask changed the pick */
+                host_used[bstart + kpick] = 1;
+                cc = &allc[bstart + kpick];
+            }
             h++;
             if(cc->owner_task == ThisTask) {
                 MyFloat payload = bhdyn ? (MyFloat) m_sc : 0;   /* StarClusterMass (dynamics + evolution) */
@@ -4128,7 +4278,12 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         message(0, "secFOF per-cluster seeding: %d group(s); placed %ld BH seed(s) (CW-model VMS masses); "
                    "%ld cluster(s) skipped with M_VMS < SeedBlackHoleMass; %ld group(s) short of unseeded stars.\n",
                 n_msg, n_placed, n_novms, n_short);
-    else
+    if(zcrit_on)
+        message(0, "secFOF per-cluster seeding (SecFOFseedHostZcrit=1): of %ld placed seed(s), the "
+                   "Z_star <= Z_crit mask moved %ld off the largest-key star, and %ld found no star "
+                   "below Z_crit (lowest-Z host used); %d candidate star(s) gathered.\n",
+                n_placed, n_zcrit_bind, n_zcrit_fallback, n_call);
+    if(!fof_params.MbhMscRelationCWmodel)
         message(0, "secFOF per-cluster seeding: %d group(s); placed %ld BH seed(s); %ld group(s) short of unseeded stars.\n",
                 n_msg, n_placed, n_short);
     (void) n_conv_local;
@@ -4349,6 +4504,8 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         myfree(crc_c);
         myfree(elig_c);
     }
+    if(host_used)
+        myfree(host_used);
     myfree(miss);
     myfree(allc);
     myfree(cbd);

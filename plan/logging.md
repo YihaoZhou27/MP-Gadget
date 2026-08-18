@@ -1,5 +1,27 @@
 # MP-Gadget Development Log
 
+## 2026-08-18 — Cluster formation efficiency capped at Gamma <= 1
+
+`get_cluster_formation_efficiency()` (Kruijssen 2012 P/k_B -> CFE table, log-log linear with extrapolation) now caps its return value at 1. Beyond the last tabulated point (P/k_B = 6.3e9 K cm^-3, CFE = 0.952) the extrapolated last segment kept rising and gave Gamma > 1 for birth pressures above 2.2e10 K cm^-3 — in the SC-norecoil paper run ~0.3% of all star particles at z=6 (up to Gamma = 1.12), all born from the densest nuclear gas at z < 8.3. Gamma is a mass fraction, so it is now clamped; the change touches every user of the function (star `ClusterFormationEfficiency` / `ClusterMass` at formation and the gas-side CFE used for `SumSFRdtCFE`). Effect on the star-cluster mass budget is < 0.1%; runs whose gas never exceeds that pressure are bit-for-bit unchanged.
+
+Compiles clean. Not committed.
+
+## 2026-08-16 (later) — `SecFOFseedHostZcrit`: per-cluster critical-metallicity mask on the seed host star
+
+New optional parameter `SecFOFseedHostZcrit` (0/1, default 0). When 1, in the per-cluster CW-model seeding path the star particle that hosts each ordinary BH seed must have frozen BirthMetallicity at or below the cluster's own critical metallicity `Z_crit = Z_cl (M_VMS / SeedBlackHoleMass)^(2.1/0.74)` — the metallicity at which that same cluster (mass, radius, age fixed) would just have reached the seed-mass floor, from the Vink-wind equilibrium behind the CW model (`M_VMS ~ Z^-0.352` at fixed cluster). Among the passing stars the existing ranking decides (raw `Gamma*m_star`, or the `SecFOFseedHostZBeta`/`SecFOFseedHostZFloor` Z-weighted key — the two features combine, mask first then Z-weighted ranking among the survivors — or the random key), and if no unseeded star of the group passes, the lowest-metallicity unseeded star hosts the seed (fallback). Motivated by the post-hoc host-rule notebook: the Z-weighted ranking alone puts seeds in the metal-poor outskirts, while the per-seed Z_crit mask brings them back to ~R50 with the host consistent with its own cluster's gate.
+
+Mechanics worth knowing: the exponents 2.1/0.74 now live in `cwmodel.h` (`CW_WIND_MEXP`, `CW_WIND_ZEXP`, used by the model's own equilibrium, so the two cannot drift apart) together with the helper `cw_host_zcrit_massfrac()`. With the mask on, the per-cluster host gather keeps EVERY unseeded (bound) star of a requesting group instead of the top n_request by key, since the masked pick can lie below the ranking cut (in runs with a tiny MinMscForBHseed the gather already held every star, so nothing changes there; with the default MinMscForBHseed it grows to the requesting groups' unseeded-star count). Density-capped clusters and clusters with M_VMS capped at the cluster mass use the same formula on the capped M_VMS, which only lowers Z_crit. MinBHSeedInSC compensating seeds carry no per-cluster M_VMS and are not masked. Requires the per-cluster mode with `MbhMscRelationCWmodel=1` (an error otherwise). MASK ONLY: budgets, cluster draws, gates and seed masses are untouched; the group reference star (SeedStarID / RNG seed) is unchanged. Whenever `SecFOFseedHostZcrit=1` or `SecFOFseedHostZBeta>0` the startup log now prints one message describing the full host-search criterion (ranking key, floor, mask, fallback), and each seeding pass reports how many placed seeds the mask moved off the largest-key star and how many fell back.
+
+Compiles clean; `test_fof` passes; default-off runs are bit-for-bit unaffected. Not committed.
+
+## 2026-08-16 — `SecFOFseedHostZFloor`: metallicity floor for the Z-weighted host ranking
+
+New optional parameter `SecFOFseedHostZFloor` (default 0, in units of solar metallicity with Zsun = 0.0134, the CW seed-mass model's value). When > 0 together with `SecFOFseedHostZBeta` > 0, the host-star ranking key becomes `Gamma*m_star * max(Z, Zfloor)^-beta`: every unseeded star below the floor gets the same weight, so the raw `Gamma*m_star` decides among the sub-floor stars and only stars above the floor are penalised for their metals. When <= 0 only the pristine 10^-7 floor applies and the ranking is unchanged from the existing `SecFOFseedHostZBeta` behaviour; the parameter is inert (with a message) when `SecFOFseedHostZBeta` <= 0. Implemented at the single ranking-weight chokepoint, so all host-selection sites pick it up; ranking only, budgets/draws/gates/seed masses untouched.
+
+Motivation from the post-hoc host-rule notebook: without a floor the Z^-beta key is dominated by the rare very-metal-poor outskirt stars (Gamma*m_star varies by ~10% across the galaxy, Z by 2-3 dex in its tail), so seeds land at 2-3 R50 even at z ~ 11-13; a ~0.1 Zsun floor keeps them central while the galaxy is metal-poor and lets them drift outward as the local Z rises above the floor.
+
+Compiles clean; default-off runs are unaffected. Not committed.
+
 ## 2026-08-13 (late) — `SecFOFseedHostZBeta`: Z-dependent host-star ranking for BH seeding
 
 New optional parameter `SecFOFseedHostZBeta` (default 0). When > 0, every *ranked* choice of which unseeded star particle converts into a BH seed uses the proxy `Gamma*m_star * Z^-beta` (Z = the star's frozen birth metallicity, pristine stars floored at the metallicity histogram's floor) instead of the raw `Gamma*m_star`, so metal-poor stars are preferred as seed hosts at fixed cluster-forming mass. When <= 0 the ranking — and the whole run — is bit-for-bit the historical behavior.

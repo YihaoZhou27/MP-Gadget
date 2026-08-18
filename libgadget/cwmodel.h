@@ -37,4 +37,22 @@
 double cw_final_vms_mass_msun(double M_msun, double r_max_pc, double Z_massfrac,
                               double t_universe_sec, double alpha);
 
+/* Vink-2018 wind law behind the equilibrium (1-f_vms) Mdot_in = C M^CW_WIND_MEXP,
+ * C = 10^-9.13 (Z/Zsun)^CW_WIND_ZEXP: at fixed cluster (mass, radius, age) the
+ * inflow is Z-independent, so M_VMS ~ Z^-(CW_WIND_ZEXP/CW_WIND_MEXP). */
+#define CW_WIND_MEXP 2.1
+#define CW_WIND_ZEXP 0.74
+
+/* Critical metallicity for the SecFOFseedHostZcrit host mask: the metallicity at
+ * which the SAME cluster (mass, radius, age fixed) would have had M_VMS = M_thr,
+ *     Z_crit = Z_cl * (M_vms / M_thr)^(CW_WIND_MEXP/CW_WIND_ZEXP),
+ * i.e. a star of metallicity Z <= Z_crit could have made a seed of at least M_thr
+ * out of this cluster.  Inputs: the cluster metallicity Z_cl actually fed to the
+ * model (absolute mass fraction) and the resulting M_vms and the threshold M_thr
+ * in the same (any) mass units; returns Z_crit as an absolute mass fraction.
+ * Note the equilibrium scaling does not hold for a density-capped cluster
+ * (0.01 M_cl bypass) or one whose M_VMS was capped at M_cl; the formula is
+ * applied to the capped value anyway, which only lowers Z_crit (a stricter mask). */
+double cw_host_zcrit_massfrac(double Z_cl_massfrac, double M_vms, double M_thr);
+
 #endif
