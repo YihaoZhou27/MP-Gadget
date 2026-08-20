@@ -973,8 +973,8 @@ static int fof_grid_preflight(MPI_Comm Comm)
     MPI_Comm_size(Comm, &NTask);
 
     /* (0) Geometry.  Some linking lengths need more cells per axis than a
-     * 64-bit key can address -- e.g. the SecondFOFLinkingLength default of 0.01
-     * in a 12500 box needs 2165064.  Checked HERE rather than in the linker so
+     * 64-bit key can address -- e.g. a second-FOF linking length of 0.01 code
+     * units in a 12500 box needs 2165064.  Checked HERE rather than in the linker so
      * an unsupported geometry collectively selects the treewalk instead of
      * aborting the run.  l and BoxSize are identical on every rank, so this
      * early return is uniform and cannot deadlock the reductions below. */

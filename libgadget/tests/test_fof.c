@@ -647,7 +647,7 @@ test_fof_grid_geometry(void **state)
 }
 /* A linking length too small to grid must fall back to the treewalk, NOT
  * abort. The cell key is int64, so a box needing more than ~2.1e6 cells per
- * axis cannot be addressed; SecondFOFLinkingLength's default of 0.01 in a
+ * axis cannot be addressed; a second-FOF linking length of 0.01 code units in a
  * 12500 box needs 2165064 and is reachable from a valid configuration. The
  * geometry check lives in the collective preflight for exactly this reason --
  * if it ever migrates back into the linker, this test aborts the suite. */

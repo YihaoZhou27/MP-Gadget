@@ -7,6 +7,10 @@
 #include "fof.h"
 
 void set_secondfof_params(ParameterSet * ps);
+/* Turn SecondFOFLinkingLength (in units of the mean DM interparticle
+ * separation) into the comoving code-unit length used by the FOF engine.
+ * Call once at startup, alongside fof_init(). */
+void secondfof_init(double DMMeanSeparation);
 int get_secondfof_on(void);
 const char * get_secondfof_filebase(void);
 int get_secondfof_only(void);

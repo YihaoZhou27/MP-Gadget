@@ -31,7 +31,8 @@ struct SecondFOFParams {
     int SecondFOFOn;
     int PrimaryLinkTypes;
     int SecondaryLinkTypes;
-    double LinkingLength;   /* comoving, in code units (kpc/h) */
+    double LinkingLength;   /* in units of the mean DM interparticle separation */
+    double ComovingLinkingLength;  /* derived: LinkingLength * DMMeanSeparation, comoving code units (kpc/h) */
     int MinLength;
     int MinPrimaryLength;   /* drop groups with fewer primary-link particles from the catalog (0 = off) */
     int ComputeSize;        /* compute R50, R90, Rmax */
@@ -140,6 +141,20 @@ void set_secondfof_params(ParameterSet * ps)
     if(sfof_params.SeedInSecFOFasStarCluster) {
         fof_set_seed_params(0, 0, 0);
     }
+}
+
+/* Convert the dimensionless SecondFOFLinkingLength into the comoving code-unit
+ * length the FOF engine actually consumes.  Mirrors fof_init(): the reference
+ * scale is the mean DM interparticle separation BoxSize / NTotalInit[1]^(1/3),
+ * so the same parameter value means the same thing at every resolution.
+ * Must be called after set_secondfof_params() (which broadcasts LinkingLength)
+ * and before any secondfof_run()/secondfof_seed(). */
+void secondfof_init(double DMMeanSeparation)
+{
+    sfof_params.ComovingLinkingLength = sfof_params.LinkingLength * DMMeanSeparation;
+    if(sfof_params.SecondFOFOn)
+        message(0, "Second FOF linking length: %g x mean DM separation (%g) = %g comoving code units.\n",
+                   sfof_params.LinkingLength, DMMeanSeparation, sfof_params.ComovingLinkingLength);
 }
 
 int get_secondfof_on(void)
@@ -889,12 +904,17 @@ static void secondfof_write_header(BigFile * bf, int64_t TotNgroups, const doubl
     big_block_set_attr(&bh, "UsePeculiarVelocity", &pecvel, "i4", 1);
 
     /* Second FOF specific attributes */
-    double ll = sfof_params.LinkingLength;
+    /* SecondFOFLinkingLength is written in comoving code units (kpc/h) as it
+     * always has been, so existing analysis of older catalogues keeps working;
+     * SecondFOFLinkingLengthMeanSep records the dimensionless parameter value. */
+    double ll = sfof_params.ComovingLinkingLength;
+    double llmeansep = sfof_params.LinkingLength;
     int minlen = sfof_params.MinLength;
     int minprimlen = sfof_params.MinPrimaryLength;
     int primary = sfof_params.PrimaryLinkTypes;
     int secondary = sfof_params.SecondaryLinkTypes;
     big_block_set_attr(&bh, "SecondFOFLinkingLength", &ll, "f8", 1);
+    big_block_set_attr(&bh, "SecondFOFLinkingLengthMeanSep", &llmeansep, "f8", 1);
     big_block_set_attr(&bh, "SecondFOFMinLength", &minlen, "i4", 1);
     big_block_set_attr(&bh, "SecondFOFMinPrimaryLength", &minprimlen, "i4", 1);
     big_block_set_attr(&bh, "SecondFOFPrimaryLinkTypes", &primary, "i4", 1);
@@ -923,6 +943,10 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
     int i;
     message(0, "Seeding black holes using secondary FOF catalog (StarCluster criteria).\n");
 
+    if(sfof_params.ComovingLinkingLength <= 0)
+        endrun(1, "Second FOF comoving linking length is %g; secondfof_init() was not called or SecondFOFLinkingLength <= 0.\n",
+                  sfof_params.ComovingLinkingLength);
+
     /* Save current FOF parameters */
     int save_PrimaryLT, save_SecondaryLT, save_MinLen, save_PotMin, save_MinPrimLen;
     double save_LinkLen;
@@ -937,7 +961,7 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
      * MinPrimaryLength drops groups with too few primary-link particles so they
      * are not counted as a FOF at all (excluded from both seeding and the catalog). */
     fof_set_params(sfof_params.PrimaryLinkTypes, sfof_params.SecondaryLinkTypes,
-                   sfof_params.LinkingLength, sfof_params.MinLength, 1,
+                   sfof_params.ComovingLinkingLength, sfof_params.MinLength, 1,
                    sfof_params.MinPrimaryLength);
 
     /* Override seeding params: only StarCluster-based seeding in sec FOF */
@@ -1111,6 +1135,10 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential,
     if(!sfof_params.SecondFOFOn)
         return NULL;
 
+    if(sfof_params.ComovingLinkingLength <= 0)
+        endrun(1, "Second FOF comoving linking length is %g; secondfof_init() was not called or SecondFOFLinkingLength <= 0.\n",
+                  sfof_params.ComovingLinkingLength);
+
     message(0, "Begin second FOF (star-primary) computation.\n");
 
     /* Step 1: Save current FOF parameters */
@@ -1131,7 +1159,7 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential,
      * MinPrimaryLength drops groups with too few primary-link particles from
      * the catalog (their particles get GrNr=-1 and are excluded automatically). */
     fof_set_params(sfof_params.PrimaryLinkTypes, sfof_params.SecondaryLinkTypes,
-                   sfof_params.LinkingLength, sfof_params.MinLength, OutputPotential,
+                   sfof_params.ComovingLinkingLength, sfof_params.MinLength, OutputPotential,
                    sfof_params.MinPrimaryLength);
 
     /* When enabled, restrict the primary-linking set to unseeded stars for the

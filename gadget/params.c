@@ -220,7 +220,7 @@ create_gadget_parameter_set()
     param_declare_int(ps, "SecondFOFOn", OPTIONAL, 0, "Enable second FOF pass for star clusters.");
     param_declare_int(ps, "SecondFOFPrimaryLinkTypes", OPTIONAL, 16, "2^ particle types for primary linking in second FOF.");
     param_declare_int(ps, "SecondFOFSecondaryLinkTypes", OPTIONAL, 1, "2^ particle types for secondary linking in second FOF.");
-    param_declare_double(ps, "SecondFOFLinkingLength", OPTIONAL, 0.01, "Comoving linking length for second FOF in code units (kpc/h).");
+    param_declare_double(ps, "SecondFOFLinkingLength", OPTIONAL, 0.1, "Linking length for the second FOF, in units of the mean DM interparticle separation (same convention as FOFHaloLinkingLength). Multiplied internally by BoxSize / NTotalInit[1]^(1/3) to get the comoving code-unit length.");
     param_declare_int(ps, "SecondFOFMinLength", OPTIONAL, 32, "Minimum particle count per group in second FOF.");
     param_declare_int(ps, "SecondFOFMinPrimaryLength", OPTIONAL, 0, "Minimum number of primary-linking-type particles per group in second FOF. Groups with fewer primary particles are dropped from the SecPIG catalog. 0 disables the filter.");
     param_declare_string(ps, "SecondFOFFileBase", OPTIONAL, "SecPIG", "Base name of the second FOF catalog files.");

@@ -18,6 +18,7 @@
 #include "sfr_eff.h"
 #include "exchange.h"
 #include "fof.h"
+#include "secondfof.h"
 #include "timestep.h"
 #include "timebinmgr.h"
 #include "cosmology.h"
@@ -116,6 +117,7 @@ inttime_t init(int RestartSnapNum, const char * OutputDir, struct header_data * 
 
     gravshort_set_softenings(MeanSeparation[1]);
     fof_init(MeanSeparation[1]);
+    secondfof_init(MeanSeparation[1]);
 
     inttime_t Ti_Current = init_timebins(header->TimeSnapshot);
 

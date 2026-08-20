@@ -1,5 +1,15 @@
 # MP-Gadget Development Log
 
+## 2026-08-18 (later) — `SecondFOFLinkingLength` now in units of the mean DM particle separation
+
+**Breaking parameter-file change.** `SecondFOFLinkingLength` used to be an absolute comoving length in code units (ckpc/h); it is now a dimensionless multiple of the mean DM interparticle separation `BoxSize / NTotalInit[1]^(1/3)`, exactly the convention `FOFHaloLinkingLength` already uses. The conversion happens once at startup in a new `secondfof_init()` called next to `fof_init()`, and the derived comoving length is what the FOF engine receives; a startup message prints parameter, mean separation and resulting comoving length. Default raised from 0.01 to 0.1.
+
+Every existing parameter file must be converted: divide the old value by the mean DM separation of that run. For the 12.5 Mpc/h, 512^3 paper runs the separation is 24.4140625 ckpc/h, so the production `SecondFOFLinkingLength = 2.44` becomes `0.1` (and 1.22 -> 0.05) — the same physical linking as before. Runs left at an unconverted absolute value would link on a scale ~24x too large.
+
+Catalogue headers are unchanged for existing analysis: the `SecondFOFLinkingLength` attribute in `SecPIG` still holds the comoving code-unit length, with the new attribute `SecondFOFLinkingLengthMeanSep` recording the dimensionless parameter value alongside it.
+
+Compiles clean. Not committed.
+
 ## 2026-08-18 — Cluster formation efficiency capped at Gamma <= 1
 
 `get_cluster_formation_efficiency()` (Kruijssen 2012 P/k_B -> CFE table, log-log linear with extrapolation) now caps its return value at 1. Beyond the last tabulated point (P/k_B = 6.3e9 K cm^-3, CFE = 0.952) the extrapolated last segment kept rising and gave Gamma > 1 for birth pressures above 2.2e10 K cm^-3 — in the SC-norecoil paper run ~0.3% of all star particles at z=6 (up to Gamma = 1.12), all born from the densest nuclear gas at z < 8.3. Gamma is a mass fraction, so it is now clamped; the change touches every user of the function (star `ClusterFormationEfficiency` / `ClusterMass` at formation and the gas-side CFE used for `SumSFRdtCFE`). Effect on the star-cluster mass budget is < 0.1%; runs whose gas never exceeds that pressure are bit-for-bit unchanged.
