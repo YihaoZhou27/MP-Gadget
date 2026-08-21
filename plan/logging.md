@@ -1,5 +1,13 @@
 # MP-Gadget Development Log
 
+## 2026-08-20 — `CWmodelSeedMassCap`: upper limit on the CW-model seed mass, 1% of the cluster above it
+
+New optional parameters `CWmodelSeedMassCap` (physical Msun, default 1e6; 0 disables) and `CWmodelSeedMassCapFrac` (default 0.01). With `MbhMscRelationCWmodel=1`, a sampled cluster whose Williams et al. 2026 model M_VMS (after the existing cap at the cluster mass) exceeds `CWmodelSeedMassCap` no longer seeds a BH of mass M_VMS: its seed mass becomes `CWmodelSeedMassCapFrac` times the cluster mass, the same fixed-fraction fallback the model already uses for clusters above its mean-density cap. Motivated by the SC-recoil paper run, whose largest seed (1.5e6 Msun at z=9.87) came from a 9.5e7 Msun cluster with a -2.8 sigma compact radius draw (R_eff=0.56 pc); under the cap that seed is 9.5e5 Msun. With the ICMF ceiling at 1e8 Msun the replacement never exceeds 1e6 Msun.
+
+The cap sits at the single per-cluster seed-mass chokepoint, so the seeding path, the StarClusterDetails `Mbh_seed` records and the MinBHSeedInSC missed-mass sum all see the same capped number; the `SecFOFseedHostZcrit` host mask is evaluated on the capped M_VMS (a stricter mask, as for density-capped clusters). The startup log states the active cap, and each seeding pass reports how many placed seeds it replaced. NOTE the default is ON at 1e6 Msun, so existing CW-model parameter files pick it up without edits; set `CWmodelSeedMassCap = 0` to recover the previous behaviour.
+
+Compiles clean. Not committed.
+
 ## 2026-08-18 (later) — `SecondFOFLinkingLength` now in units of the mean DM particle separation
 
 **Breaking parameter-file change.** `SecondFOFLinkingLength` used to be an absolute comoving length in code units (ckpc/h); it is now a dimensionless multiple of the mean DM interparticle separation `BoxSize / NTotalInit[1]^(1/3)`, exactly the convention `FOFHaloLinkingLength` already uses. The conversion happens once at startup in a new `secondfof_init()` called next to `fof_init()`, and the derived comoving length is what the FOF engine receives; a startup message prints parameter, mean separation and resulting comoving length. Default raised from 0.01 to 0.1.

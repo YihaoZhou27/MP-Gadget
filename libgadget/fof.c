@@ -137,6 +137,11 @@ struct FOFParams
      * (CW_MET_* below); -1 = unrecognised string (an error when
      * MbhMscRelationCWmodel=1). Only used when MbhMscRelationCWmodel=1. */
     int CWmodelMetallicity;
+    /* CWmodelSeedMassCap (physical Msun; <= 0 disables) and CWmodelSeedMassCapFrac:
+     * a cluster whose CW-model M_VMS exceeds the cap seeds CWmodelSeedMassCapFrac *
+     * m_sc instead of M_VMS.  Only used when MbhMscRelationCWmodel=1. */
+    double CWmodelSeedMassCap;
+    double CWmodelSeedMassCapFrac;
     /* if 1, a secFOF group with unseeded Sum(m*Gamma) > 1e8 Msun is restricted to
      * the gravitationally bound unseeded stars before SeedSecFOFcomSample seeding */
     int SeedSeedFOFMassiveBoundStar;
@@ -288,6 +293,8 @@ void set_fof_params(ParameterSet * ps)
             fof_params.CWmodelMetallicity = CW_MET_STARSAMPLE;
         else
             fof_params.CWmodelMetallicity = -1;
+        fof_params.CWmodelSeedMassCap = param_get_double(ps, "CWmodelSeedMassCap");
+        fof_params.CWmodelSeedMassCapFrac = param_get_double(ps, "CWmodelSeedMassCapFrac");
         fof_params.SeedSeedFOFMassiveBoundStar = param_get_int(ps, "SeedSeedFOFMassiveBoundStar");
         fof_params.BHseedSecFOFbound = param_get_int(ps, "BHseedSecFOFbound");
         if(fof_params.BHseedSecFOFbound < 0 || fof_params.BHseedSecFOFbound > 2)
@@ -366,6 +373,18 @@ void set_fof_params(ParameterSet * ps)
         if(fof_params.MbhMscRelationCWmodel && fof_params.CWmodelMetallicity < 0)
             endrun(1, "CWmodelMetallicity must be 'ave', 'lognormal', 'uniform' or "
                       "'starsample'; got '%s'.\n", cwmet);
+        if(fof_params.MbhMscRelationCWmodel && fof_params.CWmodelSeedMassCap > 0) {
+            if(fof_params.CWmodelSeedMassCapFrac <= 0 || fof_params.CWmodelSeedMassCapFrac > 1)
+                endrun(1, "CWmodelSeedMassCapFrac must be in (0, 1]; got %g.\n",
+                       fof_params.CWmodelSeedMassCapFrac);
+            message(0, "MbhMscRelationCWmodel=1: a cluster whose CW-model M_VMS exceeds "
+                       "CWmodelSeedMassCap = %g Msun seeds CWmodelSeedMassCapFrac = %g of its "
+                       "cluster mass instead.\n",
+                    fof_params.CWmodelSeedMassCap, fof_params.CWmodelSeedMassCapFrac);
+        }
+        else if(fof_params.MbhMscRelationCWmodel)
+            message(0, "MbhMscRelationCWmodel=1: CWmodelSeedMassCap <= 0, CW-model seed masses are "
+                       "not capped.\n");
         if(fof_params.MbhMscRelationCWmodel && fof_params.BHseedMassScaleMsc)
             message(0, "MbhMscRelationCWmodel=1: BHseedMassScaleMsc=1 is ignored; the seed mass is "
                        "M_VMS from the CW model, with SeedBlackHoleMass as the lower seed-mass limit.\n");
@@ -3710,11 +3729,17 @@ static int64_t secfof_count_random_seed_ub(FOFGroups * fof, const RandTable * co
  * radius; z_cw the metallicity fed to the model; t_uni_sec the age of the universe at
  * seeding; thresh_code the 1e8 Msun code-mass yardstick used for the code<->Msun
  * conversion.  Capped at the cluster mass -- the VMS cannot outweigh its host cluster.
+ * CWmodelSeedMassCap (> 0): a cluster whose M_VMS, after that cap, still exceeds
+ * CWmodelSeedMassCap (physical Msun) does not seed M_VMS but CWmodelSeedMassCapFrac *
+ * m_sc -- the same fixed-fraction fallback the model itself applies above its
+ * mean-density cap.  `capped` (may be NULL) reports whether that replacement fired.
  * Shared by the seeding path and the StarClusterDetails records so the recorded mass is
  * by construction the same number the seeder would use for that cluster. */
 static double cw_seed_mass_code(double m_sc, double reff_pc, double z_cw,
-                                double t_uni_sec, double thresh_code)
+                                double t_uni_sec, double thresh_code, int * capped)
 {
+    if(capped)
+        *capped = 0;
     if(!fof_params.MbhMscRelationCWmodel || thresh_code <= 0)
         return 0;
     double m_sc_msun = m_sc / thresh_code * 1e8;
@@ -3722,6 +3747,11 @@ static double cw_seed_mass_code(double m_sc, double reff_pc, double z_cw,
                                               fof_params.CWmodelAlpha);
     if(mvms_msun > m_sc_msun)         /* the VMS cannot exceed its host cluster */
         mvms_msun = m_sc_msun;
+    if(fof_params.CWmodelSeedMassCap > 0 && mvms_msun > fof_params.CWmodelSeedMassCap) {
+        mvms_msun = fof_params.CWmodelSeedMassCapFrac * m_sc_msun;
+        if(capped)
+            *capped = 1;
+    }
     return mvms_msun / 1e8 * thresh_code;
 }
 
@@ -3765,7 +3795,7 @@ static void sc_detail_record_cluster(double mass, int draw_index, void * data)
     uint64_t key = c->refid + 0x9E3779B97F4A7C15ULL * (uint64_t)(draw_index + 1);
     double reff_pc = starcluster_sample_reff_pc(mass, key, c->rnd);
     double z_record = cw_sample_cluster_met(m, key, c->rnd);
-    double mvms_code = cw_seed_mass_code(mass, reff_pc, z_record, c->t_uni_sec, c->thresh_code);
+    double mvms_code = cw_seed_mass_code(mass, reff_pc, z_record, c->t_uni_sec, c->thresh_code, NULL);
     if(c->record_on && mass >= c->record_lo) {
         scinfo_record_cluster(c->refid, c->refpos, c->atime, mass, m->sc_mass_total,
                               m->stellar_mass_total, m->scmass_seeded, z_record, reff_pc,
@@ -4062,7 +4092,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
     qsort(allc, n_call, sizeof(struct rs_cand), cmp_rs_cand);
 
     /* ---- Phase 3: identical selection on every rank; each converts its own stars. ---- */
-    int64_t n_placed = 0, n_short = 0, n_conv_local = 0, n_novms = 0, n_detail_local = 0;
+    int64_t n_placed = 0, n_short = 0, n_conv_local = 0, n_novms = 0, n_capped = 0, n_detail_local = 0;
     /* MinBHSeedInSC per-group missed mass: [0, n_msg) the missed BH seed mass, [n_msg,
      * 2*n_msg) the cluster mass of the same clusters.  Accumulated on the group's
      * reference-star owner only (which also runs the loop below, so it sees the
@@ -4148,7 +4178,9 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                  * keyed on the cluster, so every rank agrees. */
                 double z_cw = cw_sample_cluster_met(m, ckey, rnd);
                 z_record = z_cw;
-                double mvms_code = cw_seed_mass_code(m_sc, reff_pc, z_cw, t_uni_sec, thresh_code);
+                int mvms_capped = 0;
+                double mvms_code = cw_seed_mass_code(m_sc, reff_pc, z_cw, t_uni_sec, thresh_code,
+                                                     &mvms_capped);
                 if(mvms_code < seed_mass_floor_code) {
                     n_novms++;
                     /* MinBHSeedInSC: the cluster is heavy enough to be a candidate but
@@ -4176,6 +4208,9 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                 }
                 seed_mass_override = (MyFloat) mvms_code;
                 mvms_seed = mvms_code;
+                /* CWmodelSeedMassCap replaced this cluster's M_VMS by the fixed fraction. */
+                if(mvms_capped)
+                    n_capped++;
             }
             /* The cluster cleared the gate, so NOW it wants a host star -- and only now
              * does the cursor advance.  If the group has none left the seed is simply
@@ -4276,8 +4311,9 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
 
     if(fof_params.MbhMscRelationCWmodel)
         message(0, "secFOF per-cluster seeding: %d group(s); placed %ld BH seed(s) (CW-model VMS masses); "
-                   "%ld cluster(s) skipped with M_VMS < SeedBlackHoleMass; %ld group(s) short of unseeded stars.\n",
-                n_msg, n_placed, n_novms, n_short);
+                   "%ld cluster(s) skipped with M_VMS < SeedBlackHoleMass; %ld seed mass(es) capped at "
+                   "CWmodelSeedMassCap (-> CWmodelSeedMassCapFrac * m_sc); %ld group(s) short of unseeded stars.\n",
+                n_msg, n_placed, n_novms, n_capped, n_short);
     if(zcrit_on)
         message(0, "secFOF per-cluster seeding (SecFOFseedHostZcrit=1): of %ld placed seed(s), the "
                    "Z_star <= Z_crit mask moved %ld off the largest-key star, and %ld found no star "
