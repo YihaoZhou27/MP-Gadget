@@ -163,6 +163,11 @@ struct sph_particle_data
     MyFloat VDisp_mstar; /* Total stellar mass within Hsml */
     int VDisp_Ngas;      /* Number of gas neighbors within Hsml */
     int VDisp_Nstar;     /* Number of star neighbors within Hsml */
+    /* SCgasVDisp: 1D gas velocity dispersions measured in the density treewalk at every active step of the particle
+     * (same neighbours and predicted velocities as the SPH density, self included; internal velocity units like VDisp_gas). */
+    MyFloat VDisp_gas_all; /* from all gas neighbours within Hsml */
+    MyFloat VDisp_gas_sf;  /* from the star-forming (Sfr > 0) neighbours only; 0 if fewer than VDISP_SF_MINNGB of them */
+    int VDisp_Ngas_sf;     /* number of star-forming gas neighbours within Hsml (self included) */
     MyFloat DelayTime;		/*!< SH03: remaining maximum decoupling time of wind particle */
                             /*!< VS08: remaining waiting for wind particle to be eligible to form winds again */
 

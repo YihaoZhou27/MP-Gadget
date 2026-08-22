@@ -250,6 +250,145 @@ static void test_density_random(void ** state) {
 }
 
 
+/* SCgasVDisp: check VDisp_gas_all, VDisp_gas_sf and VDisp_Ngas_sf from the density walk against a brute-force
+ * O(N^2) evaluation over the periodic box, for random positions, random velocities and a random star-forming subset.
+ * The kick times are all zero here, so the predicted velocity is P[i].Vel. */
+static void test_density_vdisp(void ** state) {
+    struct density_testdata * data = * (struct density_testdata **) state;
+    gsl_rng * r = (gsl_rng *) data->r;
+    const int ncbrt = 24;
+    const int numpart = ncbrt*ncbrt*ncbrt;
+    const double BoxSize = PartManager->BoxSize;
+    int i;
+    for(i=0; i<numpart; i++) {
+        int j;
+        P[i].Type = 0;
+        P[i].PI = i;
+        P[i].Mass = 1;
+        P[i].TimeBinHydro = 0;
+        P[i].TimeBinGravity = 0;
+        P[i].Ti_drift = 0;
+        P[i].Hsml = BoxSize/cbrt(numpart);
+        /* two clumps and a uniform background, so the neighbour numbers span a wide range */
+        if(i < numpart/2)
+            for(j=0; j<3; j++)
+                P[i].Pos[j] = BoxSize * gsl_rng_uniform(r);
+        else if(i < 3*numpart/4)
+            for(j=0; j<3; j++)
+                P[i].Pos[j] = BoxSize/2 + BoxSize/8 * exp(pow(gsl_rng_uniform(r)-0.5,2));
+        else
+            for(j=0; j<3; j++)
+                P[i].Pos[j] = BoxSize*0.1 + BoxSize/32 * exp(pow(gsl_rng_uniform(r)-0.5,2));
+        for(j=0; j<3; j++)
+            P[i].Vel[j] = 100 * (gsl_rng_uniform(r) - 0.5) + 30 * j;
+        SPHP(i).Entropy = 1;
+        SPHP(i).DtEntropy = 0;
+        SPHP(i).Density = 1;
+        SPHP(i).Sfr = (gsl_rng_uniform(r) < 0.4) ? 1.0 : 0.0;
+        SPHP(i).VDisp_gas_all = -1;
+        SPHP(i).VDisp_gas_sf = -1;
+        SPHP(i).VDisp_Ngas_sf = -1;
+    }
+    SlotsManager->info[0].size = numpart;
+    SlotsManager->info[5].size = 0;
+    PartManager->NumPart = numpart;
+    ActiveParticles act = init_empty_active_particles(PartManager);
+    DomainDecomp ddecomp = data->ddecomp;
+    ForceTree tree = {0};
+    force_tree_rebuild_mask(&tree, &ddecomp, GASMASK+BHMASK, NULL);
+    set_init_hsml(&tree, &ddecomp, PartManager->BoxSize);
+    DriftKickTimes kick = {0};
+    Cosmology CP = {0};
+    CP.CMBTemperature = 2.7255;
+    CP.Omega0 = 0.3;
+    CP.OmegaLambda = 1- CP.Omega0;
+    CP.OmegaBaryon = 0.045;
+    CP.HubbleParam = 0.7;
+    CP.RadiationOn = 0;
+    CP.w0_fld = -1;
+    struct UnitSystem units = get_unitsystem(3.085678e21, 1.989e43, 1e5);
+    init_cosmology(&CP,0.01, units);
+    data->dp.MaxNumNgbDeviation = 2;
+    data->dp.SCgasVDisp = 1;
+    set_densitypar(data->dp);
+    density(&act, 1, 0, 0, kick, &CP, &data->sph_pred, NULL, &tree);
+    slots_free_sph_pred_data(&data->sph_pred);
+    force_tree_free(&tree);
+    check_densities(data->dp.MinGasHsmlFractional);
+
+    /* brute force: every particle within Hsml (self included), periodic nearest image.
+     * Particles whose Hsml was clamped to MinGasHsml after their last walk (density_check_neighbours) carry a density,
+     * DivVel, CurlVel and dispersions evaluated with the pre-clamp Hsml, so they cannot be checked against the final Hsml. */
+    const double MinGasHsml = data->dp.MinGasHsmlFractional * FORCE_SOFTENING()/2.8;
+    double maxdev_all = 0, maxdev_sf = 0;
+    int64_t nbad_n = 0, nsf_ge8 = 0, nsf_lt8_nonzero = 0, nclamped = 0;
+    #pragma omp parallel for reduction(max:maxdev_all, maxdev_sf) reduction(+:nbad_n, nsf_ge8, nsf_lt8_nonzero, nclamped)
+    for(i=0; i<numpart; i++) {
+        if(P[i].Hsml <= MinGasHsml * (1 + 1e-6)) {
+            nclamped++;
+            continue;
+        }
+        double v1a[3] = {0,0,0}, v1s[3] = {0,0,0}, v2a = 0, v2s = 0;
+        int na = 0, ns = 0, j, d;
+        const double h2 = P[i].Hsml * P[i].Hsml;
+        for(j=0; j<numpart; j++) {
+            double r2 = 0, dv[3], dvv = 0;
+            for(d=0; d<3; d++) {
+                double dx = P[j].Pos[d] - P[i].Pos[d];
+                if(dx > BoxSize/2) dx -= BoxSize;
+                if(dx < -BoxSize/2) dx += BoxSize;
+                r2 += dx*dx;
+            }
+            if(r2 >= h2)
+                continue;
+            for(d=0; d<3; d++) {
+                dv[d] = P[j].Vel[d] - P[i].Vel[d];
+                dvv += dv[d]*dv[d];
+                v1a[d] += dv[d];
+            }
+            v2a += dvv; na++;
+            if(SPHP(j).Sfr > 0) {
+                for(d=0; d<3; d++)
+                    v1s[d] += dv[d];
+                v2s += dvv; ns++;
+            }
+        }
+        double vara = v2a / na, vars = ns > 0 ? v2s / ns : 0;
+        for(d=0; d<3; d++) {
+            vara -= (v1a[d]/na)*(v1a[d]/na);
+            if(ns > 0)
+                vars -= (v1s[d]/ns)*(v1s[d]/ns);
+        }
+        const double sig_all = vara > 0 ? sqrt(vara/3) : 0;
+        const double sig_sf = (ns >= VDISP_SF_MINNGB && vars > 0) ? sqrt(vars/3) : 0;
+        if(SPHP(i).VDisp_Ngas_sf != ns) {
+            nbad_n++;
+            if(nbad_n <= 6)
+                message(1, "  mismatch i=%d Hsml=%g (min %g) brute N_all=%d N_sf=%d  code N_sf=%d sigma_all code %g brute %g\n",
+                        i, P[i].Hsml, data->dp.MinGasHsmlFractional * FORCE_SOFTENING()/2.8, na, ns, SPHP(i).VDisp_Ngas_sf, SPHP(i).VDisp_gas_all, sig_all);
+        }
+        double dev = fabs(SPHP(i).VDisp_gas_all - sig_all) / (sig_all > 0 ? sig_all : 1);
+        if(dev > maxdev_all)
+            maxdev_all = dev;
+        if(ns >= VDISP_SF_MINNGB) {
+            nsf_ge8++;
+            dev = fabs(SPHP(i).VDisp_gas_sf - sig_sf) / (sig_sf > 0 ? sig_sf : 1);
+            if(dev > maxdev_sf)
+                maxdev_sf = dev;
+        }
+        else if(SPHP(i).VDisp_gas_sf != 0)
+            nsf_lt8_nonzero++;
+    }
+    message(0, "VDisp check: %d particles (%ld skipped at the Hsml floor), %ld with N_sf >= %d; N_sf mismatches %ld; max rel. dev. sigma_all %g, sigma_sf %g; nonzero sigma_sf below the cut: %ld\n",
+            numpart, nclamped, nsf_ge8, VDISP_SF_MINNGB, nbad_n, maxdev_all, maxdev_sf, nsf_lt8_nonzero);
+    assert_true(nclamped < numpart/4);
+    assert_true(nbad_n == 0);
+    assert_true(nsf_ge8 > numpart/4);
+    assert_true(maxdev_all < 1e-5);
+    assert_true(maxdev_sf < 1e-5);
+    assert_true(nsf_lt8_nonzero == 0);
+}
+
 /*Make a simple trivial domain for all data on a single processor*/
 void trivial_domain(DomainDecomp * ddecomp)
 {
@@ -314,6 +453,7 @@ static int setup_density(void **state) {
     data->dp.MaxNumNgbDeviation = 2;
     data->dp.DensityKernelType = DENSITY_KERNEL_CUBIC_SPLINE;
     data->dp.MinGasHsmlFractional = 0.006;
+    data->dp.SCgasVDisp = 1;      /* exercise the per-step velocity-dispersion accumulators in the density walk */
     struct gravshort_tree_params tree_params = {0};
     tree_params.FractionalGravitySoftening = 1;
     set_gravshort_treepar(tree_params);
@@ -333,6 +473,7 @@ int main(void) {
         cmocka_unit_test(test_density_flat),
         cmocka_unit_test(test_density_close),
         cmocka_unit_test(test_density_random),
+        cmocka_unit_test(test_density_vdisp),
     };
     return cmocka_run_group_tests_mpi(tests, setup_density, teardown_density);
 }

@@ -21,7 +21,14 @@ struct density_params
 
     /*!< minimum allowed SPH smoothing length in units of SPH gravitational softening length */
     double MinGasHsmlFractional;
+
+    /*!< SCgasVDisp: if 1, the density treewalk also accumulates the 1D gas velocity dispersions of every active gas
+     * particle from all gas neighbours (VDisp_gas_all) and from the star-forming neighbours only (VDisp_gas_sf). */
+    int SCgasVDisp;
 };
+
+/* Minimum number of star-forming neighbours (self included) for VDisp_gas_sf to be computed; below it the field is 0. */
+#define VDISP_SF_MINNGB 8
 
 struct sph_pred_data
 {

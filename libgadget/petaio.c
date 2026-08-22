@@ -1224,6 +1224,9 @@ SIMPLE_GETTER_PI(GTVDispMgas, VDisp_mgas, float, 1, struct sph_particle_data)
 SIMPLE_GETTER_PI(GTVDispMstar, VDisp_mstar, float, 1, struct sph_particle_data)
 SIMPLE_GETTER_PI(GTVDispNgas, VDisp_Ngas, int, 1, struct sph_particle_data)
 SIMPLE_GETTER_PI(GTVDispNstar, VDisp_Nstar, int, 1, struct sph_particle_data)
+SIMPLE_GETTER_PI(GTVDispGasAll, VDisp_gas_all, float, 1, struct sph_particle_data)
+SIMPLE_GETTER_PI(GTVDispGasSF, VDisp_gas_sf, float, 1, struct sph_particle_data)
+SIMPLE_GETTER_PI(GTVDispGasNSF, VDisp_Ngas_sf, int, 1, struct sph_particle_data)
 
 void register_debug_io_blocks(struct IOTable * IOTable)
 {
@@ -1254,6 +1257,10 @@ void register_debug_io_blocks(struct IOTable * IOTable)
     IO_REG_WRONLY(VDispMstar,  "f4", 1, 0, IOTable);
     IO_REG_WRONLY(VDispNgas,   "i4", 1, 0, IOTable);
     IO_REG_WRONLY(VDispNstar,  "i4", 1, 0, IOTable);
+    /* SCgasVDisp: per-step dispersions from the density treewalk (all gas / star-forming neighbours, and the SF count) */
+    IO_REG_WRONLY(VDispGasAll, "f4", 1, 0, IOTable);
+    IO_REG_WRONLY(VDispGasSF,  "f4", 1, 0, IOTable);
+    IO_REG_WRONLY(VDispGasNSF, "i4", 1, 0, IOTable);
     IO_REG_WRONLY(SumSFRdt_v2,  "f4", 1, 0, IOTable);
     IO_REG_WRONLY(Mcstar,          "f4", 1, 4, IOTable);
     IO_REG_WRONLY(NumStarCluster,  "f4", 1, 4, IOTable);

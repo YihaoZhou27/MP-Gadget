@@ -80,3 +80,62 @@ double get_cluster_formation_efficiency(double Pressure_over_kB)
         cfe = 1.0;
     return cfe;
 }
+
+/* ---- Kruijssen (2012) local model, eq. 26, evaluated directly (StarClusterCFEsigma > 0) ---------------------- */
+#define CFE_K12_SSFR_FF   0.012   /* star formation rate per free-fall time */
+#define CFE_K12_EPS_CORE  0.5     /* maximum (core) star formation efficiency */
+#define CFE_K12_B         0.5     /* turbulence forcing parameter in sigma_rho^2 = ln(1 + 3 b^2 Mach^2) (eq. 4) */
+#define CFE_K12_NX        201     /* quadrature points in ln x (0.02% accuracy against a 1001-point reference) */
+#define CFE_K12_LNXMAX    25.0    /* integration range ln x in [-LNXMAX, LNXMAX] */
+
+/* Star formation efficiency at overdensity x = rho_x / rho: the minimum of the core efficiency,
+ * the feedback-limited efficiency (eq. 46) and the incomplete-star-formation efficiency (eq. 22). */
+static double
+cfe_k12_eps(const double x, const double rho, const double sigma, const double G, const double t_sn, const double phi_fb, const double t_inc)
+{
+    const double t_ff = sqrt(3.0 * M_PI / (32.0 * G * rho * x));                                   /* eq. 15 */
+    const double eps_fb = CFE_K12_SSFR_FF * t_sn / (2.0 * t_ff)
+                        * (1.0 + sqrt(1.0 + 4.0 * t_ff * sigma * sigma / (phi_fb * CFE_K12_SSFR_FF * t_sn * t_sn * x)));
+    const double eps_inc = CFE_K12_SSFR_FF * t_inc / t_ff;
+    double eps = CFE_K12_EPS_CORE;
+    if(eps_fb < eps)
+        eps = eps_fb;
+    if(eps_inc < eps)
+        eps = eps_inc;
+    return eps;
+}
+
+double
+get_cluster_formation_efficiency_k12(double rho, double sigma, double cs, double G, double t_sn, double phi_fb, double t_inc)
+{
+    if(rho <= 0)
+        return 0;
+    if(sigma < 0)
+        sigma = 0;
+    const double mach = sigma / cs;
+    const double s2 = log(1.0 + 3.0 * CFE_K12_B * CFE_K12_B * mach * mach);
+    /* No turbulence: the density PDF is a delta function at x = 1 and the bound fraction is eps(1) / eps_core. */
+    if(s2 < 1e-10)
+        return cfe_k12_eps(1.0, rho, sigma, G, t_sn, phi_fb, t_inc) / CFE_K12_EPS_CORE;
+    const double dlnx = 2.0 * CFE_K12_LNXMAX / (CFE_K12_NX - 1);
+    const double norm = 1.0 / sqrt(2.0 * M_PI * s2);
+    double num = 0, den = 0;
+    int k;
+    for(k = 0; k < CFE_K12_NX; k++) {
+        const double lnx = -CFE_K12_LNXMAX + k * dlnx;
+        const double x = exp(lnx);
+        const double pdf = norm * exp(-(lnx + 0.5 * s2) * (lnx + 0.5 * s2) / (2.0 * s2));          /* eqs 2-3 */
+        const double w = x * pdf;
+        if(w <= 0)
+            continue;
+        const double eps = cfe_k12_eps(x, rho, sigma, G, t_sn, phi_fb, t_inc);
+        num += eps * eps * w;             /* gamma eps x p with gamma = eps / eps_core (eqs 25-26) */
+        den += eps * w;
+    }
+    if(den <= 0)
+        return 0;
+    double cfe = num / (den * CFE_K12_EPS_CORE);
+    if(cfe > 1.0)
+        cfe = 1.0;
+    return cfe;
+}

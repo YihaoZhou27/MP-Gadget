@@ -78,6 +78,11 @@ static struct SFRParams
     double msc_ave_powerlaw_code; /* precomputed <m> of the pure power law m^-2 on [msc_min,msc_max] (StarClusterICMFcutoff=0); cutoff-independent constant */
     double msc_seed_thresh_code; /* 1e4 Msun in code mass: "massive cluster" cutoff for bhseed_msc */
     double msc_multiseed_thresh_code; /* 1e8 Msun in code mass: per-secFOF multi-seed threshold (M_SC>this seeds floor(M_SC/1e8) BHs) */
+    /* StarClusterCFEsigma: 0 = tabulated Gamma(P/k_B), i.e. sigma_loc = sqrt(P/rho) (original); 1 / 2 = Kruijssen (2012)
+     * eq. 26 with the per-step measured 1-D dispersion of the star-forming neighbours (VDisp_gas_sf) / of all gas neighbours (VDisp_gas_all) */
+    int StarClusterCFEsigma;
+    double cs_cold_code;  /* cold-gas sound speed of the Kruijssen model, 0.3 km/s, in code velocity */
+    double t_inc_code;    /* incomplete-star-formation time of the Kruijssen model, 10 Myr, in code time (with h, like t_sn_code) */
 
     /* Unit conversion factor for the sfr_due_to_h2 function*/
     double tau_fmol_unit;
@@ -139,7 +144,7 @@ struct sfr_eeqos_data
 static struct sfr_eeqos_data get_sfr_eeqos(struct particle_data * part, struct sph_particle_data * sph, double dtime, struct UVBG *local_uvbg, const double redshift, const double a3inv);
 
 /*Cooling only: no star formation*/
-static void cooling_direct(int i, const double redshift, const double a3inv, const double hubble, const struct UVBG * const GlobalUVBG);
+static void cooling_direct(int i, const double redshift, const double a3inv, const double hubble, const double GravInternal, const struct UVBG * const GlobalUVBG);
 
 static void cooling_relaxed(int i, double dtime, struct UVBG * local_uvbg, const double redshift, const double a3inv, struct sfr_eeqos_data sfr_data, const struct UVBG * const GlobalUVBG);
 
@@ -204,6 +209,15 @@ void set_sfr_params(ParameterSet * ps)
         sfr_params.StarClusterFixReff = param_get_double(ps, "StarClusterFixReff");
         if(sfr_params.StarClusterFixReff < 0)
             endrun(0, "StarClusterFixReff (%g) must be >= 0.\n", sfr_params.StarClusterFixReff);
+        sfr_params.StarClusterCFEsigma = param_get_int(ps, "StarClusterCFEsigma");
+        if(sfr_params.StarClusterCFEsigma < 0 || sfr_params.StarClusterCFEsigma > 2)
+            endrun(0, "StarClusterCFEsigma = %d is not supported (0, 1 or 2)\n", sfr_params.StarClusterCFEsigma);
+        if(sfr_params.StarClusterCFEsigma > 0 && !sfr_params.StarClusterOn)
+            endrun(0, "StarClusterCFEsigma > 0 requires StarClusterOn = 1\n");
+        if(sfr_params.StarClusterCFEsigma > 0)
+            message(0, "StarClusterCFEsigma = %d: cluster formation efficiency from Kruijssen (2012) eq. 26 with the per-step measured "
+                       "1-D dispersion of %s gas neighbours (sigma = 0, i.e. Gamma = sSFR_ff t_sn / (eps_core t_ff), when it is not defined)\n",
+                    sfr_params.StarClusterCFEsigma, sfr_params.StarClusterCFEsigma == 1 ? "the star-forming" : "all");
         if(sfr_params.StarClusterOn) {
             int GasTidalField = param_get_int(ps, "GasTidalField");
             int SCgasVDisp = param_get_int(ps, "SCgasVDisp");
@@ -310,7 +324,7 @@ cooling_and_starformation(ActiveParticles * act, double Time, double dloga, Forc
                 }
             }
             else
-                cooling_direct(p_i, redshift, a3inv, hubble, &GlobalUVBG);
+                cooling_direct(p_i, redshift, a3inv, hubble, CP->GravInternal, &GlobalUVBG);
         }
     }
 
@@ -512,8 +526,25 @@ sfr_reserve_slots(ActiveParticles * act, int * NewStars, int NumNewStar, ForceTr
         return NewStars;
 }
 
+/* Cluster formation efficiency of a gas particle (slot data sp) with physical density rho_phys [code units].
+ * StarClusterCFEsigma = 0: the tabulated Kruijssen (2012) Gamma(P/k_B) at the thermodynamic pressure, i.e. sigma_loc = sqrt(P/rho)
+ *   (the original prescription; Pressure_over_kB is formed by the caller exactly as before, so mode 0 is unchanged).
+ * 1 / 2: Kruijssen (2012) eq. 26 evaluated directly from rho_phys and the 1-D gas velocity dispersion measured in the density
+ *   treewalk at the particle's last active step (SCgasVDisp): VDisp_gas_sf, the star-forming neighbours only (0 when there are
+ *   fewer than VDISP_SF_MINNGB of them, which is then the sigma = 0 limit of the model), or VDisp_gas_all, all gas neighbours.
+ *   The stored dispersions are internal velocities (a x peculiar), hence the division by atime. */
+static double
+gas_cluster_formation_efficiency(const struct sph_particle_data * sp, const double rho_phys, const double Pressure_over_kB, const double atime, const double GravInternal)
+{
+    if(sfr_params.StarClusterCFEsigma == 0)
+        return get_cluster_formation_efficiency(Pressure_over_kB);
+    const double sigma = (sfr_params.StarClusterCFEsigma == 1 ? sp->VDisp_gas_sf : sp->VDisp_gas_all) / atime;
+    return get_cluster_formation_efficiency_k12(rho_phys, sigma, sfr_params.cs_cold_code, GravInternal,
+                                                sfr_params.t_sn_code, sfr_params.phi_fb_code, sfr_params.t_inc_code);
+}
+
 static void
-cooling_direct(int i, const double redshift, const double a3inv, const double hubble, const struct UVBG * const GlobalUVBG)
+cooling_direct(int i, const double redshift, const double a3inv, const double hubble, const double GravInternal, const struct UVBG * const GlobalUVBG)
 {
     /*  the actual time-step */
     double dloga = get_dloga_for_bin(P[i].TimeBinHydro, P[i].Ti_drift);
@@ -564,11 +595,11 @@ cooling_direct(int i, const double redshift, const double a3inv, const double hu
     /* Cooling gas is not forming stars*/
     SPHP(i).Sfr = 0;
 
-    /* Update the gas ClusterFormationEfficiency based on current density and entropy */
+    /* Update the gas ClusterFormationEfficiency based on current density and entropy (and the measured dispersion, StarClusterCFEsigma > 0) */
     if (sfr_params.StarClusterOn) {
         double Pressure_over_kB = GAMMA_MINUS1 * SPHP(i).Density * a3inv
                                   * unew * sfr_params.pressure_to_pkb;
-        SPHP(i).ClusterFormationEfficiency = get_cluster_formation_efficiency(Pressure_over_kB);
+        SPHP(i).ClusterFormationEfficiency = gas_cluster_formation_efficiency(&SPHP(i), SPHP(i).Density * a3inv, Pressure_over_kB, 1. / (1 + redshift), GravInternal);
     }
 }
 
@@ -1176,9 +1207,9 @@ static int make_particle_star(int child, int parent, int placement, double Time,
         const double u = STARP(child).BirthInternalEnergy;
         const double Pressure = GAMMA_MINUS1 * rho_phys * u;
 
-        /* Cluster formation efficiency from pressure */
+        /* Cluster formation efficiency: tabulated Gamma(P/k_B), or Kruijssen (2012) eq. 26 with the parent's measured dispersion (StarClusterCFEsigma) */
         double Pressure_over_kB = Pressure * sfr_params.pressure_to_pkb;
-        double CFE = get_cluster_formation_efficiency(Pressure_over_kB);
+        double CFE = gas_cluster_formation_efficiency(&oldslot, rho_phys, Pressure_over_kB, Time, G);
         STARP(child).ClusterFormationEfficiency = CFE;
         STARP(child).ClusterMass = P[child].Mass * CFE;
         STARP(child).initClusterMass = STARP(child).ClusterMass;
@@ -1495,7 +1526,7 @@ starformation(int i, double *localsfr, MyFloat * sm_out, MyFloat * sum_sm, MyFlo
         double InternalEnergy = SPHP(i).Entropy * entropy_to_u(SPHP(i).Density, a3inv);
         double Pressure_over_kB = GAMMA_MINUS1 * SPHP(i).Density * a3inv
                                   * InternalEnergy * sfr_params.pressure_to_pkb;
-        SPHP(i).ClusterFormationEfficiency = get_cluster_formation_efficiency(Pressure_over_kB);
+        SPHP(i).ClusterFormationEfficiency = gas_cluster_formation_efficiency(&SPHP(i), SPHP(i).Density * a3inv, Pressure_over_kB, atime, GravInternal);
     }
 
     /* Accumulate SFR * dt and SFR * dt * CFE (in internal mass units) */
@@ -1643,6 +1674,9 @@ void init_cooling_and_star_formation(int CoolingOn, int StarformationOn, Cosmolo
      * = UnitVelocity^3 / UnitLength. Divide by h factor from code_time. */
     sfr_params.phi_fb_code = 0.16 / (units.UnitVelocity_in_cm_per_s * units.UnitVelocity_in_cm_per_s
                                      / (units.UnitTime_in_s / CP->HubbleParam));
+    /* Kruijssen (2012) model constants for StarClusterCFEsigma > 0, with the unit conventions of t_sn_code / phi_fb_code */
+    sfr_params.cs_cold_code = 0.3e5 / units.UnitVelocity_in_cm_per_s;
+    sfr_params.t_inc_code = 10.0 * SEC_PER_MEGAYEAR / (units.UnitTime_in_s / CP->HubbleParam);
     /* Mass limits for msc_ave: 1e2 and 1e8 solar masses in code mass units.
      * The code mass unit is 1e10 Msun/h (UnitMass_in_g converts to g/h), so a
      * PHYSICAL solar-mass constant carries an extra factor of h -- exactly as

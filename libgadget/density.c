@@ -46,6 +46,9 @@ set_density_params(ParameterSet * ps)
         /*These two look like black hole parameters but they are really neighbour finding parameters*/
         DensityParams.BlackHoleNgbFactor = param_get_double(ps, "BlackHoleNgbFactor");
         DensityParams.BlackHoleMaxAccretionRadius = param_get_double(ps, "BlackHoleMaxAccretionRadius");
+        DensityParams.SCgasVDisp = param_get_int(ps, "SCgasVDisp");
+        if(DensityParams.SCgasVDisp)
+            message(1, "SCgasVDisp: the density treewalk accumulates the per-step gas velocity dispersions (all / star-forming neighbours, N_sf >= %d)\n", VDISP_SF_MINNGB);
     }
     MPI_Bcast(&DensityParams, sizeof(struct density_params), MPI_BYTE, 0, MPI_COMM_WORLD);
 }
@@ -162,7 +165,25 @@ typedef struct {
     MyFloat Rot[3];
     /*Only used if sfr_need_to_compute_sph_grad_rho is true*/
     MyFloat GradRho[3];
+    /* SCgasVDisp only: sums over the neighbours within Hsml of the velocity relative to the query particle,
+     * for all gas neighbours and for the star-forming (Sfr > 0) ones. Left at zero otherwise. */
+    MyFloat VSumAll[3];
+    MyFloat V2All;
+    MyFloat VSumSF[3];
+    MyFloat V2SF;
+    int NAll;
+    int NSF;
 } TreeWalkResultDensity;
+
+/* SCgasVDisp: per-slot accumulators of the velocity-dispersion sums across the hsml iterations and the ghost exchange. */
+struct DensVDispAcc {
+    MyFloat VSumAll[3];
+    MyFloat V2All;
+    MyFloat VSumSF[3];
+    MyFloat V2SF;
+    int NAll;
+    int NSF;
+};
 
 struct DensityPriv {
     /* Predicted quantities computed during for density and reused during hydro.*/
@@ -175,6 +196,9 @@ struct DensityPriv {
     /* Lower and upper bounds on smoothing length*/
     MyFloat *Left, *Right;
     MyFloat (*Rot)[3];
+    /* SCgasVDisp: accumulators for the 1D gas velocity dispersions, NULL when disabled. */
+    struct DensVDispAcc * VDispAcc;
+    int VDispOn;
     /* This is the DhsmlDensityFactor for the pure density,
      * not the entropy weighted density.
      * If DensityIndependentSphOn = 0 then DhsmlEgyDensityFactor and DhsmlDensityFactor
@@ -255,6 +279,12 @@ density(const ActiveParticles * act, int update_hsml, int DoEgyDensity, int Blac
     DENSITY_GET_PRIV(tw)->Right = (MyFloat *) mymalloc("DENS_PRIV->Right", PartManager->NumPart * sizeof(MyFloat));
     DENSITY_GET_PRIV(tw)->NumNgb = (MyFloat *) mymalloc("DENS_PRIV->NumNgb", PartManager->NumPart * sizeof(MyFloat));
     DENSITY_GET_PRIV(tw)->Rot = (MyFloat (*) [3]) mymalloc("DENS_PRIV->Rot", SlotsManager->info[0].size * sizeof(priv->Rot[0]));
+    /* SCgasVDisp: velocity-dispersion sums, allocated only when enabled (freed right after DhsmlDensityFactor, before Rot).*/
+    DENSITY_GET_PRIV(tw)->VDispOn = DensityParams.SCgasVDisp;
+    if(DENSITY_GET_PRIV(tw)->VDispOn)
+        DENSITY_GET_PRIV(tw)->VDispAcc = (struct DensVDispAcc *) mymalloc("DENS_PRIV->VDispAcc", SlotsManager->info[0].size * sizeof(struct DensVDispAcc));
+    else
+        DENSITY_GET_PRIV(tw)->VDispAcc = NULL;
     /* This one stores the gradient for h finding. The factor stored in SPHP->DhsmlEgyDensityFactor depends on whether PE SPH is enabled.*/
     DENSITY_GET_PRIV(tw)->DhsmlDensityFactor = (MyFloat *) mymalloc("DENSITY_GET_PRIV(tw)->DhsmlDensity", PartManager->NumPart * sizeof(MyFloat));
 
@@ -328,6 +358,8 @@ density(const ActiveParticles * act, int update_hsml, int DoEgyDensity, int Blac
     if(DENSITY_GET_PRIV(tw)->GradRho)
         myfree(DENSITY_GET_PRIV(tw)->GradRho);
     myfree(DENSITY_GET_PRIV(tw)->DhsmlDensityFactor);
+    if(DENSITY_GET_PRIV(tw)->VDispAcc)
+        myfree(DENSITY_GET_PRIV(tw)->VDispAcc);
     myfree(DENSITY_GET_PRIV(tw)->Rot);
     myfree(DENSITY_GET_PRIV(tw)->NumNgb);
     myfree(DENSITY_GET_PRIV(tw)->Right);
@@ -381,6 +413,19 @@ density_reduce(int place, TreeWalkResultDensity * remote, enum TreeWalkReduceMod
         TREEWALK_REDUCE(DENSITY_GET_PRIV(tw)->Rot[pi][0], remote->Rot[0]);
         TREEWALK_REDUCE(DENSITY_GET_PRIV(tw)->Rot[pi][1], remote->Rot[1]);
         TREEWALK_REDUCE(DENSITY_GET_PRIV(tw)->Rot[pi][2], remote->Rot[2]);
+
+        if(DENSITY_GET_PRIV(tw)->VDispOn) {
+            struct DensVDispAcc * acc = &DENSITY_GET_PRIV(tw)->VDispAcc[pi];
+            int d;
+            for(d = 0; d < 3; d++) {
+                TREEWALK_REDUCE(acc->VSumAll[d], remote->VSumAll[d]);
+                TREEWALK_REDUCE(acc->VSumSF[d], remote->VSumSF[d]);
+            }
+            TREEWALK_REDUCE(acc->V2All, remote->V2All);
+            TREEWALK_REDUCE(acc->V2SF, remote->V2SF);
+            TREEWALK_REDUCE(acc->NAll, remote->NAll);
+            TREEWALK_REDUCE(acc->NSF, remote->NSF);
+        }
 
         MyFloat * gradrho = DENSITY_GET_PRIV(tw)->GradRho;
 
@@ -490,6 +535,26 @@ density_ngbiter(
             O->DhsmlEgyDensity += mass_j * EntVarPred * density_dW;
         }
 
+        /* SCgasVDisp: number-weighted velocity sums within Hsml, as gasveldisp.c but at every step.
+         * Gas queries only; the query particle itself (r = 0) counts with zero relative velocity. */
+        if(priv->VDispOn && I->Type == 0) {
+            double dvv[3], v2 = 0;
+            int d;
+            for(d = 0; d < 3; d++) {
+                dvv[d] = VelPred[d] - I->Vel[d];
+                v2 += dvv[d] * dvv[d];
+                O->VSumAll[d] += dvv[d];
+            }
+            O->V2All += v2;
+            O->NAll += 1;
+            if(SPHP(other).Sfr > 0) {
+                for(d = 0; d < 3; d++)
+                    O->VSumSF[d] += dvv[d];
+                O->V2SF += v2;
+                O->NSF += 1;
+            }
+        }
+
         if(r > 0)
         {
             double fac = mass_j * dwk / r;
@@ -522,6 +587,21 @@ density_haswork(int n, TreeWalk * tw)
     if(P[n].Type == 0 || P[n].Type == 5)
         return 1;
     return 0;
+}
+
+/* SCgasVDisp: 1D number-weighted velocity dispersion from the sums over n neighbours, as in gasveldisp.c. */
+static double
+vdisp_from_sums(const MyFloat * vsum, const double v2sum, const int n)
+{
+    if(n <= 0)
+        return 0;
+    double var = v2sum / n;
+    int d;
+    for(d = 0; d < 3; d++) {
+        const double vmean = vsum[d] / n;
+        var -= vmean * vmean;
+    }
+    return var > 0 ? sqrt(var / 3) : 0;
 }
 
 static void
@@ -569,6 +649,14 @@ density_postprocess(int i, TreeWalk * tw)
 
         MyFloat * Rot = DENSITY_GET_PRIV(tw)->Rot[PI];
         SPHP(i).CurlVel = sqrt(Rot[0] * Rot[0] + Rot[1] * Rot[1] + Rot[2] * Rot[2]) / SPHP(i).Density;
+
+        if(DENSITY_GET_PRIV(tw)->VDispOn) {
+            const struct DensVDispAcc * acc = &DENSITY_GET_PRIV(tw)->VDispAcc[PI];
+            SPHP(i).VDisp_gas_all = vdisp_from_sums(acc->VSumAll, acc->V2All, acc->NAll);
+            SPHP(i).VDisp_Ngas_sf = acc->NSF;
+            /* Too few star-forming neighbours: the dispersion is not meaningful, store 0 (the count tells why). */
+            SPHP(i).VDisp_gas_sf = (acc->NSF >= VDISP_SF_MINNGB) ? vdisp_from_sums(acc->VSumSF, acc->V2SF, acc->NSF) : 0;
+        }
 
         SPHP(i).DivVel /= SPHP(i).Density;
         P[i].DtHsml = (1.0 / NUMDIMS) * SPHP(i).DivVel * P[i].Hsml;
