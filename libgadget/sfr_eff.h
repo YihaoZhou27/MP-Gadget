@@ -128,9 +128,11 @@ double get_msc_multiseed_thresh_code(void);
 double get_msc_min_code(void);
 
 /* Sample an effective radius (in pc) for a seeded star cluster of code-unit mass
- * mcl_code, from the size-mass relation R_eff = 1.4 pc * (M_cl/1e4 Msun)^0.25 with a
- * 0.5 dex lognormal scatter (reproducibly keyed on the host star ID rand_id), and
- * log10(R/pc) clipped to [-1, 2]. Used only by the StarClusterDetails record in the
+ * mcl_code, from the size-mass relation chosen by StarClusterReffRelation -- BG21
+ * (default): R_eff = 2.365 pc * (M_cl/1e4 Msun)^0.180 with 0.32 dex lognormal scatter;
+ * GBF: 1.4 pc * (M_cl/1e4 Msun)^0.25 with 0.5 dex (StarClusterReffScatter >= 0 replaces the
+ * relation's scatter) -- reproducibly keyed on the host star
+ * ID rand_id, and log10(R/pc) clipped to [-1, 2]. StarClusterFixReff > 0 overrides both. Used only by the StarClusterDetails record in the
  * per-cluster (SecFOFseedsumover=0) seeding path. Returns 0 for a non-positive mass. */
 double starcluster_sample_reff_pc(double mcl_code, uint64_t rand_id, const RandTable * const rnd);
 

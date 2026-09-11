@@ -137,6 +137,12 @@ struct FOFParams
      * (CW_MET_* below); -1 = unrecognised string (an error when
      * MbhMscRelationCWmodel=1). Only used when MbhMscRelationCWmodel=1. */
     int CWmodelMetallicity;
+    /* CWmodelMetallicityMin (Zsun; <= 0 disables) and its absolute counterpart: unseeded
+     * stars below it are masked out of the group metallicity statistics the CW-model
+     * cluster metallicity is drawn from (all CWmodelMetallicity modes); a group with no
+     * star above it hands every cluster the limit itself.  Host-star choice untouched. */
+    double CWmodelMetallicityMin;
+    double CWmodelMetallicityMinAbs;
     /* CWmodelSeedMassCap (physical Msun; <= 0 disables) and CWmodelSeedMassCapFrac:
      * a cluster whose CW-model M_VMS exceeds the cap seeds CWmodelSeedMassCapFrac *
      * m_sc instead of M_VMS.  Only used when MbhMscRelationCWmodel=1. */
@@ -293,6 +299,11 @@ void set_fof_params(ParameterSet * ps)
             fof_params.CWmodelMetallicity = CW_MET_STARSAMPLE;
         else
             fof_params.CWmodelMetallicity = -1;
+        fof_params.CWmodelMetallicityMin = param_get_double(ps, "CWmodelMetallicityMin");
+        if(fof_params.CWmodelMetallicityMin < 0)
+            endrun(1, "CWmodelMetallicityMin must be >= 0 (Zsun); got %g.\n", fof_params.CWmodelMetallicityMin);
+        fof_params.CWmodelMetallicityMinAbs = fof_params.CWmodelMetallicityMin > 0 ?
+            fof_params.CWmodelMetallicityMin * SC_HOST_ZSUN : 0;
         fof_params.CWmodelSeedMassCap = param_get_double(ps, "CWmodelSeedMassCap");
         fof_params.CWmodelSeedMassCapFrac = param_get_double(ps, "CWmodelSeedMassCapFrac");
         fof_params.SeedSeedFOFMassiveBoundStar = param_get_int(ps, "SeedSeedFOFMassiveBoundStar");
@@ -373,6 +384,13 @@ void set_fof_params(ParameterSet * ps)
         if(fof_params.MbhMscRelationCWmodel && fof_params.CWmodelMetallicity < 0)
             endrun(1, "CWmodelMetallicity must be 'ave', 'lognormal', 'uniform' or "
                       "'starsample'; got '%s'.\n", cwmet);
+        if(fof_params.MbhMscRelationCWmodel && fof_params.CWmodelMetallicityMinAbs > 0)
+            message(0, "CWmodelMetallicityMin = %g Zsun (%g absolute): unseeded stars below it are left "
+                       "out of the host group's metallicity statistics that the CW-model cluster "
+                       "metallicity ('%s') is drawn from; a group with no star above it gives all its "
+                       "clusters Z = %g.  The host-star choice is not affected.\n",
+                    fof_params.CWmodelMetallicityMin, fof_params.CWmodelMetallicityMinAbs, cwmet,
+                    fof_params.CWmodelMetallicityMinAbs);
         if(fof_params.MbhMscRelationCWmodel && fof_params.CWmodelSeedMassCap > 0) {
             if(fof_params.CWmodelSeedMassCapFrac <= 0 || fof_params.CWmodelSeedMassCapFrac > 1)
                 endrun(1, "CWmodelSeedMassCapFrac must be in (0, 1]; got %g.\n",
@@ -1830,6 +1848,7 @@ static void fof_reduce_group(void * pdst, void * psrc) {
     gdst->StarClusterMassSampleUnseeded += gsrc->StarClusterMassSampleUnseeded;
     gdst->SCMass_seeded += gsrc->SCMass_seeded;
     gdst->NStarUnseeded += gsrc->NStarUnseeded;
+    gdst->NStarMetUnseeded += gsrc->NStarMetUnseeded;
     gdst->SCMetalMassUnseeded += gsrc->SCMetalMassUnseeded;
     gdst->SCClusterMassUnseededInit += gsrc->SCClusterMassUnseededInit;
     /* Unseeded-star metallicity distribution: min/max combine, sums/hist add. */
@@ -1893,6 +1912,15 @@ static void fof_reduce_group(void * pdst, void * psrc) {
 /* Map an unseeded-star metallicity Z (absolute mass fraction) to its bin in the
  * per-group SCMetUnseededHist.  Z<=0 (pristine) and Z below the floor land in the
  * underflow bin 0; Z above the ceiling in the overflow bin NBIN-1. */
+/* Does an unseeded star of BirthMetallicity zb enter the host group's metallicity
+ * statistics (the ones the CW-model cluster metallicity is drawn from)?  Always, unless
+ * CWmodelMetallicityMin > 0 masks out the stars below the limit.  Used identically by
+ * add_particle_to_group and the BHseedSecFOFbound rebuild so both agree. */
+static inline int sc_met_star_counts(double zb)
+{
+    return !(fof_params.CWmodelMetallicityMinAbs > 0) || zb >= fof_params.CWmodelMetallicityMinAbs;
+}
+
 static int sc_met_hist_bin(double Z)
 {
     if(Z <= 0)
@@ -1945,7 +1973,7 @@ static double sc_met_hist_percentile(const float * hist, int64_t N,
  * All zero when the group has no unseeded star. */
 static void sc_met_unseeded_stats(const struct Group * g, struct SCmetdist * md)
 {
-    int64_t N = g->NStarUnseeded;
+    int64_t N = g->NStarMetUnseeded;     /* the stars that entered the SCMet* sums */
     if(N <= 0) {
         memset(md, 0, sizeof(*md));
         return;
@@ -2052,9 +2080,14 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
             gdst->StellarMassUnseeded += P[index].Mass;
             gdst->NStarUnseeded++;
 
-            /* Unseeded-star metallicity for StarClusterDetails: metal mass (frozen
-             * BirthMetallicity * frozen initClusterMass) and the raw Gamma*m_star
-             * denominator (initClusterMass), both over unseeded stars only. */
+            /* Unseeded-star metallicity for StarClusterDetails and the CW-model cluster
+             * metallicity: metal mass (frozen BirthMetallicity * frozen initClusterMass)
+             * and the raw Gamma*m_star denominator (initClusterMass), both over unseeded
+             * stars only -- and, with CWmodelMetallicityMin > 0, only over the stars at or
+             * above the limit (sc_met_star_counts); NStarMetUnseeded counts those.  The
+             * host-star ranking below is NOT masked. */
+            if(sc_met_star_counts(STARP(index).BirthMetallicity)) {
+            gdst->NStarMetUnseeded++;
             gdst->SCMetalMassUnseeded += STARP(index).BirthMetallicity * STARP(index).initClusterMass;
             gdst->SCClusterMassUnseededInit += STARP(index).initClusterMass;
 
@@ -2075,6 +2108,7 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
                 gdst->SCMetUnseededLogSum  += lzb;
                 gdst->SCMetUnseededLogSum2 += lzb * lzb;
             }
+            }   /* sc_met_star_counts */
 
             /* Track the unseeded star with the largest ranking key -- ClusterMass (or
              * StarClusterMass_sample when StarClusterSampling=1), optionally
@@ -3504,6 +3538,8 @@ struct rs_group {
      * n_request/n_comp. */
     int      n_placed;
     int      nstar_unseeded;/* NStarUnseeded: the group's whole host-star supply */
+    int      nstar_met;     /* NStarMetUnseeded: stars in the metallicity statistics / met_hist total
+                             * (= nstar_unseeded unless CWmodelMetallicityMin masked some out) */
     int      mass_offset;   /* offset into the gathered mass array (filled after gather) */
     uint64_t SeedStarID;    /* RNG seed for the combined draw */
     double   capped;        /* SCcomMcut (group unseeded stellar mass) = mass-function cutoff */
@@ -3526,7 +3562,7 @@ struct rs_group {
     double   met_logmean;
     double   met_logstd;
     /* The group's log10(BirthMetallicity) histogram over its UNSEEDED stars (a copy of
-     * Group.SCMetUnseededHist; nstar_unseeded is its total count), for the
+     * Group.SCMetUnseededHist; nstar_met is its total count), for the
      * CWmodelMetallicity 'starsample' per-cluster draw.  Carried per group rather than
      * re-derived because every rank must draw the same Z for the same cluster, and only
      * the owner rank holds the Group.  Costs SC_MET_HIST_NBIN floats per eligible group,
@@ -3588,6 +3624,10 @@ static double rs_star_key(uint64_t id, const RandTable * const rnd)
 static double cw_sample_cluster_met(const struct rs_group * m, uint64_t star_id,
                                     const RandTable * const rnd)
 {
+    /* CWmodelMetallicityMin: no unseeded star of the group is at or above the limit,
+     * so there is nothing to draw from -- every cluster gets the limit itself. */
+    if(fof_params.CWmodelMetallicityMinAbs > 0 && m->nstar_met <= 0)
+        return fof_params.CWmodelMetallicityMinAbs;
     if(fof_params.CWmodelMetallicity == CW_MET_AVE)
         return m->met_unseeded;
     if(fof_params.CWmodelMetallicity == CW_MET_STARSAMPLE) {
@@ -3600,7 +3640,7 @@ static double cw_sample_cluster_met(const struct rs_group * m, uint64_t star_id,
          * ClusterMass and so is a mass-biased subset. */
         uint64_t hs = star_id * 6364136223846793005ULL + 1442695040888963407ULL;
         double u = get_random_number(hs + 802, rnd);
-        return sc_met_hist_percentile(m->met_hist, m->nstar_unseeded,
+        return sc_met_hist_percentile(m->met_hist, m->nstar_met,
                                       m->metdist.min, m->metdist.max, u);
     }
     double lzmin = (m->metdist.min > 0) ? log10(m->metdist.min) : SC_MET_HIST_LOGMIN;
@@ -3931,6 +3971,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         m->comp_sc_share = 0;
         m->n_placed = 0;        /* counted during the placement phases, on every rank */
         m->nstar_unseeded = g->NStarUnseeded;
+        m->nstar_met = g->NStarMetUnseeded;
         m->mass_offset = 0;     /* set after gather */
         m->SeedStarID = (uint64_t) g->SeedStarID;
         m->capped = g->SCcomMcut;
@@ -3947,9 +3988,9 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         sc_group_mass(g, &m->gmass);
         /* Equal-weight log10(Z) mean/std of the unseeded stars for the
          * CWmodelMetallicity 'lognormal' per-cluster draw. */
-        if(g->NStarUnseeded > 0) {
-            double lmean = g->SCMetUnseededLogSum / (double) g->NStarUnseeded;
-            double lvar = g->SCMetUnseededLogSum2 / (double) g->NStarUnseeded - lmean * lmean;
+        if(g->NStarMetUnseeded > 0) {
+            double lmean = g->SCMetUnseededLogSum / (double) g->NStarMetUnseeded;
+            double lvar = g->SCMetUnseededLogSum2 / (double) g->NStarMetUnseeded - lmean * lmean;
             m->met_logmean = lmean;
             m->met_logstd = lvar > 0 ? sqrt(lvar) : 0;
         } else {
@@ -3957,8 +3998,9 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
             m->met_logstd = 0;
         }
         /* The log10(Z) histogram itself, for the 'starsample' per-cluster draw.  Its
-         * total count is nstar_unseeded, the same denominator sc_met_unseeded_stats
-         * uses, so the two describe the same star set under BHseedSecFOFbound too. */
+         * total count is nstar_met, the same denominator sc_met_unseeded_stats
+         * uses, so the two describe the same star set under BHseedSecFOFbound and
+         * CWmodelMetallicityMin too. */
         memcpy(m->met_hist, g->SCMetUnseededHist, sizeof(m->met_hist));
         off += n_req;
     }
@@ -4150,9 +4192,9 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
              * radius and metallicity for the same cluster. */
             uint64_t ckey = (m->SeedStarID ^ 0xA5A5A5A5A5A5A5A5ULL)
                           + 0x9E3779B97F4A7C15ULL * (uint64_t)(s + 1);
-            /* Effective radius from the size-mass relation (0.5 dex scatter): recorded in
-             * the StarClusterDetails seed record, and the cluster size input of the CW
-             * seed-mass model. */
+            /* Effective radius from the size-mass relation selected by StarClusterReffRelation
+             * and its scatter (or StarClusterReffScatter): recorded in the StarClusterDetails seed record, and
+             * the cluster size input of the CW seed-mass model. */
             double reff_pc = starcluster_sample_reff_pc(m_sc, ckey, rnd);
             /* MbhMscRelationCWmodel: seed mass = M_VMS of the Williams et al.
              * 2026 collision model for this cluster (mass, virial radius
@@ -5670,6 +5712,7 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
         float  bhist[SC_MET_HIST_NBIN];
         memset(bhist, 0, sizeof(bhist));
         int64_t nbound_uns = 0;
+        int64_t nbound_met = 0;     /* of those, the stars passing the CWmodelMetallicityMin mask */
         for(k = 0; k < N; k++) {
             const struct sb_star * st = &sbs[s + rm[k].k];
             const double rk_ = rm[k].r;                       /* unsoftened radius */
@@ -5715,6 +5758,8 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
                     /* Metallicity summary of the bound unseeded stars, term for term
                      * as add_particle_to_group builds the unrestricted one. */
                     nbound_uns++;
+                    if(sc_met_star_counts(st->zbirth)) {
+                    nbound_met++;
                     bmet_mass += (double) st->zbirth * st->initscm;
                     bmet_init += st->initscm;
                     {
@@ -5729,6 +5774,7 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
                         blz_sum  += lzb;
                         blz_sum2 += lzb * lzb;
                     }
+                    }   /* sc_met_star_counts */
                     /* Same key AND same ordering as add_particle_to_group's
                      * MaxStarClusterMass (sc_seed_host_better), so the bound host is
                      * exactly the one the unrestricted run would have chosen had the
@@ -5787,11 +5833,13 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
             grp->SCcomMcut = bound_mass_uns;
 
             grp->NStarUnseeded = (int) nbound_uns;
+            grp->NStarMetUnseeded = (int) nbound_met;
             grp->SCMetalMassUnseeded = bmet_mass;
             grp->SCClusterMassUnseededInit = bmet_init;
-            /* Restore the empty-set sentinels when nothing is bound, so
-             * sc_met_unseeded_stats takes its own N < 1 early-out unchanged. */
-            grp->SCMetUnseededMin = (nbound_uns > 0) ? bz_min : 1e30;
+            /* Restore the empty-set sentinels when nothing is bound (or nothing passes
+             * the metallicity mask), so sc_met_unseeded_stats takes its own N < 1
+             * early-out unchanged. */
+            grp->SCMetUnseededMin = (nbound_met > 0) ? bz_min : 1e30;
             grp->SCMetUnseededMax = bz_max;
             grp->SCMetUnseededSum = bz_sum;
             grp->SCMetUnseededSum2 = bz_sum2;

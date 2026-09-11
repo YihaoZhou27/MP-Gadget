@@ -39,6 +39,18 @@
 #include "utils/endrun.h"
 #include "utils/mymalloc.h"
 
+/* StarClusterReffRelation: the median size-mass relation R_eff = R4 pc (M_cl/1e4 Msun)^beta
+ * that starcluster_sample_reff_pc() draws about, and the lognormal scatter (dex) that goes
+ * with it (the relation's own scatter is used unless StarClusterReffScatter >= 0 replaces
+ * it).  Both are PROJECTED effective radii -- the CW seed-mass model applies its own
+ * r_max = 1.4 R_eff, so no 3-D deprojection belongs here. */
+#define SC_REFF_BG21 0   /* Brown & Gnedin 2021, LEGUS clusters of 1-10 Myr ("young"): 2.365 pc, 0.180, 0.32 dex (default) */
+#define SC_REFF_GBF  1   /* the relation used before this switch existed: 1.4 pc, 0.25, 0.5 dex */
+static const double sc_reff_R4_pc[2] = {2.365, 1.4};
+static const double sc_reff_beta[2]  = {0.180, 0.25};
+static const double sc_reff_sigma[2] = {0.32,  0.5};
+static const char * sc_reff_name[2]  = {"BG21", "GBF"};
+
 /*Parameters of the star formation model*/
 static struct SFRParams
 {
@@ -67,6 +79,14 @@ static struct SFRParams
     /* If > 0, use this fixed effective radius (in pc) for every seeded star cluster
      * instead of the size-mass relation. Default 0 (use the size-mass relation). */
     double StarClusterFixReff;
+    /* Which size-mass relation (SC_REFF_*) and scatter starcluster_sample_reff_pc draws
+     * from when StarClusterFixReff = 0.  Only used with SecondFOFOn = 1: the secFOF
+     * star-cluster seeding is the sampler's only caller. */
+    int StarClusterReffRelation;
+    /* Lognormal scatter (dex) that starcluster_sample_reff_pc actually draws with: the
+     * selected relation's own value (sc_reff_sigma) unless the parameter
+     * StarClusterReffScatter is >= 0, in which case that value replaces it. */
+    double StarClusterReffSigma;
     /*!< may be used to set a floor for the gas temperature */
     double MinGasTemp;
     /* Precomputed constants for M_cstar calculation (in code units) */
@@ -209,6 +229,38 @@ void set_sfr_params(ParameterSet * ps)
         sfr_params.StarClusterFixReff = param_get_double(ps, "StarClusterFixReff");
         if(sfr_params.StarClusterFixReff < 0)
             endrun(0, "StarClusterFixReff (%g) must be >= 0.\n", sfr_params.StarClusterFixReff);
+        /* StarClusterReffRelation: only meaningful with SecondFOFOn = 1 (and StarClusterOn),
+         * where the secFOF seeding samples cluster radii.  An unrecognised value is an
+         * error there; without the second FOF the parameter is inert and BG21 is kept. */
+        {
+            const char * rel = param_get_string(ps, "StarClusterReffRelation");
+            const int SecondFOFOn = param_get_int(ps, "SecondFOFOn");
+            if(strcmp(rel, "BG21") == 0)
+                sfr_params.StarClusterReffRelation = SC_REFF_BG21;
+            else if(strcmp(rel, "GBF") == 0)
+                sfr_params.StarClusterReffRelation = SC_REFF_GBF;
+            else if(SecondFOFOn)
+                endrun(0, "StarClusterReffRelation = '%s' is not supported: use 'BG21' or 'GBF'.\n", rel);
+            else {
+                sfr_params.StarClusterReffRelation = SC_REFF_BG21;
+                message(0, "StarClusterReffRelation = '%s' ignored (SecondFOFOn = 0); BG21 kept.\n", rel);
+            }
+            /* StarClusterReffScatter: < 0 (default) keeps the scatter that belongs to the
+             * selected relation; >= 0 replaces it (0 puts every cluster on the median
+             * relation).  Like the relation itself it only matters where the sampler is
+             * called, i.e. with SecondFOFOn = 1 and StarClusterFixReff = 0. */
+            const double scat = param_get_double(ps, "StarClusterReffScatter");
+            const int r = sfr_params.StarClusterReffRelation;
+            sfr_params.StarClusterReffSigma = scat < 0 ? sc_reff_sigma[r] : scat;
+            if(SecondFOFOn && sfr_params.StarClusterOn && sfr_params.StarClusterFixReff <= 0) {
+                message(0, "StarClusterReffRelation = %s: star-cluster R_eff = %g pc (M_cl/1e4 Msun)^%g with %g dex lognormal scatter (%s).\n",
+                        sc_reff_name[r], sc_reff_R4_pc[r], sc_reff_beta[r], sfr_params.StarClusterReffSigma,
+                        scat < 0 ? "the relation's own value" : "set by StarClusterReffScatter");
+            }
+            else if(scat >= 0)
+                message(0, "StarClusterReffScatter = %g ignored (%s).\n", scat,
+                        sfr_params.StarClusterFixReff > 0 ? "StarClusterFixReff > 0 fixes every cluster radius" : "no star-cluster radii are sampled");
+        }
         sfr_params.StarClusterCFEsigma = param_get_int(ps, "StarClusterCFEsigma");
         if(sfr_params.StarClusterCFEsigma < 0 || sfr_params.StarClusterCFEsigma > 2)
             endrun(0, "StarClusterCFEsigma = %d is not supported (0, 1 or 2)\n", sfr_params.StarClusterCFEsigma);
@@ -1144,12 +1196,14 @@ double get_msc_min_code(void)
 
 /* Effective radius (in pc) of a seeded star cluster of code-unit mass mcl_code.
  * If StarClusterFixReff > 0, that fixed radius (in pc) is returned for every cluster.
- * Otherwise the median follows the size-mass relation R_eff = 1.4 pc * (M_cl/1e4 Msun)^0.25,
- * with a 0.5 dex lognormal scatter drawn via Box-Muller. The scatter is keyed on rand_id (the
- * host star ID) so the radius is reproducible across ranks/restarts; log10(R/pc) is
- * clipped to [-1, 2] (0.1-100 pc). The cluster mass is converted to solar masses with
- * the SAME factor as the mass-function thresholds (msc_min_code = 100 Msun) to stay
- * consistent with the sampled cluster masses. */
+ * Otherwise the median follows the size-mass relation selected by StarClusterReffRelation,
+ * R_eff = R4 pc * (M_cl/1e4 Msun)^beta (BG21: 2.365 pc, 0.180; GBF: 1.4 pc, 0.25), with a
+ * lognormal scatter drawn via Box-Muller -- the relation's own (BG21: 0.32 dex; GBF: 0.5 dex)
+ * unless StarClusterReffScatter >= 0 replaces it (StarClusterReffSigma holds the value in
+ * use). The scatter is keyed on rand_id (the host star ID) so the radius is reproducible across
+ * ranks/restarts; log10(R/pc) is clipped to [-1, 2] (0.1-100 pc). The cluster mass is
+ * converted to solar masses with the SAME factor as the mass-function thresholds
+ * (msc_min_code = 100 Msun) to stay consistent with the sampled cluster masses. */
 double starcluster_sample_reff_pc(double mcl_code, uint64_t rand_id, const RandTable * const rnd)
 {
     if(mcl_code <= 0 || sfr_params.msc_min_code <= 0)
@@ -1160,8 +1214,10 @@ double starcluster_sample_reff_pc(double mcl_code, uint64_t rand_id, const RandT
         return sfr_params.StarClusterFixReff;
     /* code mass -> solar mass: msc_min_code corresponds to 100 Msun. */
     double mcl_solar = mcl_code / sfr_params.msc_min_code * 100.0;
-    double logR = 0.25 * log10(mcl_solar) + log10(1.4) - 1.0;   /* median log10(R/pc) */
-    /* 0.5 dex lognormal scatter: Box-Muller Gaussian. Mix the ID (as rs_star_key does)
+    const int rel = sfr_params.StarClusterReffRelation;
+    /* median log10(R/pc) = log10(R4) + beta * log10(M_cl / 1e4 Msun) */
+    double logR = sc_reff_beta[rel] * (log10(mcl_solar) - 4.0) + log10(sc_reff_R4_pc[rel]);
+    /* lognormal scatter of the relation: Box-Muller Gaussian. Mix the ID (as rs_star_key does)
      * then offset by +700/+701 to stay clear of the mass sampler's RNG streams. */
     uint64_t h = rand_id * 6364136223846793005ULL + 1442695040888963407ULL;
     double u1 = get_random_number(h + 700, rnd);
@@ -1169,7 +1225,7 @@ double starcluster_sample_reff_pc(double mcl_code, uint64_t rand_id, const RandT
     if(u1 < 1e-20)
         u1 = 1e-20;
     double z = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
-    double logR_err = logR + 0.5 * z;
+    double logR_err = logR + sfr_params.StarClusterReffSigma * z;
     if(logR_err < -1.0) logR_err = -1.0;
     if(logR_err >  2.0) logR_err =  2.0;
     return pow(10.0, logR_err);

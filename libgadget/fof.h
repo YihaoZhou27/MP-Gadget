@@ -154,6 +154,8 @@ struct Group
     MyFloat StarClusterMassSampleUnseeded; /*!< Sum of StarClusterMass_sample over UNSEEDED stars (sampled seeding). */
     MyFloat SCMass_seeded;                 /*!< Sum of ClusterMass over SEEDED stars (catalogue output). */
     int NStarUnseeded;                     /*!< Count of UNSEEDED type-4 stars (caps the per-secFOF multi-seed number). */
+    int NStarMetUnseeded;                  /*!< Count of the UNSEEDED stars that enter the SCMet* statistics below: all of
+                                            *   them unless CWmodelMetallicityMin > 0 masks out those below the limit. */
     /* Unseeded-star metallicity for the StarClusterDetails record AND for the CW
      * seed-mass model's per-cluster Z draw: the metal mass ratio
      * Sum(BirthMetallicity*initClusterMass) / Sum(initClusterMass) over UNSEEDED
@@ -170,7 +172,9 @@ struct Group
     /* Per-particle (equal-weight) BirthMetallicity distribution of UNSEEDED stars,
      * recorded in the StarClusterDetails file: exact min/max, running sums for the
      * standard deviation, and a fixed log10(Z) histogram for the median/quartiles.
-     * The count N is NStarUnseeded.  Min is initialised to a large sentinel in
+     * The count N is NStarMetUnseeded (= NStarUnseeded unless CWmodelMetallicityMin
+     * masks stars out; the SCMetalMassUnseeded/SCClusterMassUnseededInit sums are
+     * masked the same way).  Min is initialised to a large sentinel in
      * add_particle_to_group; all others start at 0 (memset). */
     float   SCMetUnseededMin;              /*!< min BirthMetallicity over unseeded stars. */
     float   SCMetUnseededMax;              /*!< max BirthMetallicity over unseeded stars. */
