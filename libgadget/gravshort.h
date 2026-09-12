@@ -50,6 +50,7 @@ struct GravShortPriv {
     /* Per-type tidal flags: which particle types need tidal computation */
     int TidalGas; /* Compute tidal for gas (Type 0) */
     int TidalBH;  /* Compute tidal for BH (Type 5) */
+    double atime; /* scale factor of this walk: stamps the BH tidal field (TidalFieldAtime) */
 };
 
 #define GRAV_GET_PRIV(tw) ((struct GravShortPriv *) ((tw)->priv))
@@ -87,13 +88,21 @@ grav_short_postprocess(int i, TreeWalk * tw)
             GRAV_GET_PRIV(tw)->TidalTensorStore[i][k] += SphP[PI].TidalTensorPM[k] / G;
         tidal_field_store_eigenvalues(i, GRAV_GET_PRIV(tw)->TidalTensorStore[i], G);
     }
-    /* Compute tidal field strength for BH particles. */
+    /* Compute tidal field eigenvalues and strength for BH particles.  The eigenvalues are
+     * kept because the star-cluster relaxation rate (SCEvolutionRelaxation) needs the
+     * E-MOSAICS strength max(lambda) + Omega^2, which the norm cannot supply; one
+     * eigen-decomposition serves both.  COMOVING like the gas eigenvalues. */
     if(GRAV_GET_PRIV(tw)->TidalBH && P[i].Type == 5) {
         int PI = P[i].PI;
         int k;
         for(k = 0; k < 6; k++)
             GRAV_GET_PRIV(tw)->TidalTensorStore[i][k] += BhP[PI].TidalTensorPM[k] / G;
-        BhP[PI].TidalFieldStrength = tidal_field_norm(GRAV_GET_PRIV(tw)->TidalTensorStore[i], G);
+        double eig[3];
+        tidal_field_eigenvalues(GRAV_GET_PRIV(tw)->TidalTensorStore[i], G, eig);
+        for(k = 0; k < 3; k++)
+            BhP[PI].TidalFieldEigenvalues[k] = eig[k];
+        BhP[PI].TidalFieldStrength = sqrt(eig[0] * eig[0] + eig[1] * eig[1] + eig[2] * eig[2]);
+        BhP[PI].TidalFieldAtime = GRAV_GET_PRIV(tw)->atime;
     }
 }
 

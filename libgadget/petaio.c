@@ -322,9 +322,17 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
         if(P[i].Type == 5) {
             BHP(i).init_Msc = 0;
             BHP(i).init_Msc_sample = 0;
+            /* Absent from snapshots written before these fields existed: 0 = unknown
+             * (SC_Reff is then set lazily from SC_initReff or the size-mass median). */
+            BHP(i).SC_initReff = 0;
+            BHP(i).SC_Reff = 0;
+            /* transient, 0 at every snapshot (see slotsmanager.h) */
+            BHP(i).SC_RlxPendingMyr = 0;
             /* Debug-only WRONLY fields: not read back, so default to 0 on restart. */
             BHP(i).CappedStarMass = 0;
             BHP(i).BHNgbAtSeeding = 0;
+            memset(BHP(i).TidalFieldEigenvalues, 0, sizeof(BHP(i).TidalFieldEigenvalues));
+            BHP(i).TidalFieldAtime = 0;     /* recomputed at the first (PM) step after the restart */
         }
     }
 
@@ -927,6 +935,8 @@ SIMPLE_PROPERTY_PI(BlackholeKineticFdbkEnergy, KineticFdbkEnergy, float, 1, stru
 SIMPLE_PROPERTY_PI(init_Msc, init_Msc, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(init_Msc_sample, init_Msc_sample, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeStarClusterMass, StarClusterMass, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(SC_initReff, SC_initReff, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(SC_Reff, SC_Reff, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeStarClusterFormationTime, StarClusterFormationTime, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeStarClusterMetallicity, StarClusterMetallicity, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeStarClusterMetals, StarClusterMetals[0], float, NMETALS, struct bh_particle_data)
@@ -1158,6 +1168,11 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
     IO_REG_NONFATAL(init_Msc,        "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(init_Msc_sample, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeStarClusterMass, "f4", 1, 5, IOTable);
+    /* Initial and current R_eff of the BH's star cluster (physical pc); read back because the
+     * GB08 relaxation and the size evolution need them after a restart.  Registered here, so
+     * they are written to PART, PIG and SecPIG alike. */
+    IO_REG_NONFATAL(SC_initReff, "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(SC_Reff, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeStarClusterFormationTime, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeStarClusterMetallicity, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeStarClusterMetals, "f4", NMETALS, 5, IOTable);
@@ -1217,6 +1232,7 @@ SIMPLE_GETTER_PI(GTVelDisp, VDisp, float, 1, struct sph_particle_data)
 SIMPLE_GETTER_PI(GTBHVelDisp, VDisp, float, 1, struct bh_particle_data)
 SIMPLE_GETTER_PI(GTCappedStarMass, CappedStarMass, float, 1, struct bh_particle_data)
 SIMPLE_GETTER_PI(GTBHNgbAtSeeding, BHNgbAtSeeding, int, 1, struct bh_particle_data)
+SIMPLE_GETTER_PI(GTBlackholeTidalFieldEigenvalues, TidalFieldEigenvalues[0], float, 3, struct bh_particle_data)
 SIMPLE_GETTER_PI(GTStarVelDisp, VDisp, float, 1, struct star_particle_data)
 SIMPLE_GETTER_PI(GTVDispGas, VDisp_gas, float, 1, struct sph_particle_data)
 SIMPLE_GETTER_PI(GTVDispStar, VDisp_star, float, 1, struct sph_particle_data)
@@ -1250,6 +1266,9 @@ void register_debug_io_blocks(struct IOTable * IOTable)
     IO_REG_WRONLY(BHVelDisp,       "f4", 1, 5, IOTable);
     IO_REG_WRONLY(CappedStarMass,  "f4", 1, 5, IOTable);
     IO_REG_WRONLY(BHNgbAtSeeding,  "i4", 1, 5, IOTable);
+    /* BH tidal tensor eigenvalues (descending), comoving: multiply by a^-3 for physical.
+     * Zero unless BlackholeTidalField=1. */
+    IO_REG_WRONLY(BlackholeTidalFieldEigenvalues, "f4", 3, 5, IOTable);
     IO_REG_WRONLY(StarVelDisp,       "f4", 1, 4, IOTable);
     IO_REG_WRONLY(VDispGas,    "f4", 1, 0, IOTable);
     IO_REG_WRONLY(VDispStar,   "f4", 1, 0, IOTable);

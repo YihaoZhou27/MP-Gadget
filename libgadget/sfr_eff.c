@@ -1231,6 +1231,24 @@ double starcluster_sample_reff_pc(double mcl_code, uint64_t rand_id, const RandT
     return pow(10.0, logR_err);
 }
 
+/* Median of the distribution starcluster_sample_reff_pc() draws from: the effective radius
+ * (in pc) of the StarClusterReffRelation size-mass relation at code-unit mass mcl_code with
+ * no scatter, clipped like the draw (StarClusterFixReff > 0 returns that fixed radius).
+ * Returns 0 for a non-positive mass. */
+double starcluster_median_reff_pc(double mcl_code)
+{
+    if(mcl_code <= 0 || sfr_params.msc_min_code <= 0)
+        return 0;
+    if(sfr_params.StarClusterFixReff > 0)
+        return sfr_params.StarClusterFixReff;
+    double mcl_solar = mcl_code / sfr_params.msc_min_code * 100.0;
+    const int rel = sfr_params.StarClusterReffRelation;
+    double logR = sc_reff_beta[rel] * (log10(mcl_solar) - 4.0) + log10(sc_reff_R4_pc[rel]);
+    if(logR < -1.0) logR = -1.0;
+    if(logR >  2.0) logR =  2.0;
+    return pow(10.0, logR);
+}
+
 static int make_particle_star(int child, int parent, int placement, double Time, const double GravInternal, const RandTable * const rnd)
 {
     int retflag = 2;

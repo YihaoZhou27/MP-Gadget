@@ -136,4 +136,9 @@ double get_msc_min_code(void);
  * per-cluster (SecFOFseedsumover=0) seeding path. Returns 0 for a non-positive mass. */
 double starcluster_sample_reff_pc(double mcl_code, uint64_t rand_id, const RandTable * const rnd);
 
+/* Median of the relation above at code-unit mass mcl_code (no scatter, same clip;
+ * StarClusterFixReff > 0 returns that radius), in pc. Used by the star-cluster
+ * relaxation (SCEvolutionRelaxation=2) for BHs whose seeding path drew no radius. */
+double starcluster_median_reff_pc(double mcl_code);
+
 #endif

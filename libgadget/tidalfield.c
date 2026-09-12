@@ -111,6 +111,20 @@ tidal_field_store_eigenvalues(int i, const MyFloat tensor[6], double G)
     SphP[PI].TidalFieldEigenvalues[2] = eig[2];
 }
 
+/* Compute the eigenvalues of a tidal tensor into eig[3], sorted descending.
+ * Hands the eigenvalues back to the caller rather than writing them to a slot, so the
+ * caller can both keep them and derive the norm from a single eigen-decomposition. */
+void
+tidal_field_eigenvalues(const MyFloat tensor[6], double G, double eig[3])
+{
+    double T[6];
+    int k;
+    for(k = 0; k < 6; k++)
+        T[k] = tensor[k] * G;
+
+    eigen_symmetric_3x3(T[0], T[1], T[2], T[3], T[4], T[5], eig);
+}
+
 /* Compute tidal field strength: Frobenius norm of eigenvalues = sqrt(sum eig_k^2) */
 double
 tidal_field_norm(const MyFloat tensor[6], double G)

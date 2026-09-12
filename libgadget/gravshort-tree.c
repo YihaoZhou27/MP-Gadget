@@ -117,6 +117,9 @@ grav_short_tree(const ActiveParticles * act, PetaPM * pm, ForceTree * tree, MyFl
      * and would produce incomplete tidal tensors. */
     priv.TidalGas = get_tidalfield_on() && tree->full_particle_tree_flag;
     priv.TidalBH = get_bh_tidalfield_on() && tree->full_particle_tree_flag;
+    /* Scale factor stamped on the BH tidal field; only needed (and the timeline only
+     * guaranteed to be set up) when BH tidal fields are computed. */
+    priv.atime = priv.TidalBH ? get_atime(Ti_Current) : 0;
     if(priv.TidalGas || priv.TidalBH) {
         priv.TidalTensorStore = (MyFloat (*)[6]) mymalloc2("TidalTensor", PartManager->NumPart * sizeof(priv.TidalTensorStore[0]));
         memset(priv.TidalTensorStore, 0, PartManager->NumPart * sizeof(priv.TidalTensorStore[0]));

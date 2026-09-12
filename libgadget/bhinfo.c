@@ -62,6 +62,9 @@ struct __attribute__((__packed__)) BHinfo{
     float TidalFieldStrength;
     float BH_DimlessVorticity;
     float BH_SoundSpeed;
+    /* Initial and current effective radius of the BH's star cluster, physical pc */
+    float SC_initReff;
+    float SC_Reff;
     double a;
     /* See size1 above*/
     int size2;
@@ -156,6 +159,8 @@ collect_BH_info(const int * const ActiveBlackHoles, const int64_t NumActiveBlack
         info->TidalFieldStrength = BHManager[PI].TidalFieldStrength;
         info->BH_DimlessVorticity = priv->BH_Vorticity[PI];
         info->BH_SoundSpeed = priv->BH_SoundSpeed[PI];
+        info->SC_initReff = BHManager[PI].SC_initReff;
+        info->SC_Reff = BHManager[PI].SC_Reff;
         info->a = priv->atime;
     }
 

@@ -159,8 +159,11 @@ void set_blackhole_params(ParameterSet * ps)
         blackhole_params.BHVorticity = param_get_int(ps, "BHVorticity");
         if(blackhole_params.GWRecoilSCKick && !blackhole_params.StarClusterOn)
             endrun(1, "GWRecoilSCKick=1 requires StarClusterOn=1.\n");
+        /* Hierarchical gravity: the sub-step trees hold only the active particles, so the
+         * tidal tensor (grav_short_tree) is computed only on the full tree of a PM step and
+         * the BH keeps that value until the next PM step (a zero-order hold). */
         if(blackhole_params.BlackholeTidalField && param_get_int(ps, "SplitGravityTimestepsOn"))
-            endrun(1, "BlackholeTidalField requires SplitGravityTimestepsOn=0 because hierarchical gravity trees only contain active particles, producing incomplete tidal tensors.\n");
+            message(0, "BlackholeTidalField with SplitGravityTimestepsOn=1: the BH tidal field is computed at PM steps only and held until the next PM step.\n");
         if(blackhole_params.BHseedEveryTimestep && !blackhole_params.BlackholeSeedSCparticle)
             endrun(1, "BHseedEveryTimestep requires BlackholeSeedSCparticle=1.\n");
         if(blackhole_params.BlackholeSeedSCparticle && blackhole_params.BHseedMassScaleMsc && blackhole_params.MinMscForBHseed <= 0)
@@ -424,13 +427,9 @@ blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree *
     priv->BH_accreted_BHMass = (MyFloat *) mymalloc("BH_accreted_BHMass", SlotsManager->info[5].size * sizeof(MyFloat));
     priv->BH_accreted_momentum = (MyFloat (*) [3]) mymalloc("BH_accretemom", 3* SlotsManager->info[5].size * sizeof(priv->BH_accreted_momentum[0]));
     priv->BH_accreted_StarClusterMass = (MyFloat *) mymalloc("BH_accreted_SCMass", SlotsManager->info[5].size * sizeof(MyFloat));
-    priv->BH_accreted_SCMetallicityWeighted = (MyFloat *) mymalloc("BH_accreted_SCMetW", SlotsManager->info[5].size * sizeof(MyFloat));
-    priv->BH_accreted_SCMetalsWeighted = (MyFloat (*) [NMETALS]) mymalloc("BH_accreted_SCMetalsW", NMETALS * SlotsManager->info[5].size * sizeof(MyFloat));
-    priv->BH_accreted_SCTotalMassReturned = (MyFloat *) mymalloc("BH_accreted_SCTMR", SlotsManager->info[5].size * sizeof(MyFloat));
+    priv->BH_accreted_SCmax = (struct bh_sc_state *) mymalloc("BH_accreted_SCmax", SlotsManager->info[5].size * sizeof(struct bh_sc_state));
     priv->BH_GWRecoilKick = (MyFloat (*) [3]) mymalloc("BH_GWRecoilKick", 3 * SlotsManager->info[5].size * sizeof(MyFloat));
     memset(priv->BH_GWRecoilKick, 0, 3 * SlotsManager->info[5].size * sizeof(MyFloat));
-    priv->BH_accreted_SCFormTimeMin = (MyFloat *) mymalloc("BH_SCFormTimeMin", SlotsManager->info[5].size * sizeof(MyFloat));
-    priv->BH_accreted_SCLastEnrichMax = (float *) mymalloc("BH_SCLastEnrichMax", SlotsManager->info[5].size * sizeof(float));
 
     /* Now do the swallowing of particles and dump feedback energy */
     /* We also merge BHs here. Only BHs which are not themselves
@@ -456,12 +455,8 @@ blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree *
         *bhdetailswritten += collect_BH_info(ActiveBlackHoles, NumActiveBlackHoles, priv, PartManager, (struct bh_particle_data*) SlotsManager->info[5].ptr, FdBlackholeDetails);
     }
 
-    myfree(priv->BH_accreted_SCLastEnrichMax);
-    myfree(priv->BH_accreted_SCFormTimeMin);
     myfree(priv->BH_GWRecoilKick);
-    myfree(priv->BH_accreted_SCTotalMassReturned);
-    myfree(priv->BH_accreted_SCMetalsWeighted);
-    myfree(priv->BH_accreted_SCMetallicityWeighted);
+    myfree(priv->BH_accreted_SCmax);
     myfree(priv->BH_accreted_StarClusterMass);
     myfree(priv->BH_accreted_momentum);
     myfree(priv->BH_accreted_BHMass);
@@ -866,12 +861,8 @@ typedef struct {
     MyFloat Mass; /* the accreted Mdyn */
     MyFloat AccretedMomentum[3];
     MyFloat BH_Mass;
-    MyFloat StarClusterMass; /* star cluster mass from merged BHs */
-    MyFloat StarClusterMetallicityWeighted; /* mass-weighted metallicity from merged BHs */
-    float StarClusterMetalsWeighted[NMETALS]; /* mass-weighted species metals from merged BHs */
-    MyFloat StarClusterTotalMassReturned; /* sum of total mass returned from merged BHs */
-    MyFloat StarClusterFormationTimeMin; /* min formation time across swallowed BHs */
-    float StarClusterLastEnrichmentMyrMax; /* max last enrichment time across swallowed BHs */
+    MyFloat StarClusterMass; /* summed star cluster mass of the swallowed BHs (for Mtrack) */
+    struct bh_sc_state SCmax; /* heaviest star cluster among the swallowed BHs (Mass 0: none) */
     int BH_CountProgs;
     int BH_minTimeBin;
     MyFloat GWRecoilKick[3]; /* Accumulated GW recoil kick velocity from BH mergers */
@@ -907,6 +898,46 @@ get_random_dir(int i, double dir[3], const RandTable * const rnd)
     return 0;
 }
 
+/* Star cluster at a BH merger: the remnant keeps the heaviest of the merging clusters.
+ * Cluster (mass ma, carried by BH ida) beats (mb, idb) if it is heavier, ties going to the
+ * larger BH ID so the choice does not depend on the order the merger is evaluated in. */
+static int
+sc_state_heavier(const MyFloat ma, const MyIDType ida, const MyFloat mb, const MyIDType idb)
+{
+    return ma > mb || (ma == mb && ida > idb);
+}
+
+/* Copy the full star-cluster state of BH particle i into s */
+static void
+sc_state_get(struct bh_sc_state * s, const int i)
+{
+    s->ID = P[i].ID;
+    s->Mass = BHP(i).StarClusterMass;
+    s->FormationTime = BHP(i).StarClusterFormationTime;
+    s->Metallicity = BHP(i).StarClusterMetallicity;
+    s->TotalMassReturned = BHP(i).StarClusterTotalMassReturned;
+    s->InitReff = BHP(i).SC_initReff;
+    s->Reff = BHP(i).SC_Reff;
+    s->RlxPendingMyr = BHP(i).SC_RlxPendingMyr;
+    memcpy(s->Metals, BHP(i).StarClusterMetals, sizeof(s->Metals));
+    s->LastEnrichmentMyr = BHP(i).StarClusterLastEnrichmentMyr;
+}
+
+/* Give BH particle i the star cluster described by s (replacing its own) */
+static void
+sc_state_set(const int i, const struct bh_sc_state * s)
+{
+    BHP(i).StarClusterMass = s->Mass;
+    BHP(i).StarClusterFormationTime = s->FormationTime;
+    BHP(i).StarClusterMetallicity = s->Metallicity;
+    BHP(i).StarClusterTotalMassReturned = s->TotalMassReturned;
+    BHP(i).SC_initReff = s->InitReff;
+    BHP(i).SC_Reff = s->Reff;
+    BHP(i).SC_RlxPendingMyr = s->RlxPendingMyr;
+    memcpy(BHP(i).StarClusterMetals, s->Metals, sizeof(s->Metals));
+    BHP(i).StarClusterLastEnrichmentMyr = s->LastEnrichmentMyr;
+}
+
 /**
  * perform blackhole swallow / merger;
  */
@@ -919,8 +950,6 @@ blackhole_feedback_ngbiter(TreeWalkQueryBHFeedback * I,
 
     if(iter->base.other == -1) {
         O->BH_minTimeBin = TIMEBINS;
-        O->StarClusterFormationTimeMin = 1.0e30;
-        O->StarClusterLastEnrichmentMyrMax = -1;
         iter->base.mask = GASMASK + BHMASK;
         iter->base.Hsml = I->Hsml;
         /* Needs to be symmetric because the BH mergers should be symmetric*/
@@ -960,19 +989,10 @@ blackhole_feedback_ngbiter(TreeWalkQueryBHFeedback * I,
         O->BH_CountProgs += BHP(other).CountProgs;
         O->BH_Mass += (BHP(other).Mass);
         O->StarClusterMass += BHP(other).StarClusterMass;
-        O->StarClusterMetallicityWeighted += BHP(other).StarClusterMetallicity * BHP(other).StarClusterMass;
-        {
-            int k;
-            for(k = 0; k < NMETALS; k++)
-                O->StarClusterMetalsWeighted[k] += BHP(other).StarClusterMetals[k] * BHP(other).StarClusterMass;
-        }
-        O->StarClusterTotalMassReturned += BHP(other).StarClusterTotalMassReturned;
-        /* Track min formation time and max last enrichment across swallowed BHs */
-        if(BHP(other).StarClusterFormationTime > 0
-           && BHP(other).StarClusterFormationTime < O->StarClusterFormationTimeMin)
-            O->StarClusterFormationTimeMin = BHP(other).StarClusterFormationTime;
-        if(BHP(other).StarClusterLastEnrichmentMyr > O->StarClusterLastEnrichmentMyrMax)
-            O->StarClusterLastEnrichmentMyrMax = BHP(other).StarClusterLastEnrichmentMyr;
+        /* Keep the heaviest of the swallowed clusters, with its full state */
+        if(BHP(other).StarClusterMass > 0 &&
+           sc_state_heavier(BHP(other).StarClusterMass, P[other].ID, O->SCmax.Mass, O->SCmax.ID))
+            sc_state_get(&O->SCmax, other);
 
         /* Use the true physical mass (Mtrack + SC) for merger bookkeeping,
          * not the possibly inflated SeedBHDynMass stored in P.Mass.
@@ -1211,22 +1231,14 @@ blackhole_feedback_reduce(int place, TreeWalkResultBHFeedback * remote, enum Tre
     TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_Mass[PI], remote->Mass);
     TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_BHMass[PI], remote->BH_Mass);
     TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_StarClusterMass[PI], remote->StarClusterMass);
-    TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_SCMetallicityWeighted[PI], remote->StarClusterMetallicityWeighted);
-    for(k = 0; k < NMETALS; k++) {
-        TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_SCMetalsWeighted[PI][k], remote->StarClusterMetalsWeighted[k]);
-    }
-    TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_SCTotalMassReturned[PI], remote->StarClusterTotalMassReturned);
     for(k = 0; k < 3; k++) {
         TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_momentum[PI][k], remote->AccretedMomentum[k]);
         TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_GWRecoilKick[PI][k], remote->GWRecoilKick[k]);
     }
-    /* Min/max reduce for SC formation time and last enrichment */
-    if(mode == TREEWALK_PRIMARY || remote->StarClusterFormationTimeMin < BH_GET_PRIV(tw)->BH_accreted_SCFormTimeMin[PI]) {
-        BH_GET_PRIV(tw)->BH_accreted_SCFormTimeMin[PI] = remote->StarClusterFormationTimeMin;
-    }
-    if(mode == TREEWALK_PRIMARY || remote->StarClusterLastEnrichmentMyrMax > BH_GET_PRIV(tw)->BH_accreted_SCLastEnrichMax[PI]) {
-        BH_GET_PRIV(tw)->BH_accreted_SCLastEnrichMax[PI] = remote->StarClusterLastEnrichmentMyrMax;
-    }
+    /* Arg-max reduce: the heaviest swallowed cluster over all ranks */
+    struct bh_sc_state * scmax = &BH_GET_PRIV(tw)->BH_accreted_SCmax[PI];
+    if(mode == TREEWALK_PRIMARY || sc_state_heavier(remote->SCmax.Mass, remote->SCmax.ID, scmax->Mass, scmax->ID))
+        *scmax = remote->SCmax;
     if (mode == TREEWALK_PRIMARY || BHP(place).minTimeBin > remote->BH_minTimeBin) {
         BHP(place).minTimeBin = remote->BH_minTimeBin;
     }
@@ -1240,36 +1252,17 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
     if(BH_GET_PRIV(tw)->BH_accreted_BHMass[PI] > 0){
        BHP(n).Mass += BH_GET_PRIV(tw)->BH_accreted_BHMass[PI];
     }
-    /* Merge star cluster mass from swallowed BHs. */
-    if(BH_GET_PRIV(tw)->BH_accreted_StarClusterMass[PI] > 0){
-        /* Merge metallicity with mass-weighting before updating mass */
-        MyFloat old_sc_mass = BHP(n).StarClusterMass;
-        MyFloat new_sc_mass = BH_GET_PRIV(tw)->BH_accreted_StarClusterMass[PI];
-        MyFloat total_sc_mass = old_sc_mass + new_sc_mass;
-        if(total_sc_mass > 0) {
-            BHP(n).StarClusterMetallicity = (BHP(n).StarClusterMetallicity * old_sc_mass
-                + BH_GET_PRIV(tw)->BH_accreted_SCMetallicityWeighted[PI]) / total_sc_mass;
-            int k;
-            for(k = 0; k < NMETALS; k++)
-                BHP(n).StarClusterMetals[k] = (BHP(n).StarClusterMetals[k] * old_sc_mass
-                    + BH_GET_PRIV(tw)->BH_accreted_SCMetalsWeighted[PI][k]) / total_sc_mass;
-        }
-        BHP(n).StarClusterMass += new_sc_mass;
-        /* P.Mass is always recomputed from Mtrack [+ SC] below. */
-        BHP(n).StarClusterTotalMassReturned += BH_GET_PRIV(tw)->BH_accreted_SCTotalMassReturned[PI];
-        /* Merged SC formation time = min(swallower, swallowed),
-         * last enrichment = max(swallower, swallowed).
-         * The swallowed-side min/max were accumulated in the reduce. */
-        MyFloat swallowed_formtime = BH_GET_PRIV(tw)->BH_accreted_SCFormTimeMin[PI];
-        if(swallowed_formtime < 1.0e30) {
-            /* At least one swallowed BH had a star cluster */
-            if(BHP(n).StarClusterFormationTime <= 0 ||
-               swallowed_formtime < BHP(n).StarClusterFormationTime)
-                BHP(n).StarClusterFormationTime = swallowed_formtime;
-        }
-        float swallowed_lastenrich = BH_GET_PRIV(tw)->BH_accreted_SCLastEnrichMax[PI];
-        if(swallowed_lastenrich > BHP(n).StarClusterLastEnrichmentMyr)
-            BHP(n).StarClusterLastEnrichmentMyr = swallowed_lastenrich;
+    /* Star clusters at the merger: the remnant carries ONE cluster, the heaviest of the merging
+     * clusters (its own or a swallowed one, compared by cluster mass rather than inherited with
+     * the surviving BH ID), with that cluster's full state -- mass, radii, metallicity, formation
+     * time and stellar-evolution bookkeeping.  The lighter clusters are removed: their mass is
+     * not added to the remnant (with StarClusterBHDyn=1 it leaves P.Mass, which is recomputed
+     * from Mtrack + StarClusterMass below). */
+    {
+        const struct bh_sc_state * scmax = &BH_GET_PRIV(tw)->BH_accreted_SCmax[PI];
+        if(BH_GET_PRIV(tw)->BH_accreted_StarClusterMass[PI] > 0 && scmax->Mass > 0 &&
+           sc_state_heavier(scmax->Mass, scmax->ID, BHP(n).StarClusterMass, P[n].ID))
+            sc_state_set(n, scmax);
     }
     if(BH_GET_PRIV(tw)->BH_accreted_Mass[PI] > 0)
     {
@@ -1286,7 +1279,7 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
         }
 
         /* Check if the kick ejects the BH from its host star cluster.
-         * If v_kick > v_esc of the combined star cluster, zero the SC mass. */
+         * If v_kick > v_esc of the remnant's (kept) star cluster, zero the SC mass. */
         if(blackhole_params.GWRecoilSCKick && BHP(n).StarClusterMass > 0) {
             /* Kick magnitude in physical km/s */
             double v_kick_sq = 0;
@@ -1312,21 +1305,21 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
                 message(0, "BH %ld: GW kick %.1f km/s exceeds v_esc %.1f km/s "
                         "(M_sc = %.3g Msun), ejecting from star cluster\n",
                         (long) P[n].ID, v_kick_kms, v_esc, M_sc_solar);
-                /* Reset all star cluster state so that if the BH later
-                 * reacquires SC mass via another merger, the evolution
-                 * starts fresh without stale initial-mass contamination
-                 * from StarClusterTotalMassReturned. */
+                /* Reset all star cluster state: the BH carries no cluster.
+                 * A cluster it acquires at a later merger brings its own
+                 * full state (the heaviest-cluster rule above). */
                 BHP(n).StarClusterMass = 0;
                 BHP(n).StarClusterMetallicity = 0;
                 memset(BHP(n).StarClusterMetals, 0, sizeof(BHP(n).StarClusterMetals));
                 BHP(n).StarClusterTotalMassReturned = 0;
                 /* FormationTime=0 follows the existing "no cluster" convention
-                 * (SC evolution guard: FormationTime <= 0 → skip).
-                 * LastEnrichmentMyr=-1 ensures that if the BH reacquires
-                 * SC mass via a later merger, enrichment restarts from
-                 * scratch since the new merger's max will overwrite -1. */
+                 * (SC evolution guard: FormationTime <= 0 → skip). */
                 BHP(n).StarClusterLastEnrichmentMyr = -1;
                 BHP(n).StarClusterFormationTime = 0;
+                /* the radii describe the cluster, which is gone */
+                BHP(n).SC_initReff = 0;
+                BHP(n).SC_Reff = 0;
+                BHP(n).SC_RlxPendingMyr = 0;
             }
         }
 
@@ -1424,7 +1417,7 @@ bh_powerlaw_seed_mass(const MyIDType ID, const RandTable * const rnd)
 }
 
 void
-blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, int BHNgbAtSeeding, MyFloat StarClusterMetallicity, const float * StarClusterMetals, MyFloat SeedMassOverride) {
+blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, int BHNgbAtSeeding, MyFloat StarClusterMetallicity, const float * StarClusterMetals, MyFloat SeedMassOverride, MyFloat SC_initReff) {
     int child;
 
     /* Convert the parent particle in-place into a black hole, keeping its ID
@@ -1480,6 +1473,14 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
     }
     BHP(child).StarClusterLastEnrichmentMyr = 0;
     BHP(child).StarClusterTotalMassReturned = 0;
+    /* Initial effective radius of the cluster (physical pc): the drawn one, or, for a BH that
+     * carries a cluster from a path that draws none, the size-mass median at its mass.
+     * SC_Reff starts from it and evolves only with StarClusterSizeEvolution=1. */
+    BHP(child).SC_initReff = SC_initReff;
+    if(BHP(child).SC_initReff <= 0 && BHP(child).StarClusterMass > 0)
+        BHP(child).SC_initReff = starcluster_median_reff_pc(BHP(child).StarClusterMass);
+    BHP(child).SC_Reff = BHP(child).SC_initReff;
+    BHP(child).SC_RlxPendingMyr = 0;
 
     /* Record the star-cluster mass that seeded this BH. Frozen at creation:
      * never modified by mergers, so an accretor keeps its own seed value. */
@@ -1506,7 +1507,9 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
     BHP(child).DF_SurroundingRmsVel = 0;
     BHP(child).DF_SurroundingDensity = 0;
     memset(BHP(child).TidalTensorPM, 0, sizeof(BHP(child).TidalTensorPM));
+    memset(BHP(child).TidalFieldEigenvalues, 0, sizeof(BHP(child).TidalFieldEigenvalues));
     BHP(child).TidalFieldStrength = 0;
+    BHP(child).TidalFieldAtime = 0;     /* no field until the next full-tree gravity step */
     BHP(child).JumpToMinPot = 0;
     BHP(child).CountProgs = 1;
 
@@ -1681,7 +1684,7 @@ blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime
 
         blackhole_make_one(pi, atime, rnd, 1, sc_mass, sc_mass,
                            STARP(pi).ClusterMass, STARP(pi).StarClusterMass_sample,
-                           0, 0, sc_metallicity, sc_metals, 0);
+                           0, 0, sc_metallicity, sc_metals, 0, 0);
 
         /* The parent star has been converted in-place into the BH (consumed):
          * it is now type 5, so it no longer participates in any seeding scan or

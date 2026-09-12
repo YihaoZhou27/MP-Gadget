@@ -181,7 +181,11 @@ double atime_to_myr(Cosmology *CP, double atime1, double atime2, gsl_integration
     gsl_function ff = {atime_integ, CP};
     double tmyr, abserr;
     gsl_integration_qag(&ff, atime1, atime2, 1e-4, 0, GSL_WORKSPACE, GSL_INTEG_GAUSS61, gsl_work, &tmyr, &abserr);
-    return tmyr * CP->UnitTime_in_s / SEC_PER_MEGAYEAR;
+    /* The internal time unit is UnitTime_in_s / h seconds (CP->Hubble = HUBBLE * UnitTime_in_s),
+     * so the result has to be divided by h to be a physical time: without it every stellar age
+     * handed to the (physical) lifetime tables and Sn1a delay-time distribution was h times too
+     * small, delaying the whole mass and metal return by 1/h. */
+    return tmyr * CP->UnitTime_in_s / CP->HubbleParam / SEC_PER_MEGAYEAR;
 }
 
 /* Functions for the root finder*/

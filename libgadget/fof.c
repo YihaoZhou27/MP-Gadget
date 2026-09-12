@@ -2966,7 +2966,7 @@ static void fof_seed_make_one(struct Group * g, int ThisTask, const double atime
      * at seeding (LenType[5], excludes this seed).  Only meaningful for the secFOF
      * seed path (SeedInSecFOFasStarCluster); 0 for the primary-FOF seed path. */
     int bh_ngb_at_seeding = get_seed_in_secfof() ? g->LenType[5] : 0;
-    blackhole_make_one(index, atime, rnd, seeded_by_starcluster, payload_mass, scaling_mass, init_msc, init_msc_sample, capped_star_mass, bh_ngb_at_seeding, sc_metallicity, sc_metals, 0);
+    blackhole_make_one(index, atime, rnd, seeded_by_starcluster, payload_mass, scaling_mass, init_msc, init_msc_sample, capped_star_mass, bh_ngb_at_seeding, sc_metallicity, sc_metals, 0, 0);
 
     /* StarClusterDetails: one record per star-cluster seed (no-op unless enabled).
      * scaling_mass is this seed's cluster mass (com: bhseed_msc; else the mode's
@@ -3400,7 +3400,7 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
                 blackhole_make_one(cc->local_index, atime, rnd, 1,
                                    (MyFloat) m->per_payload, (MyFloat) m->per_scaling,
                                    (MyFloat) m->per_init_msc, (MyFloat) m->per_init_msc_sample,
-                                   (MyFloat) m->capped, m->bh_ngb, (MyFloat) m->metallicity, m->metals, 0);
+                                   (MyFloat) m->capped, m->bh_ngb, (MyFloat) m->metallicity, m->metals, 0, 0);
                 /* StarClusterDetails: this extra seed's cluster mass is per_scaling.
                  * Reff = 0: not the per-cluster (SecFOFseedsumover=0) path. */
                 scinfo_record_seed(cc->local_index, atime, m->per_scaling, m->sc_mass_total,
@@ -4307,7 +4307,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                                    (MyFloat) m_sc, (MyFloat) m_sc,
                                    (MyFloat) m->capped, m->bh_ngb,
                                    (MyFloat) cc->metallicity, cc->metals,
-                                   seed_mass_override);
+                                   seed_mass_override, (MyFloat) reff_pc);
                 /* StarClusterDetails: this seed's cluster mass is the sampled m_sc;
                  * Mbh_seed is the just-made BH's subgrid mass. */
                 scinfo_record_seed(cc->local_index, atime, m_sc, m->sc_mass_total,
@@ -4504,7 +4504,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
                                        payload, share, share, share,
                                        (MyFloat) m->capped, m->bh_ngb,
                                        (MyFloat) cc->metallicity, cc->metals,
-                                       (MyFloat) comp_unit);
+                                       (MyFloat) comp_unit, 0);
                     scinfo_record_seed(cc->local_index, atime, m->comp_sc_share,
                                        m->sc_mass_total, m->stellar_mass_total,
                                        m->scmass_seeded, m->met_unseeded, 0,

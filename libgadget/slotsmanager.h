@@ -74,14 +74,42 @@ struct bh_particle_data {
     MyFloat CappedStarMass;  /*!< SeedSecFOFcomSample only: total mass of the unseeded star particles of the host secFOF (= Mcut, the SCmasscapSecFOFstarmass cap value). 0 otherwise. Debug-only output. Set at seeding, frozen across mergers. */
     int BHNgbAtSeeding;      /*!< SeedInSecFOFasStarCluster only: number of BH particles already present in the host secFOF (or FOF halo) at the moment this BH was seeded (excludes the seed itself). 0 for all other seeding paths. Debug-only output. Set at seeding, frozen across mergers. */
     MyFloat StarClusterMass; /*!< Mass of the star cluster sticked to the black hole */
+    MyFloat SC_initReff;     /*!< Initial (projected) effective radius of the star cluster, PHYSICAL pc (no h, no a):
+                              the R_eff starcluster_sample_reff_pc() drew at seeding (StarClusterReffRelation
+                              with its scatter, or StarClusterFixReff), i.e. the radius the CW seed-mass model
+                              used and StarClusterDetails records as Reff; when the seeding path draws none, the
+                              StarClusterReffRelation median at the cluster mass.  Never evolves.  A cluster
+                              property: at a BH merger it follows the kept (heaviest) cluster.  0 = unknown or
+                              no cluster (reset when the cluster is dissolved or ejected). */
+    MyFloat SC_Reff;         /*!< Current (projected) effective radius of the star cluster, PHYSICAL pc.  Starts at
+                              SC_initReff and evolves only with StarClusterSizeEvolution=1 (stellar-evolution
+                              expansion, GB08 relaxation).  SCEvolutionRelaxation=2 uses r_h = (4/3) SC_Reff.
+                              Follows the kept cluster at mergers; 0 = not yet set (e.g. restart from an older
+                              snapshot: set lazily from SC_initReff or the median relation) or no cluster. */
+    MyFloat SC_RlxPendingMyr; /*!< Time (Myr) over which the cluster's two-body relaxation has not been applied yet
+                              because the BH had no tidal field: a BH seeded after the gravity of a PM step gets
+                              its first field at the next PM step when SplitGravityTimestepsOn=1.  The whole
+                              interval is relaxed with that first field.  Follows the kept cluster at mergers.
+                              Always 0 after the relaxation of a PM step, hence in snapshots (not written). */
     MyFloat StarClusterFormationTime; /*!< Formation time of the star cluster sticked to the black hole */
     MyFloat StarClusterMetallicity;        /*!< Total metallicity of the star cluster SSP */
     float StarClusterMetals[NMETALS];      /*!< Species-specific metal masses in star cluster */
-    float StarClusterLastEnrichmentMyr;    /*!< Last enrichment time in Myr since formation */
-    MyFloat StarClusterTotalMassReturned;  /*!< Cumulative mass returned to gas from star cluster */
+    float StarClusterLastEnrichmentMyr;    /*!< Cluster age (Myr) at its last stellar-evolution update */
+    MyFloat StarClusterTotalMassReturned;  /*!< Mass lost by the stellar evolution of the star cluster (not given
+                                                to the gas: the star particles return it).
+                                                SCEvolutionRelaxation rescales it with StarClusterMass, so that
+                                                StarClusterMass + StarClusterTotalMassReturned stays the initial
+                                                mass of the stars still bound to the cluster. */
 
     MyFloat TidalTensorPM[6]; /*!< PM long-range tidal tensor: xx, yy, zz, xy, xz, yz */
     MyFloat TidalFieldStrength; /*!< Tidal field strength: Frobenius norm of tidal tensor eigenvalues */
+    MyFloat TidalFieldEigenvalues[3]; /*!< Eigenvalues of the combined (tree + PM) tidal tensor d2Phi/dxidxj,
+                                           sorted descending.  COMOVING with G applied (trace = 4 pi G rho_comoving):
+                                           multiply by a^-3 for physical units.  Zero unless BlackholeTidalField=1. */
+    double TidalFieldAtime;           /*!< Scale factor at which TidalFieldEigenvalues/TidalFieldStrength were computed (the
+                                           BH's last full-tree gravity step: every gravity step with SplitGravityTimestepsOn=0,
+                                           the last PM step with 1).  Physical units need a^-3 of THIS a, so a cached field
+                                           keeps its physical strength between evaluations.  0 = no field yet. */
 };
 
 /*Data for each star particle*/

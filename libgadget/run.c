@@ -74,7 +74,11 @@ static struct run_params
 
     int BlackHoleOn;  /* if black holes are enabled */
     int StarClusterOn; /* if star cluster bh seeding formation is enabled */
-    int StarClusterEvolution; /* if stellar evolution for star clusters is enabled */
+    int SCEvolutionStellar; /* if the stellar-evolution mass loss of the star clusters on BHs is enabled */
+    int SCEvolutionRelaxation; /* two-body relaxation mass loss of the star clusters on BHs: 0 off, 1 E-MOSAICS, 2 GB08 */
+    int StarClusterSizeEvolution; /* StarClusterSizeEvolution parameter: evolve the effective radius of the star clusters on BHs */
+    int SCSizeEvolStellar; /* effective: size evolution from the stellar-evolution mass loss is applied */
+    int SCSizeEvolRelax; /* effective: size evolution from the GB08 relaxation mass loss is applied */
     int SCgasVDisp; /* if gas/stellar velocity dispersion calculation is enabled */
     int BlackHoleSeedHaloBased; /* if the bh seeding is halo-based */
     int BlackHoleSeedGasBased; /* if the bh seeding is gas-based */
@@ -173,7 +177,9 @@ set_all_global_params(ParameterSet * ps)
 
         All.BlackHoleOn = param_get_int(ps, "BlackHoleOn");
         All.StarClusterOn = param_get_int(ps, "StarClusterOn");
-        All.StarClusterEvolution = param_get_int(ps, "StarClusterEvolution");
+        All.SCEvolutionStellar = param_get_int(ps, "SCEvolutionStellar");
+        All.SCEvolutionRelaxation = param_get_int(ps, "SCEvolutionRelaxation");
+        All.StarClusterSizeEvolution = param_get_int(ps, "StarClusterSizeEvolution");
         All.SCgasVDisp = param_get_int(ps, "SCgasVDisp");
         All.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
         All.BlackHoleSeedStarCluster = param_get_int(ps, "BlackHoleSeedStarCluster");
@@ -242,6 +248,39 @@ set_all_global_params(ParameterSet * ps)
                               "but you did not switch on any BH seeding method (SeedInSecFOFasStarCluster, BlackHoleSeedHaloBased, BlackHoleSeedStarCluster, BlackHoleSeedGasBased, or BlackholeSeedSCparticle).\nThis mode is not supported.\n");
             }
         }
+        /* Evolution of the star clusters attached to BH particles: stellar evolution and
+         * two-body relaxation are switched independently.  Relaxation is driven by the BH
+         * tidal field, so the BH tidal tensor has to be computed. */
+        if(All.SCEvolutionRelaxation < 0 || All.SCEvolutionRelaxation > 2)
+            endrun(1, "SCEvolutionRelaxation must be 0 (off), 1 (E-MOSAICS) or 2 (GB08), got %d.\n", All.SCEvolutionRelaxation);
+        if(All.SCEvolutionStellar && !All.StarClusterOn)
+            endrun(1, "SCEvolutionStellar=1 requires StarClusterOn=1.\n");
+        if(All.SCEvolutionRelaxation && !All.StarClusterOn)
+            endrun(1, "SCEvolutionRelaxation=%d requires StarClusterOn=1.\n", All.SCEvolutionRelaxation);
+        if(All.SCEvolutionRelaxation && !param_get_int(ps, "BlackholeTidalField"))
+            endrun(1, "SCEvolutionRelaxation=%d requires BlackholeTidalField=1: the relaxation rate is set by the BH tidal field.\n", All.SCEvolutionRelaxation);
+        if((All.SCEvolutionStellar || All.SCEvolutionRelaxation) && param_get_int(ps, "StarClusterBHDyn") != 1)
+            message(0, "Star-cluster evolution with StarClusterBHDyn=%d: the per-cluster, combined-sample and compensating secFOF seeds "
+                       "carry no StarClusterMass unless StarClusterBHDyn=1, so only the other seeding paths have clusters to evolve.\n",
+                    param_get_int(ps, "StarClusterBHDyn"));
+        if(All.SCEvolutionRelaxation)
+            starcluster_relaxation_message(All.SCEvolutionRelaxation, All.HierarchicalGravity);
+        /* Size evolution of the star clusters on BHs: each term follows a mass-evolution model
+         * that is actually running -- the stellar-evolution mass loss and the GB08 relaxation,
+         * whose xi and zeta the size equation needs. */
+        if(All.StarClusterSizeEvolution < 0 || All.StarClusterSizeEvolution > 1)
+            endrun(1, "StarClusterSizeEvolution must be 0 or 1, got %d.\n", All.StarClusterSizeEvolution);
+        All.SCSizeEvolStellar = All.StarClusterSizeEvolution && All.StarClusterOn && All.SCEvolutionStellar;
+        All.SCSizeEvolRelax = All.StarClusterSizeEvolution && All.StarClusterOn && All.SCEvolutionRelaxation == 2;
+        if(All.StarClusterSizeEvolution && !All.SCSizeEvolStellar && !All.SCSizeEvolRelax) {
+            message(0, "WARNING: StarClusterSizeEvolution=1 but no star-cluster mass-evolution model it can follow is on "
+                       "(SCEvolutionStellar=1, or SCEvolutionRelaxation=2); size evolution is switched off.\n");
+            All.StarClusterSizeEvolution = 0;
+        }
+        if(All.StarClusterSizeEvolution && All.SCEvolutionRelaxation == 1)
+            message(0, "StarClusterSizeEvolution: the E-MOSAICS relaxation (SCEvolutionRelaxation=1) has no size term, "
+                       "and its mass loss does not depend on the radius.\n");
+        starcluster_size_evolution_message(All.SCSizeEvolStellar, All.SCSizeEvolRelax);
         All.ExcursionSetReionOn = param_get_int(ps,"ExcursionSetReionOn");
         All.UVBGdim = param_get_int(ps, "UVBGdim");
     }
@@ -672,13 +711,19 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
             if(!gasTree.tree_allocated_flag)
                 force_tree_rebuild_mask(&gasTree, ddecomp, GASMASK | BHMASK, All.OutputDir);
 
+            /* Two-body relaxation of the star clusters attached to BH particles. Done before
+             * their stellar evolution, which then acts on the clusters' surviving stars. */
+            if(All.StarClusterOn && All.SCEvolutionRelaxation)
+                starcluster_relaxation(&Act, &All.CP, atime, All.SCEvolutionRelaxation, All.SCSizeEvolRelax, units);
+            /* Stellar-evolution mass loss of the star clusters on BH particles: a mass update
+             * only, as their ejecta are already returned by the star particles (metal_return). */
+            if(All.StarClusterOn && All.SCEvolutionStellar)
+                starcluster_stellar_evolution(&Act, &All.CP, atime, All.SCSizeEvolStellar);
+
             /* Do this before sfr and bh so the gas hsml always contains DesNumNgb neighbours.*/
             if(All.MetalReturnOn) {
                 double AvgGasMass = All.CP.OmegaBaryon * 3 * All.CP.Hubble * All.CP.Hubble / (8 * M_PI * All.CP.GravInternal) * pow(PartManager->BoxSize, 3) / header->NTotalInit[0];
                 metal_return(&Act, &gasTree, &All.CP, atime, AvgGasMass);
-                /* Stellar evolution for star clusters attached to BH particles */
-                if(All.StarClusterOn && All.StarClusterEvolution)
-                    starcluster_metal_return(&Act, &gasTree, &All.CP, atime, AvgGasMass);
             }
 
             /* this will find new black hole seed halos.

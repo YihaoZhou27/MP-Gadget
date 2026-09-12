@@ -6,6 +6,22 @@
 #include "utils/system.h"
 #include "slotsmanager.h"
 
+/* Full state of the star cluster carried by one BH, passed through the BH merger treewalk:
+ * at a merger the remnant keeps the heaviest of the merging clusters (compared by cluster
+ * mass, ties broken by the larger BH ID) and the lighter ones are removed. */
+struct bh_sc_state {
+    MyIDType ID;                  /* ID of the BH carrying the cluster (tie-break only) */
+    MyFloat Mass;                 /* StarClusterMass */
+    MyFloat FormationTime;        /* StarClusterFormationTime */
+    MyFloat Metallicity;          /* StarClusterMetallicity */
+    MyFloat TotalMassReturned;    /* StarClusterTotalMassReturned */
+    MyFloat InitReff;             /* SC_initReff */
+    MyFloat Reff;                 /* SC_Reff */
+    MyFloat RlxPendingMyr;        /* SC_RlxPendingMyr */
+    float Metals[NMETALS];        /* StarClusterMetals */
+    float LastEnrichmentMyr;      /* StarClusterLastEnrichmentMyr */
+};
+
 struct BHPriv {
     /* Temporary array to store the IDs of the swallowing black hole for gas.
      * We store ID + 1 so that SwallowID == 0 can correspond to the unswallowed case. */
@@ -20,13 +36,9 @@ struct BHPriv {
     MyFloat * BH_accreted_Mass;
     MyFloat * BH_accreted_BHMass;
     MyFloat (*BH_accreted_momentum)[3];
-    MyFloat * BH_accreted_StarClusterMass;
-    MyFloat * BH_accreted_SCMetallicityWeighted;
-    MyFloat (* BH_accreted_SCMetalsWeighted)[NMETALS];
-    MyFloat * BH_accreted_SCTotalMassReturned;
+    MyFloat * BH_accreted_StarClusterMass; /* summed cluster mass of the swallowed BHs (Mtrack bookkeeping) */
+    struct bh_sc_state * BH_accreted_SCmax; /* heaviest cluster among the swallowed BHs */
     MyFloat (*BH_GWRecoilKick)[3]; /* Accumulated GW recoil kick velocity from BH mergers */
-    MyFloat * BH_accreted_SCFormTimeMin; /* min StarClusterFormationTime across swallowed BHs */
-    float * BH_accreted_SCLastEnrichMax; /* max StarClusterLastEnrichmentMyr across swallowed BHs */
 
     /* This is a temporary computed in the accretion treewalk and used
      * in the feedback treewalk*/
@@ -105,8 +117,11 @@ void blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceT
  * mass is carried over as the BH's initial Mtrack.
  * SeedMassOverride > 0 sets BHP.Mass directly (MbhMscRelationCWmodel: the
  * Williams et al. 2026 VMS mass), bypassing the SeedBlackHoleMass /
- * BHseedMassScaleMsc prescription; pass 0 for the normal seed-mass logic. */
-void blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, int BHNgbAtSeeding, MyFloat StarClusterMetallicity, const float * StarClusterMetals, MyFloat SeedMassOverride);
+ * BHseedMassScaleMsc prescription; pass 0 for the normal seed-mass logic.
+ * SC_initReff: effective radius (physical pc) drawn for the seed cluster; pass 0 when the
+ * seeding path draws no per-cluster radius (a BH carrying a cluster then gets the
+ * StarClusterReffRelation median at its cluster mass). Also the starting SC_Reff. */
+void blackhole_make_one(int index, const double atime, const RandTable * const rnd, int seeded_by_starcluster, MyFloat StarClusterMass, MyFloat ScalingMass, MyFloat init_Msc, MyFloat init_Msc_sample, MyFloat CappedStarMass, int BHNgbAtSeeding, MyFloat StarClusterMetallicity, const float * StarClusterMetals, MyFloat SeedMassOverride, MyFloat SC_initReff);
 
 /* Seed black holes from individual star particles whose star cluster mass
  * exceeds MinMscForBHseed.  Called every PM step when BlackholeSeedSCparticle=1,
