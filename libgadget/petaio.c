@@ -328,6 +328,16 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
             BHP(i).SC_Reff = 0;
             /* transient, 0 at every snapshot (see slotsmanager.h) */
             BHP(i).SC_RlxPendingMyr = 0;
+            /* written but not read back: recomputed at the BH's first active step */
+            BHP(i).NdotTDE = 0;
+            BHP(i).MdotTDE = 0;
+            /* Per-channel cluster evolution records: read back when present, else they
+             * count from this restart on. */
+            BHP(i).SC_MlossStellar = 0;
+            BHP(i).SC_MlossRelax = 0;
+            BHP(i).SC_MlossTDE = 0;
+            BHP(i).SC_dlnReffStellar = 0;
+            BHP(i).SC_dlnReffRelax = 0;
             /* Debug-only WRONLY fields: not read back, so default to 0 on restart. */
             BHP(i).CappedStarMass = 0;
             BHP(i).BHNgbAtSeeding = 0;
@@ -937,6 +947,13 @@ SIMPLE_PROPERTY_PI(init_Msc_sample, init_Msc_sample, float, 1, struct bh_particl
 SIMPLE_PROPERTY_PI(BlackholeStarClusterMass, StarClusterMass, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(SC_initReff, SC_initReff, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(SC_Reff, SC_Reff, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(NdotTDE, NdotTDE, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(MdotTDE, MdotTDE, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(SC_MlossStellar, SC_MlossStellar, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(SC_MlossRelax, SC_MlossRelax, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(SC_MlossTDE, SC_MlossTDE, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(SC_dlnReffStellar, SC_dlnReffStellar, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(SC_dlnReffRelax, SC_dlnReffRelax, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeStarClusterFormationTime, StarClusterFormationTime, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeStarClusterMetallicity, StarClusterMetallicity, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeStarClusterMetals, StarClusterMetals[0], float, NMETALS, struct bh_particle_data)
@@ -1173,6 +1190,18 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
      * they are written to PART, PIG and SecPIG alike. */
     IO_REG_NONFATAL(SC_initReff, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(SC_Reff, "f4", 1, 5, IOTable);
+    /* StarClusterTDEtoBH: TDE rate and BH growth rate from it (per internal time unit, mass in
+     * code units, like BlackholeAccretionRate); recomputed every active step, so write-only. */
+    IO_REG_WRONLY(NdotTDE, "f4", 1, 5, IOTable);
+    IO_REG_WRONLY(MdotTDE, "f4", 1, 5, IOTable);
+    /* Per-channel record of the cluster's mass loss (code mass; stellar evolution, two-body
+     * relaxation, TDEs) and ln R_eff change (stellar and relaxation size terms).  Cumulative,
+     * so read back on a restart; missing in older snapshots -> count from the restart on. */
+    IO_REG_NONFATAL(SC_MlossStellar, "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(SC_MlossRelax, "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(SC_MlossTDE, "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(SC_dlnReffStellar, "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(SC_dlnReffRelax, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeStarClusterFormationTime, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeStarClusterMetallicity, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeStarClusterMetals, "f4", NMETALS, 5, IOTable);

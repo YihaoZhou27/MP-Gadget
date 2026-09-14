@@ -65,6 +65,19 @@ struct __attribute__((__packed__)) BHinfo{
     /* Initial and current effective radius of the BH's star cluster, physical pc */
     float SC_initReff;
     float SC_Reff;
+    /* StarClusterTDEtoBH: TDE rate and the BH mass growth rate from it at this step, both per
+     * internal time unit (mass in code units), like Mdot.  0 without a cluster or the option. */
+    double NdotTDE;
+    double MdotTDE;
+    /* Per-channel record of the cluster's evolution (see slotsmanager.h): cumulative cluster mass
+     * lost to stellar evolution, two-body relaxation and TDEs (code mass), and cumulative ln R_eff
+     * change from the stellar and relaxation size terms.  Follow the kept cluster at mergers,
+     * 0 without a cluster. */
+    double SC_MlossStellar;
+    double SC_MlossRelax;
+    double SC_MlossTDE;
+    double SC_dlnReffStellar;
+    double SC_dlnReffRelax;
     double a;
     /* See size1 above*/
     int size2;
@@ -161,6 +174,13 @@ collect_BH_info(const int * const ActiveBlackHoles, const int64_t NumActiveBlack
         info->BH_SoundSpeed = priv->BH_SoundSpeed[PI];
         info->SC_initReff = BHManager[PI].SC_initReff;
         info->SC_Reff = BHManager[PI].SC_Reff;
+        info->NdotTDE = BHManager[PI].NdotTDE;
+        info->MdotTDE = BHManager[PI].MdotTDE;
+        info->SC_MlossStellar = BHManager[PI].SC_MlossStellar;
+        info->SC_MlossRelax = BHManager[PI].SC_MlossRelax;
+        info->SC_MlossTDE = BHManager[PI].SC_MlossTDE;
+        info->SC_dlnReffStellar = BHManager[PI].SC_dlnReffStellar;
+        info->SC_dlnReffRelax = BHManager[PI].SC_dlnReffRelax;
         info->a = priv->atime;
     }
 

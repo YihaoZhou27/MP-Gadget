@@ -79,6 +79,7 @@ static struct run_params
     int StarClusterSizeEvolution; /* StarClusterSizeEvolution parameter: evolve the effective radius of the star clusters on BHs */
     int SCSizeEvolStellar; /* effective: size evolution from the stellar-evolution mass loss is applied */
     int SCSizeEvolRelax; /* effective: size evolution from the GB08 relaxation mass loss is applied */
+    int StarClusterTDEtoBH; /* BHs grow by tidally disrupting the stars of their star cluster (Rizzuto et al. 2023 rate) */
     int SCgasVDisp; /* if gas/stellar velocity dispersion calculation is enabled */
     int BlackHoleSeedHaloBased; /* if the bh seeding is halo-based */
     int BlackHoleSeedGasBased; /* if the bh seeding is gas-based */
@@ -180,6 +181,7 @@ set_all_global_params(ParameterSet * ps)
         All.SCEvolutionStellar = param_get_int(ps, "SCEvolutionStellar");
         All.SCEvolutionRelaxation = param_get_int(ps, "SCEvolutionRelaxation");
         All.StarClusterSizeEvolution = param_get_int(ps, "StarClusterSizeEvolution");
+        All.StarClusterTDEtoBH = param_get_int(ps, "StarClusterTDEtoBH");
         All.SCgasVDisp = param_get_int(ps, "SCgasVDisp");
         All.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
         All.BlackHoleSeedStarCluster = param_get_int(ps, "BlackHoleSeedStarCluster");
@@ -259,10 +261,17 @@ set_all_global_params(ParameterSet * ps)
             endrun(1, "SCEvolutionRelaxation=%d requires StarClusterOn=1.\n", All.SCEvolutionRelaxation);
         if(All.SCEvolutionRelaxation && !param_get_int(ps, "BlackholeTidalField"))
             endrun(1, "SCEvolutionRelaxation=%d requires BlackholeTidalField=1: the relaxation rate is set by the BH tidal field.\n", All.SCEvolutionRelaxation);
-        if((All.SCEvolutionStellar || All.SCEvolutionRelaxation) && param_get_int(ps, "StarClusterBHDyn") != 1)
-            message(0, "Star-cluster evolution with StarClusterBHDyn=%d: the per-cluster, combined-sample and compensating secFOF seeds "
-                       "carry no StarClusterMass unless StarClusterBHDyn=1, so only the other seeding paths have clusters to evolve.\n",
+        /* Growth of the BHs by tidal disruption of their clusters' stars. */
+        if(All.StarClusterTDEtoBH < 0 || All.StarClusterTDEtoBH > 1)
+            endrun(1, "StarClusterTDEtoBH must be 0 or 1, got %d.\n", All.StarClusterTDEtoBH);
+        if(All.StarClusterTDEtoBH && !(All.StarClusterOn && All.BlackHoleOn))
+            endrun(1, "StarClusterTDEtoBH=1 requires StarClusterOn=1 and BlackHoleOn=1.\n");
+        if((All.SCEvolutionStellar || All.SCEvolutionRelaxation || All.StarClusterTDEtoBH) && param_get_int(ps, "StarClusterBHDyn") != 1)
+            message(0, "Star-cluster evolution / TDE growth with StarClusterBHDyn=%d: the per-cluster, combined-sample and compensating secFOF seeds "
+                       "carry no StarClusterMass unless StarClusterBHDyn=1, so only the other seeding paths have clusters to evolve or disrupt.\n",
                     param_get_int(ps, "StarClusterBHDyn"));
+        if(All.StarClusterTDEtoBH)
+            starcluster_tde_message();
         if(All.SCEvolutionRelaxation)
             starcluster_relaxation_message(All.SCEvolutionRelaxation, All.HierarchicalGravity);
         /* Size evolution of the star clusters on BHs: each term follows a mass-evolution model
@@ -719,6 +728,11 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
              * only, as their ejecta are already returned by the star particles (metal_return). */
             if(All.StarClusterOn && All.SCEvolutionStellar)
                 starcluster_stellar_evolution(&Act, &All.CP, atime, All.SCSizeEvolStellar);
+            /* Growth of the BHs by tidal disruption of their clusters' stars, on the clusters as
+             * evolved above.  The mass is added here, on top of the Eddington-limited gas accretion
+             * of blackhole() below (which then sees the heavier BH). */
+            if(All.StarClusterOn && All.StarClusterTDEtoBH)
+                starcluster_tde_growth(&Act, &All.CP, atime, units);
 
             /* Do this before sfr and bh so the gas hsml always contains DesNumNgb neighbours.*/
             if(All.MetalReturnOn) {
@@ -748,6 +762,12 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                   )
                     need_primary_fof = 0;
 
+                /* StarClusterSeedMaxAgeMyr: set the stellar-age cutoff for this pass
+                 * before any group properties are accumulated -- add_particle_to_group
+                 * applies it as it sums the star-cluster seeding budgets, and fof_seed
+                 * aborts if it is stale.  Harmless (and a no-op) when the limit is off. */
+                sc_seed_age_set_cutoff(atime, &All.CP);
+
                 FOFGroups fof = {0};
                 if(need_primary_fof)
                     fof = fof_fof(ddecomp, 0, MPI_COMM_WORLD);
@@ -769,7 +789,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
                      * When BHseedEveryTimestep is on, this is handled after
                      * star formation instead so it runs every timestep. */
                     if(!All.BHseedEveryTimestep)
-                        blackhole_seed_sc_particle(&Act, &gasTree, atime, &rnd, MPI_COMM_WORLD, NULL, 0);
+                        blackhole_seed_sc_particle(&Act, &gasTree, atime, &All.CP, &rnd, MPI_COMM_WORLD, NULL, 0);
                     TimeNextSeedingCheck = atime * All.TimeBetweenSeedingSearch;
                 }
 
@@ -820,7 +840,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
              * timestep right after star formation, using only the newly formed
              * stars instead of scanning all particles. */
             if(All.BlackHoleOn && All.BHseedEveryTimestep)
-                blackhole_seed_sc_particle(&Act, &gasTree, atime, &rnd, MPI_COMM_WORLD, SFR_NewStars, SFR_NumNewStar);
+                blackhole_seed_sc_particle(&Act, &gasTree, atime, &All.CP, &rnd, MPI_COMM_WORLD, SFR_NewStars, SFR_NumNewStar);
             if(SFR_NewStars)
                 myfree(SFR_NewStars);
         }
@@ -862,6 +882,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
         FOFGroups fof = {0};
         if(WriteFOF) {
             /* Compute FOF and assign GrNr so it can be written in checkpoint.*/
+            sc_seed_age_set_cutoff(atime, &All.CP);
             fof = fof_fof(ddecomp, 1, MPI_COMM_WORLD);
         }
 
@@ -1033,6 +1054,7 @@ runfof(const int RestartSnapNum, const inttime_t Ti_Current, const struct header
         if(GradRho)
             myfree(GradRho);
     }
+    sc_seed_age_set_cutoff(header->TimeSnapshot, &All.CP);
     FOFGroups fof = fof_fof(ddecomp, 1, MPI_COMM_WORLD);
 
     /* Run second FOF computation (sets SecGrNr) before saving catalogs */

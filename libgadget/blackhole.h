@@ -18,6 +18,12 @@ struct bh_sc_state {
     MyFloat InitReff;             /* SC_initReff */
     MyFloat Reff;                 /* SC_Reff */
     MyFloat RlxPendingMyr;        /* SC_RlxPendingMyr */
+    /* per-channel mass-loss and size-change records (SC_Mloss*, SC_dlnReff*) */
+    MyFloat MlossStellar;
+    MyFloat MlossRelax;
+    MyFloat MlossTDE;
+    MyFloat dlnReffStellar;
+    MyFloat dlnReffRelax;
     float Metals[NMETALS];        /* StarClusterMetals */
     float LastEnrichmentMyr;      /* StarClusterLastEnrichmentMyr */
 };
@@ -129,7 +135,8 @@ void blackhole_make_one(int index, const double atime, const RandTable * const r
  * If NewStars/NumNewStar are provided (non-NULL, > 0), only those particle
  * indices are checked (newly formed stars).  Otherwise falls back to a full
  * scan of all type-4 particles. */
-void blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime,
+/* CP is needed only for the StarClusterSeedMaxAgeMyr stellar-age gate. */
+void blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime, Cosmology * CP,
                                 const RandTable * const rnd, MPI_Comm Comm,
                                 int * NewStars, int64_t NumNewStar);
 

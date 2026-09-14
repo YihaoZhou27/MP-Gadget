@@ -91,6 +91,34 @@ struct bh_particle_data {
                               its first field at the next PM step when SplitGravityTimestepsOn=1.  The whole
                               interval is relaxed with that first field.  Follows the kept cluster at mergers.
                               Always 0 after the relaxation of a PM step, hence in snapshots (not written). */
+    MyFloat NdotTDE;         /*!< StarClusterTDEtoBH: rate of tidal disruptions of the cluster's stars by this BH at its last
+                              active step (Rizzuto et al. 2023 eq. 9 on the Williams et al. 2026 cluster-with-BH structure),
+                              per INTERNAL time unit (UnitTime/h): divide by UnitTime_in_s/h/SEC_PER_MEGAYEAR for Myr^-1.
+                              The realised rate: at most the stars the cluster had over the step.  0 without a cluster.
+                              Recomputed every active step (not read back from snapshots). */
+    MyFloat MdotTDE;         /*!< StarClusterTDEtoBH: BH mass growth rate from those disruptions, exactly f_acc m_* NdotTDE,
+                              code mass per internal time unit like Mdot.  Added to Mass every active step on top of the
+                              Eddington-limited gas accretion, and never capped by it. */
+    /* Per-channel record of the star cluster's mass and size evolution.  All five are properties
+     * of the cluster: they start at 0 when the cluster is attached at seeding, follow the kept
+     * (heaviest) cluster at a BH merger, and are reset to 0 with the rest of the cluster state
+     * when the cluster is dissolved or ejected (the BH detail record keeps the history).
+     * While the BH carries a cluster,
+     *   StarClusterMass + SC_MlossStellar + SC_MlossRelax + SC_MlossTDE = the cluster's birth mass,
+     *   ln(SC_Reff / SC_initReff) = SC_dlnReffStellar + SC_dlnReffRelax
+     * (to round-off; after a restart from a snapshot without these blocks they count from the
+     * restart on).  Code mass units, like StarClusterMass. */
+    MyFloat SC_MlossStellar;  /*!< Cumulative cluster mass lost to stellar evolution (SCEvolutionStellar): the SSP
+                              return of the stars still bound, i.e. what StarClusterTotalMassReturned records
+                              before its rescaling by the relaxation and TDE losses. */
+    MyFloat SC_MlossRelax;    /*!< Cumulative cluster mass lost to two-body relaxation (SCEvolutionRelaxation 1 or 2),
+                              escapers plus their share of the mass already returned by stellar evolution. */
+    MyFloat SC_MlossTDE;      /*!< Cumulative cluster mass lost to tidal disruptions (StarClusterTDEtoBH): the whole
+                              star per event, so 1/f_acc = 2x the mass the BH gained through MdotTDE. */
+    MyFloat SC_dlnReffStellar; /*!< Cumulative ln(R_eff) change from the stellar-evolution term of
+                              StarClusterSizeEvolution (adiabatic expansion, sum of ln(m_old/m_new)); 0 without it. */
+    MyFloat SC_dlnReffRelax;  /*!< Cumulative ln(R_eff) change from the GB08 two-body-relaxation term of
+                              StarClusterSizeEvolution (Guerra et al. 2026 eq. 22); 0 without it. */
     MyFloat StarClusterFormationTime; /*!< Formation time of the star cluster sticked to the black hole */
     MyFloat StarClusterMetallicity;        /*!< Total metallicity of the star cluster SSP */
     float StarClusterMetals[NMETALS];      /*!< Species-specific metal masses in star cluster */

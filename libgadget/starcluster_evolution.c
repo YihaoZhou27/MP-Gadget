@@ -9,6 +9,11 @@
  *  Chabrier IMF as metal_return.c): depositing the ejecta into the gas would count them twice.
  *  The relaxation part strips mass from the clusters at a rate set by the BH tidal field; the
  *  stripped stars are not returned to the gas either.
+ *
+ *  Every channel records what it did to the cluster in the BH fields SC_Mloss{Stellar,Relax,TDE}
+ *  (cumulative mass lost, code units) and SC_dlnReff{Stellar,Relax} (cumulative ln R_eff change),
+ *  so that the total change of StarClusterMass and SC_Reff can be split by channel afterwards
+ *  (see slotsmanager.h for the identities they satisfy).
  */
 
 #include <mpi.h>
@@ -119,10 +124,13 @@ starcluster_stellar_evolution(const ActiveParticles * act, Cosmology * CP, const
          * (dr_h/r_h)_sev = |dm_sev|/m, applied as the inverse ratio of the cluster mass after
          * and before the loss (Guerra et al. 2026 sect. 2.2.3).  With r_h = (4/3) R_eff at
          * fixed profile shape the same factor applies to R_eff. */
-        if(size_evolution)
+        if(size_evolution) {
             BHP(p).SC_Reff = sc_reff_now(p) * m_old / m_new;
+            BHP(p).SC_dlnReffStellar += log(m_old / m_new);
+        }
         BHP(p).StarClusterMass = m_new;
         BHP(p).StarClusterTotalMassReturned = returned;
+        BHP(p).SC_MlossStellar += m_old - m_new;
         if(bhdyn)
             sc_update_dyn_mass(p);
     }
@@ -285,6 +293,12 @@ sc_dissolve(int place)
     BHP(place).SC_initReff = 0;
     BHP(place).SC_Reff = 0;
     BHP(place).SC_RlxPendingMyr = 0;
+    /* the per-channel records describe the cluster too; its history stays in the detail files */
+    BHP(place).SC_MlossStellar = 0;
+    BHP(place).SC_MlossRelax = 0;
+    BHP(place).SC_MlossTDE = 0;
+    BHP(place).SC_dlnReffStellar = 0;
+    BHP(place).SC_dlnReffRelax = 0;
 }
 
 void
@@ -341,13 +355,15 @@ starcluster_relaxation(const ActiveParticles * act, const Cosmology * CP, const 
          * instead of decaying as (a_field/a)^3. */
         const double T_gyr2 = (-mu[2] + (mu[0] + mu[1] + mu[2]) / 3.) * invt2_to_gyr2 / (a_field * a_field * a_field);
         const double m_old = BHP(p).StarClusterMass * mass_to_msun;
-        double m_new, reff_new = 0;
+        double m_new, reff_old = 0, reff_new = 0;
         if(mode == 1)
             m_new = sc_relax_mass_emosaics(m_old, T_gyr2, dt_myr);     /* exact at fixed T */
-        else
+        else {
             /* r_h = (4/3) R_eff of the cluster's current radius (its initial one unless
              * StarClusterSizeEvolution=1), sub-cycled with its size change */
-            m_new = sc_relax_gb08_step(m_old, sc_reff_now(p), T_gyr2 * 1e-6, dt_myr, size_evolution, &reff_new);
+            reff_old = sc_reff_now(p);
+            m_new = sc_relax_gb08_step(m_old, reff_old, T_gyr2 * 1e-6, dt_myr, size_evolution, &reff_new);
+        }
         nevolved++;
         if(m_new < SC_RLX_MDISSOLVE) {
             sc_dissolve(p);
@@ -361,10 +377,14 @@ starcluster_relaxation(const ActiveParticles * act, const Cosmology * CP, const 
             const double frac = m_new / m_old;
             BHP(p).StarClusterMass *= frac;
             BHP(p).StarClusterTotalMassReturned *= frac;
+            BHP(p).SC_MlossRelax += (m_old - m_new) / mass_to_msun;
             mlost += m_old - m_new;
             /* StarClusterSizeEvolution with GB08: the size responds to the relaxation mass loss */
-            if(size_evolution && mode == 2)
+            if(size_evolution && mode == 2) {
                 BHP(p).SC_Reff = reff_new;
+                if(reff_old > 0 && reff_new > 0)
+                    BHP(p).SC_dlnReffRelax += log(reff_new / reff_old);
+            }
         }
         if(bhdyn)
             sc_update_dyn_mass(p);
@@ -404,6 +424,178 @@ starcluster_relaxation_message(const int mode, const int hierarchical)
                    "clusters below %g Msun are dissolved.\n",
                 SC_RLX_MSTAR, SC_RLX_LNL_GAMMA, SC_RLX_XI0, SC_RLX_ZETA, SC_RLX_RHRT1, SC_RLX_PZ,
                 SC_RLX_N1, SC_RLX_PX, cadence, SC_RLX_MDISSOLVE);
+}
+
+/* ==================================================================================
+ * Growth by tidal disruption events (StarClusterTDEtoBH)
+ * ================================================================================== */
+
+/* Rizzuto et al. (2023, MNRAS 521, 2930) eq. 9, the TDE rate of a BH in a dense star cluster:
+ *   Ndot = 1.1 F f_b ln(0.22 M_BH/m_*) (M_BH/1e3 Msun) (rho/1e7 Msun pc^-3) (100 km/s / sigma)^3 Myr^-1,
+ * i.e. their eq. 7, Ndot = F N_b/t_rel, with N_b = f_b N the stars bound to the BH among the
+ * N = 2 M_BH/m_* inside its influence radius R_inf (the sphere holding a stellar mass 2 M_BH,
+ * their footnote 9) and t_rel Spitzer's relaxation time at R_inf with Coulomb log ln(0.11 N).
+ * rho and sigma there come from the Williams et al. (2026, arXiv:2603.26872) "cluster with black
+ * hole" structure, the same profile family as the CW seed model (cwmodel.c): a Bahcall-Wolf power
+ * law rho ~ r^-alpha with alpha = 7/4 inside r_max = 1.4 R_eff, M(<r) = c_M r^(3-alpha) with
+ * c_M = M_SC/r_max^(3-alpha), rho = (3-alpha)/(4 pi) c_M r^-alpha, and the isotropic Jeans
+ * dispersion of their eq. 12, sigma^2(r) = c_v G [M(<r) + M_BH]/((1+alpha) r).
+ * Conventions, from the post-processing study code_v3/BHgrowth_TDE_Rizzuto23.ipynb: rho is the
+ * LOCAL density at R_inf (Rizzuto's fig. B1); sigma is the 3-D, mass-weighted mean of the Jeans
+ * dispersion of the stars inside R_inf,
+ *   <sigma^2> = 3 c_v G/((1+alpha) R_inf) [ (3-alpha)/(2-alpha) M_BH + (3-alpha)/(5-2 alpha) M(<R_inf) ],
+ * which reproduces the sigma of Rizzuto's virial fit (their eq. B2) within 6% and is therefore the
+ * convention their F was calibrated with (the 1-D local value is 2.6x smaller and would need
+ * F ~ 0.05).  When 2 M_BH > M_SC the whole cluster is inside the sphere of influence: R_inf = r_max
+ * and eq. 9 is used in its eq. 7 form with N = M_SC/m_*, i.e. M_BH -> M_SC/2 in its two explicit
+ * factors.  At fixed cluster the rate falls as M_BH^-0.7 ln(0.22 M_BH/m_*): a heavier BH collects
+ * its bound stars from a sparser part of the cusp. */
+#define SC_TDE_ALPHA        1.75    /* rho ~ r^-alpha (Bahcall & Wolf 1976; Williams+26 BH systems) */
+#define SC_TDE_RMAX_REFF    1.4     /* r_max / R_eff, as the CW seed model */
+#define SC_TDE_CV           1.0     /* c_v of Williams+26 eq. 12 (cwmodel.c CW_CV) */
+#define SC_TDE_F            0.8     /* Rizzuto+23 prefactor F (their per-model fits: 0.6-1.0) */
+#define SC_TDE_FB           0.2     /* fraction of the stars inside R_inf bound to the BH (Rizzuto+23 sec. 4.6) */
+#define SC_TDE_MSTAR        1.0     /* Msun: mass of a disrupted star (also in the Coulomb log) */
+#define SC_TDE_FACC         0.5     /* fraction of the star's mass the BH keeps per TDE (Rizzuto+23 eq. 11 f_c; Rees 1988);
+                                       the rest is unbound debris ejected at thousands of km/s.  Either way the whole
+                                       star (m_*) leaves the cluster: this is the TDE term of the cluster mass evolution. */
+
+double
+sc_tde_rate_per_myr(double mbh_msun, double msc_msun, double reff_pc)
+{
+    if(mbh_msun <= 0 || msc_msun <= 0 || reff_pc <= 0)
+        return 0;
+    const double a = SC_TDE_ALPHA;
+    /* Newton's constant in pc (km/s)^2 / Msun */
+    const double G = GRAVITY * SOLAR_MASS / (CM_PER_MPC / 1e6) / 1e10;
+    const double r_max = SC_TDE_RMAX_REFF * reff_pc;
+    const double c_M = msc_msun / pow(r_max, 3 - a);
+    const double c_rho = (3 - a) * c_M / (4 * M_PI);
+    /* influence radius M(<R_inf) = 2 M_BH, at most the cluster's edge */
+    double r_inf = pow(2 * mbh_msun / c_M, 1. / (3 - a));
+    if(r_inf > r_max)
+        r_inf = r_max;
+    const double M_enc = c_M * pow(r_inf, 3 - a);   /* 2 M_BH, or M_SC when the whole cluster is inside */
+    const double M_eff = 0.5 * M_enc;                /* eq. 9's M_BH: N = M_enc/m_* stars inside R_inf */
+    const double rho = c_rho * pow(r_inf, -a);
+    const double sigma2 = 3 * SC_TDE_CV * G / ((1 + a) * r_inf)
+        * (mbh_msun * (3 - a) / (2 - a) + M_enc * (3 - a) / (5 - 2 * a));
+    const double lnL = log(0.22 * M_eff / SC_TDE_MSTAR);
+    if(lnL <= 0 || sigma2 <= 0)
+        return 0;
+    return 1.1 * SC_TDE_F * SC_TDE_FB * lnL * (M_eff / 1e3) * (rho / 1e7) * pow(100. / sqrt(sigma2), 3);
+}
+
+void
+starcluster_tde_growth(const ActiveParticles * act, const Cosmology * CP, const double atime, const struct UnitSystem units)
+{
+    /* Do nothing if no BHs yet */
+    int64_t totbh;
+    MPI_Allreduce(&SlotsManager->info[5].size, &totbh, 1, MPI_INT64, MPI_SUM, MPI_COMM_WORLD);
+    if(totbh == 0)
+        return;
+
+    const double h = CP->HubbleParam;
+    /* code mass is 1e10 Msun/h and code time UnitTime/h */
+    const double mass_to_msun = units.UnitMass_in_g / (SOLAR_MASS * h);
+    const double time_to_myr = units.UnitTime_in_s / h / SEC_PER_MEGAYEAR;
+    const double hubble = hubble_function(CP, atime);
+    const int bhdyn = get_starcluster_bhdyn_on();
+
+    int64_t nbh = 0, neaten = 0;
+    double ntde = 0, mgain = 0;
+    int i;
+    #pragma omp parallel for reduction(+: nbh, neaten, ntde, mgain)
+    for(i = 0; i < act->NumActiveParticle; i++)
+    {
+        const int p = act->ActiveParticle ? act->ActiveParticle[i] : i;
+        if(P[p].Type != 5 || P[p].IsGarbage || P[p].Swallowed)
+            continue;
+        /* the rates describe this step: 0 unless the BH carries a cluster */
+        BHP(p).NdotTDE = 0;
+        BHP(p).MdotTDE = 0;
+        if(BHP(p).StarClusterMass <= 0 || BHP(p).Mass <= 0)
+            continue;
+        /* the BH's own step, as in the accretion */
+        const double dt_code = get_dloga_for_bin(P[p].TimeBinHydro, P[p].Ti_drift) / hubble;
+        const double dt_myr = dt_code * time_to_myr;
+        const double m_sc = BHP(p).StarClusterMass * mass_to_msun;
+        /* on the cluster as evolved by the relaxation and stellar evolution of this step */
+        const double ndot = sc_tde_rate_per_myr(BHP(p).Mass * mass_to_msun, m_sc, sc_reff_now(p));
+        if(ndot <= 0)
+            continue;
+        /* stellar mass disrupted over the step, at most the whole cluster */
+        double m_dis = SC_TDE_MSTAR * ndot * dt_myr;
+        if(m_dis > m_sc)
+            m_dis = m_sc;
+        const double m_gain = SC_TDE_FACC * m_dis;
+        const double m_gain_code = m_gain / mass_to_msun;
+        /* The realised rate [Myr^-1]: the model rate, unless the step ran out of stars, in which
+         * case the cluster's stars over the step.  Both stored rates and the step totals describe
+         * what was applied, so MdotTDE = f_acc m_* NdotTDE and Mass grows by MdotTDE x dt exactly. */
+        const double ndot_real = (dt_myr > 0) ? m_dis / (SC_TDE_MSTAR * dt_myr) : ndot;
+        BHP(p).NdotTDE = ndot_real * time_to_myr;
+        BHP(p).MdotTDE = SC_TDE_FACC * SC_TDE_MSTAR * ndot_real * time_to_myr / mass_to_msun;
+        /* Stellar debris, not gas: added to the BH mass directly, outside the Eddington cap of the
+         * Bondi accretion (which then sees the heavier BH) and without feedback or luminosity. */
+        BHP(p).Mass += m_gain_code;
+        /* Mtrack is the mass the BH particle has physically taken in, and the gas swallowing of
+         * blackhole() makes it follow Mass (a gas particle is swallowed with a probability set by
+         * Mass - Mtrack).  This mass came from the cluster's stars, not from the gas, so credit it
+         * to Mtrack as well (as blackhole_make_one does for a seed mass above the parent mass):
+         * otherwise stellar-fed growth would draw the same mass out of the gas again, and under
+         * StarClusterBHDyn=1 the dynamical mass would lose the retained half along with the unbound
+         * one.  P.Mass is rederived from Mtrack (+ StarClusterMass) in blackhole_feedback_postprocess
+         * this same step, and below for StarClusterBHDyn=1. */
+        BHP(p).Mtrack += m_gain_code;
+        nbh++;
+        ntde += m_dis / SC_TDE_MSTAR;       /* disruptions actually realised (at most the cluster's stars) */
+        mgain += m_gain;
+        /* The TDE term of the cluster mass evolution: the disrupted stars leave the cluster (the
+         * BH keeps SC_TDE_FACC of each, the rest is ejected).  Like the relaxation escapers they are
+         * a representative sample of its stars and take their share of the stellar-evolution return
+         * with them; a cluster eaten down to the dissolution mass is removed. */
+        const double m_new = m_sc - m_dis;
+        if(m_new < SC_RLX_MDISSOLVE) {
+            sc_dissolve(p);
+            neaten++;
+        }
+        else {
+            const double frac = m_new / m_sc;
+            BHP(p).StarClusterMass *= frac;
+            BHP(p).StarClusterTotalMassReturned *= frac;
+            BHP(p).SC_MlossTDE += m_dis / mass_to_msun;
+        }
+        /* StarClusterBHDyn=1: P.Mass = Mtrack + StarClusterMass, so the dynamical mass loses
+         * only the unbound part of each disrupted star. */
+        if(bhdyn)
+            sc_update_dyn_mass(p);
+    }
+
+    int64_t counts[2] = {nbh, neaten}, totcounts[2];
+    double sums[2] = {ntde, mgain}, totsums[2];
+    MPI_Reduce(counts, totcounts, 2, MPI_INT64, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(sums, totsums, 2, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    /* The reduced totals exist on rank 0 only: evaluate them there only. */
+    int ThisTask;
+    MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
+    if(ThisTask == 0 && totcounts[0] > 0)
+        message(0, "SC TDE: %ld BHs disrupting cluster stars, %g TDEs this step, %g Msun added to the BHs, %ld clusters eaten up.\n",
+                (long) totcounts[0], totsums[0], totsums[1], (long) totcounts[1]);
+
+    walltime_measure("/BH/SCTDE");
+}
+
+void
+starcluster_tde_message(void)
+{
+    message(0, "StarClusterTDEtoBH=1: BHs grow by tidally disrupting the stars of their star cluster at the "
+               "Rizzuto et al. (2023) eq. 9 rate (F = %g, f_b = %g, m_* = %g Msun) on the Williams et al. (2026) "
+               "cluster-with-BH structure (rho ~ r^-%g inside r_max = %g R_eff of the cluster's current SC_Reff, c_v = %g; "
+               "rho at the influence radius M(<R_inf) = 2 M_BH, sigma the 3-D mean inside it). Each disruption adds "
+               "%g m_* to the BH mass (MdotTDE, in NdotTDE and MdotTDE of the BH), on top of and not limited by the "
+               "Eddington-capped gas accretion, and removes the whole star (m_*) from the cluster mass.\n",
+            SC_TDE_F, SC_TDE_FB, SC_TDE_MSTAR, SC_TDE_ALPHA, SC_TDE_RMAX_REFF, SC_TDE_CV, SC_TDE_FACC);
 }
 
 void

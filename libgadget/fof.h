@@ -261,6 +261,21 @@ void fof_finish(FOFGroups * fof);
  * an older mymalloc2 block). */
 /* tree (the live gas/BH force tree from run.c, or NULL) is relocated off the
  * MAIN bottom stack around slots_reserve so SlotsBase can be grown (LIFO). */
+/* StarClusterSeedMaxAgeMyr (see gadget/params.c).  Recompute, for this atime, the
+ * formation-time cutoff below which a star particle is too old to feed a star-cluster
+ * seeding budget or to host a seed.  MUST be called before the fof_fof() whose group
+ * properties will be used for seeding (add_particle_to_group applies the gate as it sums
+ * the budget) and before any seeding pass; fof_seed() aborts on a stale cutoff.  A no-op
+ * when the parameter is <= 0 or the cutoff is already current for atime.  Collective only
+ * in the sense that every rank must call it with the same atime -- it communicates
+ * nothing and is cheap (one bisection on the age integral). */
+void sc_seed_age_set_cutoff(double atime, Cosmology * CP);
+
+/* 1 if a star particle of this FormationTime is young enough to feed a star-cluster
+ * seeding budget at the scale factor sc_seed_age_set_cutoff() was last called for.
+ * Always 1 when the limit is off. */
+int sc_seed_age_star_ok(double FormationTime);
+
 void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double atime, const RandTable * const rnd,
               int64_t ** seeded_grnr_out, int * n_seeded_out,
               double ** seeded_totmsc_out, double ** seeded_mcut_out,

@@ -981,6 +981,10 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
      * never redirected. fof_fof runs a collective preflight and silently keeps
      * the treewalk if the grid path is not safe here. */
     fof_set_grid_linking(sfof_params.GridLinking);
+    /* StarClusterSeedMaxAgeMyr: the gate has to be current before the group properties
+     * (and hence the seeding budgets) are accumulated inside fof_fof. */
+    sc_seed_age_set_cutoff(atime, CP);
+
     FOFGroups secfof = fof_fof(ddecomp, 1, Comm);
     fof_set_grid_linking(0);
 
@@ -1051,6 +1055,12 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
              * restriction defers it instead of consuming it.  This also keeps the
              * redistribution below summing over exactly the set that formed mcut. */
             if(bound_mask && !bound_mask[i])
+                continue;
+            /* StarClusterSeedMaxAgeMyr: an over-age star put nothing into the group's
+             * budget (add_particle_to_group skipped it), so it is not spent here either --
+             * it keeps Seeded = 0 and its ClusterMass, and takes no share of the
+             * particle-mode redistribution below, whose mcut was formed without it. */
+            if(!sc_seed_age_star_ok(STARP(i).FormationTime))
                 continue;
             /* Binary search for GrNr in the seeded-group list */
             int64_t key = P[i].GrNr;
@@ -1169,6 +1179,10 @@ SecondFOFResult * secondfof_run(DomainDecomp * ddecomp, int OutputPotential,
     fof_set_grid_linking(sfof_params.GridLinking);
 
     /* Step 4: Run the FOF algorithm */
+    /* Same gate as the seeding path, so the StarClusterMassUnseeded / MetUnseeded* /
+     * SCcomMcut columns written here describe the set that actually feeds a seed. */
+    sc_seed_age_set_cutoff(atime, CP);
+
     FOFGroups fof = fof_fof(ddecomp, 1, Comm);
 
     fof_set_grid_linking(0);

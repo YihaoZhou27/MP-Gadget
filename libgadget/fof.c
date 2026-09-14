@@ -32,6 +32,7 @@
 #include "sfr_eff.h"
 #include "gravity.h"
 #include "cosmology.h"
+#include "metal_return.h"   /* atime_to_myr(): StarClusterSeedMaxAgeMyr cutoff */
 /*! \file fof.c
  *  \brief parallel FoF group finder
  */
@@ -143,6 +144,11 @@ struct FOFParams
      * star above it hands every cluster the limit itself.  Host-star choice untouched. */
     double CWmodelMetallicityMin;
     double CWmodelMetallicityMinAbs;
+    /* StarClusterSeedMaxAgeMyr (Myr; <= 0 disables): a star particle older than this at
+     * the seeding pass is left out of its group's star-cluster seeding budget and may not
+     * host one of its seeds.  It is not consumed -- it keeps ClusterMass, stays Seeded = 0
+     * and still links the secondary FOF -- so the groups themselves are unchanged. */
+    double StarClusterSeedMaxAgeMyr;
     /* CWmodelSeedMassCap (physical Msun; <= 0 disables) and CWmodelSeedMassCapFrac:
      * a cluster whose CW-model M_VMS exceeds the cap seeds CWmodelSeedMassCapFrac *
      * m_sc instead of M_VMS.  Only used when MbhMscRelationCWmodel=1. */
@@ -304,6 +310,9 @@ void set_fof_params(ParameterSet * ps)
             endrun(1, "CWmodelMetallicityMin must be >= 0 (Zsun); got %g.\n", fof_params.CWmodelMetallicityMin);
         fof_params.CWmodelMetallicityMinAbs = fof_params.CWmodelMetallicityMin > 0 ?
             fof_params.CWmodelMetallicityMin * SC_HOST_ZSUN : 0;
+        /* <= 0 means "no limit"; no validation beyond that, so a negative value in an
+         * old parameter file behaves exactly like the 0 default. */
+        fof_params.StarClusterSeedMaxAgeMyr = param_get_double(ps, "StarClusterSeedMaxAgeMyr");
         fof_params.CWmodelSeedMassCap = param_get_double(ps, "CWmodelSeedMassCap");
         fof_params.CWmodelSeedMassCapFrac = param_get_double(ps, "CWmodelSeedMassCapFrac");
         fof_params.SeedSeedFOFMassiveBoundStar = param_get_int(ps, "SeedSeedFOFMassiveBoundStar");
@@ -391,6 +400,12 @@ void set_fof_params(ParameterSet * ps)
                        "clusters Z = %g.  The host-star choice is not affected.\n",
                     fof_params.CWmodelMetallicityMin, fof_params.CWmodelMetallicityMinAbs, cwmet,
                     fof_params.CWmodelMetallicityMinAbs);
+        if(fof_params.StarClusterSeedMaxAgeMyr > 0)
+            message(0, "StarClusterSeedMaxAgeMyr = %g Myr: a star older than this at a seeding "
+                       "pass no longer feeds its group's star-cluster budget and cannot host a "
+                       "seed.  It keeps its ClusterMass, stays Seeded=0 and still links the "
+                       "secondary FOF, so the groups are unchanged.\n",
+                    fof_params.StarClusterSeedMaxAgeMyr);
         if(fof_params.MbhMscRelationCWmodel && fof_params.CWmodelSeedMassCap > 0) {
             if(fof_params.CWmodelSeedMassCapFrac <= 0 || fof_params.CWmodelSeedMassCapFrac > 1)
                 endrun(1, "CWmodelSeedMassCapFrac must be in (0, 1]; got %g.\n",
@@ -1921,6 +1936,75 @@ static inline int sc_met_star_counts(double zb)
     return !(fof_params.CWmodelMetallicityMinAbs > 0) || zb >= fof_params.CWmodelMetallicityMinAbs;
 }
 
+/* ---------------- StarClusterSeedMaxAgeMyr: the stellar-age seeding gate ----------------
+ *
+ * Every star in a given pass is compared against the SAME atime, so "age < limit" is
+ * exactly "FormationTime >= a_min" for one a_min per pass.  Inverting the age integral
+ * once per pass turns the gate into a single float comparison in the particle loops
+ * instead of a gsl integration per star.
+ *
+ * sc_seed_age_amin < 0 means "no gate": the parameter is off, or the cutoff has never
+ * been set (unit tests calling fof_fof() directly), which keeps the historical behaviour.
+ * sc_seed_age_atime is the scale factor a_min belongs to; fof_seed() refuses to run with
+ * a stale one, so a new fof_fof() call site cannot silently skip the gate. */
+static double sc_seed_age_amin = -1;
+static double sc_seed_age_atime = -1;
+
+/* Workspace size for the age integral; the same value metal_return.c uses (its
+ * GSL_WORKSPACE lives in metal_tables.h, which is not worth pulling in here). */
+#define SC_SEED_AGE_GSL_WORKSPACE 1000
+
+void
+sc_seed_age_set_cutoff(double atime, Cosmology * CP)
+{
+    if(fof_params.StarClusterSeedMaxAgeMyr <= 0) {
+        sc_seed_age_amin = -1;
+        sc_seed_age_atime = atime;
+        return;
+    }
+    if(sc_seed_age_atime == atime)
+        return;                      /* already current for this pass */
+
+    const double maxage = fof_params.StarClusterSeedMaxAgeMyr;
+    gsl_integration_workspace * gsl_work =
+        gsl_integration_workspace_alloc(SC_SEED_AGE_GSL_WORKSPACE);
+    /* t(atime) - t(a) falls monotonically with a, so bisect for the a where it equals the
+     * limit.  1e-8 is earlier than any star can have formed; if even that is younger than
+     * the limit the whole history fits inside it and every star qualifies. */
+    double lo = 1e-8, hi = atime, amin;
+    if(atime_to_myr(CP, lo, atime, gsl_work) <= maxage) {
+        amin = 0;
+    } else {
+        int it;
+        for(it = 0; it < 200 && (hi - lo) > 1e-12 * atime; it++) {
+            double mid = 0.5 * (lo + hi);
+            if(atime_to_myr(CP, mid, atime, gsl_work) > maxage) lo = mid;
+            else hi = mid;
+        }
+        amin = 0.5 * (lo + hi);
+    }
+    gsl_integration_workspace_free(gsl_work);
+
+    sc_seed_age_amin = amin;
+    sc_seed_age_atime = atime;
+    message(0, "StarClusterSeedMaxAgeMyr = %g Myr at a = %g (z = %g): only stars formed at "
+               "a >= %g (z <= %g) feed a star-cluster seeding budget or host a seed.\n",
+            maxage, atime, 1. / atime - 1., amin, amin > 0 ? 1. / amin - 1. : HUGE_VAL);
+}
+
+int
+sc_seed_age_star_ok(double FormationTime)
+{
+    return sc_seed_age_amin < 0 || FormationTime >= sc_seed_age_amin;
+}
+
+/* Same test on a local star particle.  Only valid for Type == 4; every caller reaches it
+ * behind a type check (and behind && short-circuiting where the test is inlined). */
+static inline int sc_seed_age_ok(int i)
+{
+    return sc_seed_age_amin < 0 || STARP(i).FormationTime >= sc_seed_age_amin;
+}
+
 static int sc_met_hist_bin(double Z)
 {
     if(Z <= 0)
@@ -2068,10 +2152,17 @@ static void add_particle_to_group(struct Group * gdst, int i, int ThisTask) {
         /* Stars that have already contributed to a BH seed (Seeded==1) are
          * excluded from everything that drives seeding: the unseeded cluster-mass
          * sums, the M_cut cutoff, and the seed-particle pick. Their cluster mass is
-         * recorded separately in SCMass_seeded for the catalogue. */
+         * recorded separately in SCMass_seeded for the catalogue.
+         *
+         * StarClusterSeedMaxAgeMyr does the same to the unseeded stars that are older
+         * than the limit, but WITHOUT consuming them: they fall out of this whole branch
+         * (budget, M_cut, metallicity statistics and host-star ranking alike) yet keep
+         * Seeded = 0 and their ClusterMass.  Their cluster mass is therefore in
+         * StarClusterMass but in neither SCMass_seeded nor StarClusterMassUnseeded --
+         * the sum of the latter two is the group total only when the limit is off. */
         if(STARP(index).Seeded) {
             gdst->SCMass_seeded += STARP(index).ClusterMass;
-        } else {
+        } else if(sc_seed_age_ok(index)) {
             gdst->StarClusterMassUnseeded += STARP(index).ClusterMass;
             gdst->StarClusterMassSampleUnseeded += STARP(index).StarClusterMass_sample;
             gdst->SCcomMcut += P[index].Mass;
@@ -3154,7 +3245,7 @@ static int64_t secfof_count_extra_seed_ub(FOFGroups * fof, MPI_Comm Comm)
 
     int64_t cnt = 0;
     for(i = 0; i < PartManager->NumPart; i++) {
-        if(P[i].Type != 4 || P[i].GrNr < 0 || STARP(i).Seeded) continue;
+        if(P[i].Type != 4 || P[i].GrNr < 0 || STARP(i).Seeded || !sc_seed_age_ok(i)) continue;
         int lo = 0, hi = n_tot, found = -1;
         int64_t key = P[i].GrNr;
         while(lo < hi) {
@@ -3299,7 +3390,7 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
 
     int n_elig = 0;
     for(i = 0; i < PartManager->NumPart; i++) {
-        if(P[i].Type != 4 || P[i].GrNr < 0 || STARP(i).Seeded) continue;
+        if(P[i].Type != 4 || P[i].GrNr < 0 || STARP(i).Seeded || !sc_seed_age_ok(i)) continue;
         int c = ms_find(msg, n_msg, P[i].GrNr);
         if(c < 0) continue;
         if((uint64_t) P[i].ID == msg[c].SeedStarID) continue;
@@ -3313,7 +3404,7 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
             (n_elig > 0 ? n_elig : 1) * sizeof(struct ms_cand));
     int e = 0;
     for(i = 0; i < PartManager->NumPart; i++) {
-        if(P[i].Type != 4 || P[i].GrNr < 0 || STARP(i).Seeded) continue;
+        if(P[i].Type != 4 || P[i].GrNr < 0 || STARP(i).Seeded || !sc_seed_age_ok(i)) continue;
         int c = ms_find(msg, n_msg, P[i].GrNr);
         if(c < 0) continue;
         if((uint64_t) P[i].ID == msg[c].SeedStarID) continue;
@@ -3509,12 +3600,16 @@ static int secfof_random_group_eligible(const struct Group * g)
  * pool feeds `navail` in phase 3, and the placement loop stops as soon as it has spent
  * `navail` hosts, so a group can never place more seeds than it has bound hosts -- no
  * matter how many clusters its draw qualified (which still counts unbound stars, see
- * fof_secfof_bound_restrict). */
+ * fof_secfof_bound_restrict).
+ *
+ * StarClusterSeedMaxAgeMyr: a star older than the limit contributed nothing to the
+ * budget, so it may neither host a seed nor be marked Seeded=1 by the caller.  Adding the
+ * test here covers both, because the Seeded=1 marking loop uses this same predicate. */
 static int secfof_random_seedable_star(int64_t i, const char * bound_mask)
 {
     if(bound_mask && !bound_mask[i])
         return 0;
-    return P[i].Type == 4 && P[i].GrNr >= 0 && !STARP(i).Seeded;
+    return P[i].Type == 4 && P[i].GrNr >= 0 && !STARP(i).Seeded && sc_seed_age_ok(i);
 }
 
 /* One random-seed group, gathered to every rank. */
@@ -4700,7 +4795,7 @@ static void fof_secfof_particle_sample(FOFGroups * fof, const RandTable * const 
     memset(part_full, 0, n_cand * sizeof(double));
 
     for(i = 0; i < PartManager->NumPart; i++) {
-        if(P[i].Type != 4 || P[i].GrNr < 0 || STARP(i).Seeded)
+        if(P[i].Type != 4 || P[i].GrNr < 0 || STARP(i).Seeded || !sc_seed_age_ok(i))
             continue;
         int64_t key = P[i].GrNr;
         int lo = 0, hi = n_cand, c = -1;
@@ -4779,7 +4874,8 @@ struct bound_member {
     MyIDType ID;                /* particle ID (becomes SeedStarID if chosen as seed) */
     int      OrigTask;          /* rank that owns this particle */
     int      OrigIndex;         /* local index of this particle on OrigTask */
-    int      is_unseeded_star;  /* 1 if Type==4 && !STARP.Seeded, else 0 */
+    int      is_unseeded_star;  /* 1 if Type==4 && !STARP.Seeded && young enough for
+                                 * StarClusterSeedMaxAgeMyr, else 0 */
     float    zbirth;            /* frozen BirthMetallicity if unseeded star, else 0
                                  * (feeds sc_seed_host_zweight in the host argmax) */
 };
@@ -4914,7 +5010,10 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
             m->ID = P[i].ID;
             m->OrigTask = ThisTask;
             m->OrigIndex = i;
-            if(P[i].Type == 4 && !STARP(i).Seeded) {
+            /* StarClusterSeedMaxAgeMyr: an over-age star is treated exactly like a seeded
+             * one here -- mGamma 0 and is_unseeded_star 0 -- so it drops out of the bound
+             * budget and out of the bound host argmax. */
+            if(P[i].Type == 4 && !STARP(i).Seeded && sc_seed_age_ok(i)) {
                 /* Cluster mass: the bound sum overwrites StarClusterMassUnseeded below. */
                 m->mGamma = STARP(i).ClusterMass;
                 m->is_unseeded_star = 1;
@@ -5165,7 +5264,8 @@ struct sb_star {
     MyIDType ID;
     int      OrigTask;          /* rank owning this particle */
     int      OrigIndex;         /* local index on OrigTask */
-    int      is_unseeded;       /* 1 if STARP.Seeded == 0 */
+    int      is_unseeded;       /* 1 if STARP.Seeded == 0 and the star is young enough for
+                                 * StarClusterSeedMaxAgeMyr */
     float    zbirth;            /* frozen BirthMetallicity, raw as initscm */
 };
 
@@ -5363,7 +5463,11 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
             m->ID = P[i].ID;
             m->OrigTask = ThisTask;
             m->OrigIndex = i;
-            m->is_unseeded = !STARP(i).Seeded;
+            /* StarClusterSeedMaxAgeMyr: an over-age star counts as not-unseeded here, so
+             * it is excluded from the bound budget, the bound metallicity summary and the
+             * bound host argmax -- exactly as add_particle_to_group excludes it from the
+             * unrestricted ones.  scmass below is still summed over every star. */
+            m->is_unseeded = !STARP(i).Seeded && sc_seed_age_ok(i);
             /* Frozen metallicity inputs, so the whole unseeded-star metallicity
              * summary can be rebuilt over the BOUND subset (see the apply branch). */
             m->zbirth = STARP(i).BirthMetallicity;
@@ -5909,6 +6013,16 @@ void fof_seed(FOFGroups * fof, ActiveParticles * act, ForceTree * tree, double a
 
     int NTask;
     MPI_Comm_size(Comm, &NTask);
+
+    /* StarClusterSeedMaxAgeMyr: the budgets this call reads were accumulated by
+     * add_particle_to_group during the fof_fof() that produced `fof`, using the cutoff
+     * current at THAT moment.  A stale cutoff would silently apply the wrong age limit,
+     * so require the caller to have set it for this atime first. */
+    if(fof_params.StarClusterSeedMaxAgeMyr > 0 && sc_seed_age_atime != atime)
+        endrun(1, "StarClusterSeedMaxAgeMyr: the stellar-age cutoff was last set for a = %g "
+                  "but this seeding pass is at a = %g. sc_seed_age_set_cutoff(atime, CP) must "
+                  "be called before the fof_fof() whose group properties feed fof_seed().\n",
+               sc_seed_age_atime, atime);
 
     /* BHseedSecFOFbound: restrict every group's seeding budget to its gravitationally
      * bound stars BEFORE any gate or sampler reads it.  This has to sit ahead of the

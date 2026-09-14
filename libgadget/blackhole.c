@@ -18,6 +18,7 @@
 #include "walltime.h"
 #include "bhinfo.h"
 #include "bhdynfric.h"
+#include "fof.h"        /* sc_seed_age_*: the StarClusterSeedMaxAgeMyr stellar-age gate */
 #include "utils/endrun.h"
 #include "utils/mymalloc.h"
 
@@ -919,6 +920,11 @@ sc_state_get(struct bh_sc_state * s, const int i)
     s->InitReff = BHP(i).SC_initReff;
     s->Reff = BHP(i).SC_Reff;
     s->RlxPendingMyr = BHP(i).SC_RlxPendingMyr;
+    s->MlossStellar = BHP(i).SC_MlossStellar;
+    s->MlossRelax = BHP(i).SC_MlossRelax;
+    s->MlossTDE = BHP(i).SC_MlossTDE;
+    s->dlnReffStellar = BHP(i).SC_dlnReffStellar;
+    s->dlnReffRelax = BHP(i).SC_dlnReffRelax;
     memcpy(s->Metals, BHP(i).StarClusterMetals, sizeof(s->Metals));
     s->LastEnrichmentMyr = BHP(i).StarClusterLastEnrichmentMyr;
 }
@@ -934,6 +940,11 @@ sc_state_set(const int i, const struct bh_sc_state * s)
     BHP(i).SC_initReff = s->InitReff;
     BHP(i).SC_Reff = s->Reff;
     BHP(i).SC_RlxPendingMyr = s->RlxPendingMyr;
+    BHP(i).SC_MlossStellar = s->MlossStellar;
+    BHP(i).SC_MlossRelax = s->MlossRelax;
+    BHP(i).SC_MlossTDE = s->MlossTDE;
+    BHP(i).SC_dlnReffStellar = s->dlnReffStellar;
+    BHP(i).SC_dlnReffRelax = s->dlnReffRelax;
     memcpy(BHP(i).StarClusterMetals, s->Metals, sizeof(s->Metals));
     BHP(i).StarClusterLastEnrichmentMyr = s->LastEnrichmentMyr;
 }
@@ -1290,21 +1301,27 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
             double unit_vel = BH_GET_PRIV(tw)->units.UnitVelocity_in_cm_per_s;
             double v_kick_kms = sqrt(v_kick_sq) / atime * (unit_vel / 1.0e5);
 
-            /* Escape velocity using BG21 (Brown & Gnedin 2021) half-mass radius
-             * with age="all" (full LEGUS sample):
-             * Reff = 2.55 * (M_sc / 1e4)^0.242  [pc]
-             * rh = (4/3) * Reff  (projected -> 3D half-mass radius)
-             * v_esc = 33.4 * sqrt(M_sc / 1e5) * rh^(-0.5)  [km/s] */
-            double M_sc_solar = BHP(n).StarClusterMass
-                              * BH_GET_PRIV(tw)->units.UnitMass_in_g / SOLAR_MASS;
-            double Reff = 2.55 * pow(M_sc_solar / 1.0e4, 0.242);
+            /* Escape velocity of the kept cluster from its CURRENT mass and size:
+             * StarClusterMass and SC_Reff as evolved by the stellar-evolution, relaxation and
+             * TDE channels (SC_Reff falls back to the initial radius, or to the
+             * StarClusterReffRelation median, when it is not set yet after a restart from an
+             * older snapshot).  rh = (4/3) R_eff (projected -> 3D half-mass radius),
+             * v_esc = 33.4 * sqrt(M_sc / 1e5 Msun) * (rh / pc)^(-0.5)  [km/s].
+             * Code masses are 1e10 Msun/h, hence the HubbleParam in the conversion. */
+            double M_sc_solar = BHP(n).StarClusterMass * BH_GET_PRIV(tw)->units.UnitMass_in_g
+                              / (SOLAR_MASS * BH_GET_PRIV(tw)->CP->HubbleParam);
+            double Reff = BHP(n).SC_Reff;
+            if(Reff <= 0)
+                Reff = BHP(n).SC_initReff;
+            if(Reff <= 0)
+                Reff = starcluster_median_reff_pc(BHP(n).StarClusterMass);
             double rh = (4.0 / 3.0) * Reff;
             double v_esc = 33.4 * sqrt(M_sc_solar / 1.0e5) * pow(rh, -0.5);
 
             if(v_kick_kms > v_esc) {
                 message(0, "BH %ld: GW kick %.1f km/s exceeds v_esc %.1f km/s "
-                        "(M_sc = %.3g Msun), ejecting from star cluster\n",
-                        (long) P[n].ID, v_kick_kms, v_esc, M_sc_solar);
+                        "(M_sc = %.3g Msun, R_eff = %.3g pc), ejecting from star cluster\n",
+                        (long) P[n].ID, v_kick_kms, v_esc, M_sc_solar, Reff);
                 /* Reset all star cluster state: the BH carries no cluster.
                  * A cluster it acquires at a later merger brings its own
                  * full state (the heaviest-cluster rule above). */
@@ -1316,10 +1333,15 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
                  * (SC evolution guard: FormationTime <= 0 → skip). */
                 BHP(n).StarClusterLastEnrichmentMyr = -1;
                 BHP(n).StarClusterFormationTime = 0;
-                /* the radii describe the cluster, which is gone */
+                /* the radii and the per-channel records describe the cluster, which is gone */
                 BHP(n).SC_initReff = 0;
                 BHP(n).SC_Reff = 0;
                 BHP(n).SC_RlxPendingMyr = 0;
+                BHP(n).SC_MlossStellar = 0;
+                BHP(n).SC_MlossRelax = 0;
+                BHP(n).SC_MlossTDE = 0;
+                BHP(n).SC_dlnReffStellar = 0;
+                BHP(n).SC_dlnReffRelax = 0;
             }
         }
 
@@ -1481,6 +1503,15 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
         BHP(child).SC_initReff = starcluster_median_reff_pc(BHP(child).StarClusterMass);
     BHP(child).SC_Reff = BHP(child).SC_initReff;
     BHP(child).SC_RlxPendingMyr = 0;
+    /* per-channel mass-loss and size-change records of the cluster: nothing has happened yet */
+    BHP(child).SC_MlossStellar = 0;
+    BHP(child).SC_MlossRelax = 0;
+    BHP(child).SC_MlossTDE = 0;
+    BHP(child).SC_dlnReffStellar = 0;
+    BHP(child).SC_dlnReffRelax = 0;
+    /* StarClusterTDEtoBH rates: set at the BH's first active step */
+    BHP(child).NdotTDE = 0;
+    BHP(child).MdotTDE = 0;
 
     /* Record the star-cluster mass that seeded this BH. Frozen at creation:
      * never modified by mergers, so an accretor keeps its own seed value. */
@@ -1563,12 +1594,17 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
  * indices are checked (newly formed stars from this timestep).  Otherwise
  * falls back to a full scan of all type-4 particles (PM-step path). */
 void
-blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime,
+blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime, Cosmology * CP,
                            const RandTable * const rnd, MPI_Comm Comm,
                            int * NewStars, int64_t NumNewStar)
 {
     if(!blackhole_params.BlackholeSeedSCparticle)
         return;
+
+    /* StarClusterSeedMaxAgeMyr: this path is not preceded by a FOF (with
+     * BHseedEveryTimestep it runs after star formation on every step), so it sets the
+     * cutoff for its own atime.  A no-op when the limit is off or already current. */
+    sc_seed_age_set_cutoff(atime, CP);
 
     int64_t i;
     double MinMsc = blackhole_params.MinMscForBHseed;
@@ -1582,6 +1618,8 @@ blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime
             int pi = NewStars[i];
             if(P[pi].Type != 4 || STARP(pi).Seeded)
                 continue;
+            if(!sc_seed_age_star_ok(STARP(pi).FormationTime))
+                continue;
             MyFloat sc_mass = blackhole_params.StarClusterSampling ?
                 STARP(pi).StarClusterMass_sample : STARP(pi).ClusterMass;
             if(sc_mass >= MinMsc)
@@ -1591,6 +1629,8 @@ blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime
         /* Fallback: full scan over all particles. */
         for(i = 0; i < PartManager->NumPart; i++) {
             if(P[i].Type != 4 || STARP(i).Seeded)
+                continue;
+            if(!sc_seed_age_star_ok(STARP(i).FormationTime))
                 continue;
             MyFloat sc_mass = blackhole_params.StarClusterSampling ?
                 STARP(i).StarClusterMass_sample : STARP(i).ClusterMass;
@@ -1669,6 +1709,9 @@ blackhole_seed_sc_particle(ActiveParticles * act, ForceTree * tree, double atime
     for(i = 0; i < niter; i++) {
         int pi = use_newstars ? NewStars[i] : (int) i;
         if(P[pi].Type != 4 || STARP(pi).Seeded)
+            continue;
+        /* StarClusterSeedMaxAgeMyr: same gate as the counting pass above. */
+        if(!sc_seed_age_star_ok(STARP(pi).FormationTime))
             continue;
         MyFloat sc_mass = blackhole_params.StarClusterSampling ?
             STARP(pi).StarClusterMass_sample : STARP(pi).ClusterMass;

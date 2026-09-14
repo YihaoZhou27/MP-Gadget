@@ -5,6 +5,11 @@
 #include "timestep.h"
 #include "cosmology.h"
 
+/* Each of the three routines below records its own contribution to the cluster's evolution in
+ * the BH fields SC_MlossStellar / SC_MlossRelax / SC_MlossTDE (cumulative mass lost, code
+ * units) and SC_dlnReffStellar / SC_dlnReffRelax (cumulative ln R_eff change), see
+ * slotsmanager.h; a dissolved cluster resets them with the rest of its state. */
+
 /* Stellar-evolution mass loss (SCEvolutionStellar) of the star clusters attached to the
  * active BH particles: StarClusterMass becomes the cluster's birth mass times one minus the
  * cumulative SSP return fraction at its age (same yield tables and Chabrier IMF as
@@ -31,6 +36,21 @@ void starcluster_relaxation_message(const int mode, const int hierarchical);
 
 /* Start-up description of the active size-evolution terms (StarClusterSizeEvolution). */
 void starcluster_size_evolution_message(const int size_stellar, const int size_relaxation);
+
+/* Growth of the active BH particles by tidal disruption of their star cluster's stars
+ * (StarClusterTDEtoBH): the Rizzuto et al. (2023) eq. 9 rate on the Williams et al. (2026)
+ * cluster-with-BH structure, from the BH mass, StarClusterMass and SC_Reff.  Sets NdotTDE and
+ * MdotTDE, adds MdotTDE x dt to the BH mass (on top of, and not limited by, the Eddington-capped
+ * gas accretion of blackhole()) and removes the disrupted stars from the cluster.  BHs without a
+ * cluster get 0. */
+void starcluster_tde_growth(const ActiveParticles * act, const Cosmology * CP, const double atime, const struct UnitSystem units);
+
+/* Start-up description of the TDE growth model. */
+void starcluster_tde_message(void);
+
+/* The TDE rate [Myr^-1] of a BH of mass mbh_msun inside a cluster of stellar mass msc_msun and
+ * effective radius reff_pc; exposed for testing.  0 without a BH or a cluster. */
+double sc_tde_rate_per_myr(double mbh_msun, double msc_msun, double reff_pc);
 
 /* Relaxation-driven size change over a step, r_new/r_old = (m_new/m_old)^(2 - zeta/xi)
  * (Guerra et al. 2026 eq. 22 without tidal shocks); exposed for testing. */
