@@ -99,6 +99,18 @@ struct bh_particle_data {
     MyFloat MdotTDE;         /*!< StarClusterTDEtoBH: BH mass growth rate from those disruptions, exactly f_acc m_* NdotTDE,
                               code mass per internal time unit like Mdot.  Added to Mass every active step on top of the
                               Eddington-limited gas accretion, and never capped by it. */
+    /* StarClusterEnhancedTDE4Merger: burst of tidal disruptions around the lighter BH of every BH-BH
+     * merger (Mockler et al. 2023).  Properties of the remnant BH, not of its cluster: they are set
+     * at the merger, not reset when the cluster is dissolved or ejected, and a swallowed BH's
+     * unfinished burst is handed to its remnant. */
+    MyFloat MdotTDEMerger;   /*!< BH mass growth rate from the merger bursts at the last active step, code mass per
+                              internal time unit like Mdot; added to Mass on top of the Eddington-limited gas
+                              accretion and never capped by it.  Recomputed every active step (not read back). */
+    MyFloat MergerTDEMassLeft; /*!< Burst mass (code units) still to be added to the BH: f_acc m_* N_TDE of every
+                              merger goes in here (plus a swallowed BH's leftover) and drains at a constant rate over
+                              MergerTDETimeLeftMyr.  Read back on a restart so an open burst continues. */
+    MyFloat MergerTDETimeLeftMyr; /*!< Time (Myr) left of the burst window; every merger resets it to
+                              SC_MTDE_TBIN_MYR (10 Myr) for the whole reservoir.  0 when nothing is pending. */
     /* Per-channel record of the star cluster's mass and size evolution.  All five are properties
      * of the cluster: they start at 0 when the cluster is attached at seeding, follow the kept
      * (heaviest) cluster at a BH merger, and are reset to 0 with the rest of the cluster state

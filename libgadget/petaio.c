@@ -331,6 +331,11 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
             /* written but not read back: recomputed at the BH's first active step */
             BHP(i).NdotTDE = 0;
             BHP(i).MdotTDE = 0;
+            /* StarClusterEnhancedTDE4Merger: the rate is recomputed (write-only); the burst reservoir
+             * and its window are read back when present so an open burst continues after a restart. */
+            BHP(i).MdotTDEMerger = 0;
+            BHP(i).MergerTDEMassLeft = 0;
+            BHP(i).MergerTDETimeLeftMyr = 0;
             /* Per-channel cluster evolution records: read back when present, else they
              * count from this restart on. */
             BHP(i).SC_MlossStellar = 0;
@@ -949,6 +954,9 @@ SIMPLE_PROPERTY_PI(SC_initReff, SC_initReff, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(SC_Reff, SC_Reff, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(NdotTDE, NdotTDE, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(MdotTDE, MdotTDE, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(MdotTDEMerger, MdotTDEMerger, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(MergerTDEMassLeft, MergerTDEMassLeft, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(MergerTDETimeLeftMyr, MergerTDETimeLeftMyr, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(SC_MlossStellar, SC_MlossStellar, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(SC_MlossRelax, SC_MlossRelax, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(SC_MlossTDE, SC_MlossTDE, float, 1, struct bh_particle_data)
@@ -1194,6 +1202,12 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
      * code units, like BlackholeAccretionRate); recomputed every active step, so write-only. */
     IO_REG_WRONLY(NdotTDE, "f4", 1, 5, IOTable);
     IO_REG_WRONLY(MdotTDE, "f4", 1, 5, IOTable);
+    /* StarClusterEnhancedTDE4Merger: growth rate from the merger bursts (write-only, like MdotTDE),
+     * and the burst mass still to be added (code units) with the window left (Myr), read back on a
+     * restart so an open burst continues.  In PART, PIG and SecPIG alike. */
+    IO_REG_WRONLY(MdotTDEMerger, "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(MergerTDEMassLeft, "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(MergerTDETimeLeftMyr, "f4", 1, 5, IOTable);
     /* Per-channel record of the cluster's mass loss (code mass; stellar evolution, two-body
      * relaxation, TDEs) and ln R_eff change (stellar and relaxation size terms).  Cumulative,
      * so read back on a restart; missing in older snapshots -> count from the restart on. */

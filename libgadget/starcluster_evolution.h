@@ -37,16 +37,40 @@ void starcluster_relaxation_message(const int mode, const int hierarchical);
 /* Start-up description of the active size-evolution terms (StarClusterSizeEvolution). */
 void starcluster_size_evolution_message(const int size_stellar, const int size_relaxation);
 
-/* Growth of the active BH particles by tidal disruption of their star cluster's stars
- * (StarClusterTDEtoBH): the Rizzuto et al. (2023) eq. 9 rate on the Williams et al. (2026)
- * cluster-with-BH structure, from the BH mass, StarClusterMass and SC_Reff.  Sets NdotTDE and
- * MdotTDE, adds MdotTDE x dt to the BH mass (on top of, and not limited by, the Eddington-capped
- * gas accretion of blackhole()) and removes the disrupted stars from the cluster.  BHs without a
- * cluster get 0. */
-void starcluster_tde_growth(const ActiveParticles * act, const Cosmology * CP, const double atime, const struct UnitSystem units);
+/* Growth of the active BH particles by tidal disruptions, both channels in one pass over the
+ * active BHs (each switched by its flag):
+ *  - single_on (StarClusterTDEtoBH): disruption of their star cluster's stars at the Rizzuto et al.
+ *    (2023) eq. 9 rate on the Williams et al. (2026) cluster-with-BH structure, from the BH mass,
+ *    StarClusterMass and SC_Reff.  Sets NdotTDE and MdotTDE, adds MdotTDE x dt to the BH mass and
+ *    removes the disrupted stars from the cluster.  BHs without a cluster get 0.
+ *  - merger_on (StarClusterEnhancedTDE4Merger): the burst reservoir MergerTDEMassLeft filled at the
+ *    BH's mergers (blackhole_feedback_postprocess) is added at a constant rate over the window
+ *    MergerTDETimeLeftMyr; sets MdotTDEMerger.  Independent of whether a cluster is still attached.
+ * Both additions are on top of, and not limited by, the Eddington-capped gas accretion of
+ * blackhole(), and are credited to Mtrack as well (stellar debris, not gas). */
+void starcluster_tde_growth(const ActiveParticles * act, const Cosmology * CP, const double atime, const struct UnitSystem units, const int single_on, const int merger_on);
 
 /* Start-up description of the TDE growth model. */
 void starcluster_tde_message(void);
+
+/* StarClusterEnhancedTDE4Merger: number of stars disrupted in the eccentric Kozai-Lidov burst of
+ * Mockler et al. (2023) around the LIGHTER BH of a merging pair (the secondary, mass m1_msun, in its
+ * own cluster of stellar mass msc_msun and effective radius reff_pc): N_TDE = eps_dis x the stars
+ * inside the hierarchical radius a_hier = 0.1 a_bin (1 - e^2)/e of a binary at a_bin = 0.5 r_h,1
+ * with e = 0.5 (their eq. 2 and fiducial setup), r_h,1 the sphere holding 2 m1 of cluster stars
+ * (at most the cluster's edge r_max = 1.4 R_eff), on the same rho ~ r^-7/4 cusp as the single-BH
+ * rate; eps_dis = 0.25.  N_TDE = 2 (0.075)^(5/4) eps_dis m1/m_* = 0.0196 m1/m_* whenever
+ * 2 m1 <= M_SC, and 0.075^(5/4) eps_dis M_SC/m_* = 0.0098 M_SC/m_* otherwise.  0 without a cluster.
+ * sc_merger_tde_mass_msun is the mass the remnant gains from it, f_acc m_* N_TDE.  Exposed for
+ * testing. */
+double sc_merger_tde_ntde(double m1_msun, double msc_msun, double reff_pc);
+double sc_merger_tde_mass_msun(double m1_msun, double msc_msun, double reff_pc);
+
+/* Duration (Myr) over which a merger burst is added to the remnant (every merger restarts it) */
+#define SC_MTDE_TBIN_MYR 10.0
+
+/* Start-up description of the merger-burst model. */
+void starcluster_merger_tde_message(void);
 
 /* The TDE rate [Myr^-1] of a BH of mass mbh_msun inside a cluster of stellar mass msc_msun and
  * effective radius reff_pc; exposed for testing.  0 without a BH or a cluster. */

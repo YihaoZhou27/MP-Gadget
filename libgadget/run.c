@@ -80,6 +80,7 @@ static struct run_params
     int SCSizeEvolStellar; /* effective: size evolution from the stellar-evolution mass loss is applied */
     int SCSizeEvolRelax; /* effective: size evolution from the GB08 relaxation mass loss is applied */
     int StarClusterTDEtoBH; /* BHs grow by tidally disrupting the stars of their star cluster (Rizzuto et al. 2023 rate) */
+    int StarClusterEnhancedTDE4Merger; /* BH merger remnants grow by a burst of tidal disruptions around the lighter BH (Mockler et al. 2023) */
     int SCgasVDisp; /* if gas/stellar velocity dispersion calculation is enabled */
     int BlackHoleSeedHaloBased; /* if the bh seeding is halo-based */
     int BlackHoleSeedGasBased; /* if the bh seeding is gas-based */
@@ -182,6 +183,7 @@ set_all_global_params(ParameterSet * ps)
         All.SCEvolutionRelaxation = param_get_int(ps, "SCEvolutionRelaxation");
         All.StarClusterSizeEvolution = param_get_int(ps, "StarClusterSizeEvolution");
         All.StarClusterTDEtoBH = param_get_int(ps, "StarClusterTDEtoBH");
+        All.StarClusterEnhancedTDE4Merger = param_get_int(ps, "StarClusterEnhancedTDE4Merger");
         All.SCgasVDisp = param_get_int(ps, "SCgasVDisp");
         All.BlackHoleSeedGasBased = param_get_int(ps, "BlackHoleSeedGasBased");
         All.BlackHoleSeedStarCluster = param_get_int(ps, "BlackHoleSeedStarCluster");
@@ -266,12 +268,19 @@ set_all_global_params(ParameterSet * ps)
             endrun(1, "StarClusterTDEtoBH must be 0 or 1, got %d.\n", All.StarClusterTDEtoBH);
         if(All.StarClusterTDEtoBH && !(All.StarClusterOn && All.BlackHoleOn))
             endrun(1, "StarClusterTDEtoBH=1 requires StarClusterOn=1 and BlackHoleOn=1.\n");
-        if((All.SCEvolutionStellar || All.SCEvolutionRelaxation || All.StarClusterTDEtoBH) && param_get_int(ps, "StarClusterBHDyn") != 1)
+        /* Merger bursts of tidal disruptions around the lighter BH of every merger. */
+        if(All.StarClusterEnhancedTDE4Merger < 0 || All.StarClusterEnhancedTDE4Merger > 1)
+            endrun(1, "StarClusterEnhancedTDE4Merger must be 0 or 1, got %d.\n", All.StarClusterEnhancedTDE4Merger);
+        if(All.StarClusterEnhancedTDE4Merger && !(All.StarClusterOn && All.BlackHoleOn))
+            endrun(1, "StarClusterEnhancedTDE4Merger=1 requires StarClusterOn=1 and BlackHoleOn=1.\n");
+        if((All.SCEvolutionStellar || All.SCEvolutionRelaxation || All.StarClusterTDEtoBH || All.StarClusterEnhancedTDE4Merger) && param_get_int(ps, "StarClusterBHDyn") != 1)
             message(0, "Star-cluster evolution / TDE growth with StarClusterBHDyn=%d: the per-cluster, combined-sample and compensating secFOF seeds "
                        "carry no StarClusterMass unless StarClusterBHDyn=1, so only the other seeding paths have clusters to evolve or disrupt.\n",
                     param_get_int(ps, "StarClusterBHDyn"));
         if(All.StarClusterTDEtoBH)
             starcluster_tde_message();
+        if(All.StarClusterEnhancedTDE4Merger)
+            starcluster_merger_tde_message();
         if(All.SCEvolutionRelaxation)
             starcluster_relaxation_message(All.SCEvolutionRelaxation, All.HierarchicalGravity);
         /* Size evolution of the star clusters on BHs: each term follows a mass-evolution model
@@ -728,11 +737,12 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
              * only, as their ejecta are already returned by the star particles (metal_return). */
             if(All.StarClusterOn && All.SCEvolutionStellar)
                 starcluster_stellar_evolution(&Act, &All.CP, atime, All.SCSizeEvolStellar);
-            /* Growth of the BHs by tidal disruption of their clusters' stars, on the clusters as
-             * evolved above.  The mass is added here, on top of the Eddington-limited gas accretion
-             * of blackhole() below (which then sees the heavier BH). */
-            if(All.StarClusterOn && All.StarClusterTDEtoBH)
-                starcluster_tde_growth(&Act, &All.CP, atime, units);
+            /* Growth of the BHs by tidal disruptions: of their clusters' stars (on the clusters as
+             * evolved above) and of the merger bursts filled by blackhole() at the BHs' mergers.  The
+             * mass is added here, on top of the Eddington-limited gas accretion of blackhole() below
+             * (which then sees the heavier BH). */
+            if(All.StarClusterOn && (All.StarClusterTDEtoBH || All.StarClusterEnhancedTDE4Merger))
+                starcluster_tde_growth(&Act, &All.CP, atime, units, All.StarClusterTDEtoBH, All.StarClusterEnhancedTDE4Merger);
 
             /* Do this before sfr and bh so the gas hsml always contains DesNumNgb neighbours.*/
             if(All.MetalReturnOn) {

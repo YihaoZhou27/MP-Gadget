@@ -18,6 +18,7 @@
 #include "walltime.h"
 #include "bhinfo.h"
 #include "bhdynfric.h"
+#include "starcluster_evolution.h"   /* sc_merger_tde_mass_msun, SC_MTDE_TBIN_MYR: the merger TDE burst */
 #include "fof.h"        /* sc_seed_age_*: the StarClusterSeedMaxAgeMyr stellar-age gate */
 #include "utils/endrun.h"
 #include "utils/mymalloc.h"
@@ -72,6 +73,7 @@ struct BlackholeParams
     int GWRecoilVelocityKick; /* If 1, apply GW recoil velocity kick to BH merger remnants */
     int GWRecoilSCKick; /* If 1, check if GW kick ejects BH from star cluster and zero SC mass */
     int BHVorticity; /* If 1, compute SPH vorticity of surrounding gas for each BH */
+    int StarClusterEnhancedTDE4Merger; /* If 1, every BH-BH merger fills the remnant's burst reservoir with the Mockler et al. (2023) TDEs around the lighter BH */
     /************************************************************************/
 } blackhole_params;
 
@@ -160,6 +162,9 @@ void set_blackhole_params(ParameterSet * ps)
         blackhole_params.BHVorticity = param_get_int(ps, "BHVorticity");
         if(blackhole_params.GWRecoilSCKick && !blackhole_params.StarClusterOn)
             endrun(1, "GWRecoilSCKick=1 requires StarClusterOn=1.\n");
+        blackhole_params.StarClusterEnhancedTDE4Merger = param_get_int(ps, "StarClusterEnhancedTDE4Merger");
+        if(blackhole_params.StarClusterEnhancedTDE4Merger && !blackhole_params.StarClusterOn)
+            endrun(1, "StarClusterEnhancedTDE4Merger=1 requires StarClusterOn=1.\n");
         /* Hierarchical gravity: the sub-step trees hold only the active particles, so the
          * tidal tensor (grav_short_tree) is computed only on the full tree of a PM step and
          * the BH keeps that value until the next PM step (a zero-order hold). */
@@ -431,6 +436,9 @@ blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree *
     priv->BH_accreted_SCmax = (struct bh_sc_state *) mymalloc("BH_accreted_SCmax", SlotsManager->info[5].size * sizeof(struct bh_sc_state));
     priv->BH_GWRecoilKick = (MyFloat (*) [3]) mymalloc("BH_GWRecoilKick", 3 * SlotsManager->info[5].size * sizeof(MyFloat));
     memset(priv->BH_GWRecoilKick, 0, 3 * SlotsManager->info[5].size * sizeof(MyFloat));
+    /* allocated last, freed first (LIFO); zeroed because the reduce only assigns BHs the walk visits */
+    priv->BH_MergerTDEburst = (MyFloat *) mymalloc("BH_MergerTDEburst", SlotsManager->info[5].size * sizeof(MyFloat));
+    memset(priv->BH_MergerTDEburst, 0, SlotsManager->info[5].size * sizeof(MyFloat));
 
     /* Now do the swallowing of particles and dump feedback energy */
     /* We also merge BHs here. Only BHs which are not themselves
@@ -456,6 +464,7 @@ blackhole(const ActiveParticles * act, double atime, Cosmology * CP, ForceTree *
         *bhdetailswritten += collect_BH_info(ActiveBlackHoles, NumActiveBlackHoles, priv, PartManager, (struct bh_particle_data*) SlotsManager->info[5].ptr, FdBlackholeDetails);
     }
 
+    myfree(priv->BH_MergerTDEburst);
     myfree(priv->BH_GWRecoilKick);
     myfree(priv->BH_accreted_SCmax);
     myfree(priv->BH_accreted_StarClusterMass);
@@ -855,6 +864,10 @@ typedef struct {
     int FdbkChannel; /* 0 thermal, 1 kinetic */
     int alignment; /* Ensure alignment*/
     MyFloat Vel[3]; /* Velocity of the swallower BH, for GW recoil kick direction */
+    /* StarClusterEnhancedTDE4Merger: the swallower's own cluster, for the mergers in which IT is the
+     * lighter BH (code mass; R_eff in physical pc) */
+    MyFloat SCMass;
+    MyFloat SCReff;
 } TreeWalkQueryBHFeedback;
 
 typedef struct {
@@ -867,6 +880,7 @@ typedef struct {
     int BH_CountProgs;
     int BH_minTimeBin;
     MyFloat GWRecoilKick[3]; /* Accumulated GW recoil kick velocity from BH mergers */
+    MyFloat MergerTDEburst; /* StarClusterEnhancedTDE4Merger: burst mass (code units) from the swallowed BHs, plus their leftovers */
 } TreeWalkResultBHFeedback;
 
 typedef struct {
@@ -949,6 +963,20 @@ sc_state_set(const int i, const struct bh_sc_state * s)
     BHP(i).StarClusterLastEnrichmentMyr = s->LastEnrichmentMyr;
 }
 
+/* Effective radius (physical pc) of the cluster on BH particle i, read without touching its
+ * state: SC_Reff, else the initial radius, else the size-mass median at the cluster mass (a
+ * restart from a snapshot without the radii).  0 without a cluster. */
+static double
+bh_cluster_reff_pc(const int i)
+{
+    double reff = BHP(i).SC_Reff;
+    if(reff <= 0)
+        reff = BHP(i).SC_initReff;
+    if(reff <= 0 && BHP(i).StarClusterMass > 0)
+        reff = starcluster_median_reff_pc(BHP(i).StarClusterMass);
+    return reff;
+}
+
 /**
  * perform blackhole swallow / merger;
  */
@@ -1000,6 +1028,24 @@ blackhole_feedback_ngbiter(TreeWalkQueryBHFeedback * I,
         O->BH_CountProgs += BHP(other).CountProgs;
         O->BH_Mass += (BHP(other).Mass);
         O->StarClusterMass += BHP(other).StarClusterMass;
+        /* StarClusterEnhancedTDE4Merger: the burst of disruptions around the LIGHTER BH of this pair
+         * (Mockler et al. 2023), from that BH's mass and its own cluster at the moment of the merger
+         * -- the swallowed BH's when it is the lighter one, else the swallower's own (carried in the
+         * query).  Whatever the swallowed BH had not yet added of its own earlier bursts goes to the
+         * remnant too.  Summed over the swallowed BHs; postprocess puts it into the remnant's
+         * reservoir. */
+        if(blackhole_params.StarClusterEnhancedTDE4Merger) {
+            const double mass_to_msun = BH_GET_PRIV(lv->tw)->units.UnitMass_in_g / (SOLAR_MASS * BH_GET_PRIV(lv->tw)->CP->HubbleParam);
+            double m1, msc, reff;
+            if(BHP(other).Mass <= I->BH_Mass) {
+                m1 = BHP(other).Mass; msc = BHP(other).StarClusterMass; reff = bh_cluster_reff_pc(other);
+            }
+            else {
+                m1 = I->BH_Mass; msc = I->SCMass; reff = I->SCReff;
+            }
+            O->MergerTDEburst += sc_merger_tde_mass_msun(m1 * mass_to_msun, msc * mass_to_msun, reff) / mass_to_msun
+                               + BHP(other).MergerTDEMassLeft;
+        }
         /* Keep the heaviest of the swallowed clusters, with its full state */
         if(BHP(other).StarClusterMass > 0 &&
            sc_state_heavier(BHP(other).StarClusterMass, P[other].ID, O->SCmax.Mass, O->SCmax.ID))
@@ -1217,6 +1263,8 @@ blackhole_feedback_copy(int i, TreeWalkQueryBHFeedback * I, TreeWalk * tw)
         I->Vel[k] = P[i].Vel[k];
 
     I->FeedbackWeightSum = BH_GET_PRIV(tw)->BH_FeedbackWeightSum[PI];
+    I->SCMass = BHP(i).StarClusterMass;
+    I->SCReff = bh_cluster_reff_pc(i);
     I->FdbkChannel = 0; /* thermal feedback mode */
 
     double dtime = get_dloga_for_bin(P[i].TimeBinHydro, P[i].Ti_drift) / BH_GET_PRIV(tw)->hubble;
@@ -1246,6 +1294,7 @@ blackhole_feedback_reduce(int place, TreeWalkResultBHFeedback * remote, enum Tre
         TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_accreted_momentum[PI][k], remote->AccretedMomentum[k]);
         TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_GWRecoilKick[PI][k], remote->GWRecoilKick[k]);
     }
+    TREEWALK_REDUCE(BH_GET_PRIV(tw)->BH_MergerTDEburst[PI], remote->MergerTDEburst);
     /* Arg-max reduce: the heaviest swallowed cluster over all ranks */
     struct bh_sc_state * scmax = &BH_GET_PRIV(tw)->BH_accreted_SCmax[PI];
     if(mode == TREEWALK_PRIMARY || sc_state_heavier(remote->SCmax.Mass, remote->SCmax.ID, scmax->Mass, scmax->ID))
@@ -1262,6 +1311,14 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
     const int PI = P[n].PI;
     if(BH_GET_PRIV(tw)->BH_accreted_BHMass[PI] > 0){
        BHP(n).Mass += BH_GET_PRIV(tw)->BH_accreted_BHMass[PI];
+    }
+    /* StarClusterEnhancedTDE4Merger: the bursts of this step's mergers (and the unfinished bursts of
+     * the swallowed BHs) join the remnant's reservoir, which starcluster_tde_growth adds to the BH
+     * mass at a constant rate over the next SC_MTDE_TBIN_MYR; a new merger restarts that window
+     * for whatever is left. */
+    if(blackhole_params.StarClusterEnhancedTDE4Merger && BH_GET_PRIV(tw)->BH_MergerTDEburst[PI] > 0) {
+        BHP(n).MergerTDEMassLeft += BH_GET_PRIV(tw)->BH_MergerTDEburst[PI];
+        BHP(n).MergerTDETimeLeftMyr = SC_MTDE_TBIN_MYR;
     }
     /* Star clusters at the merger: the remnant carries ONE cluster, the heaviest of the merging
      * clusters (its own or a swallowed one, compared by cluster mass rather than inherited with
@@ -1512,6 +1569,10 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
     /* StarClusterTDEtoBH rates: set at the BH's first active step */
     BHP(child).NdotTDE = 0;
     BHP(child).MdotTDE = 0;
+    /* StarClusterEnhancedTDE4Merger: no merger yet, nothing pending */
+    BHP(child).MdotTDEMerger = 0;
+    BHP(child).MergerTDEMassLeft = 0;
+    BHP(child).MergerTDETimeLeftMyr = 0;
 
     /* Record the star-cluster mass that seeded this BH. Frozen at creation:
      * never modified by mergers, so an accretor keeps its own seed value. */

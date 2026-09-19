@@ -78,6 +78,11 @@ struct __attribute__((__packed__)) BHinfo{
     double SC_MlossTDE;
     double SC_dlnReffStellar;
     double SC_dlnReffRelax;
+    /* StarClusterEnhancedTDE4Merger: BH growth rate from the merger bursts at this step (code mass
+     * per internal time unit, like MdotTDE; 0 when nothing is pending or the option is off) and the
+     * burst mass (code units) still to be added after this step. */
+    double MdotTDEMerger;
+    double MergerTDEMassLeft;
     double a;
     /* See size1 above*/
     int size2;
@@ -181,6 +186,8 @@ collect_BH_info(const int * const ActiveBlackHoles, const int64_t NumActiveBlack
         info->SC_MlossTDE = BHManager[PI].SC_MlossTDE;
         info->SC_dlnReffStellar = BHManager[PI].SC_dlnReffStellar;
         info->SC_dlnReffRelax = BHManager[PI].SC_dlnReffRelax;
+        info->MdotTDEMerger = BHManager[PI].MdotTDEMerger;
+        info->MergerTDEMassLeft = BHManager[PI].MergerTDEMassLeft;
         info->a = priv->atime;
     }
 

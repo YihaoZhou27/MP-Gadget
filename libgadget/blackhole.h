@@ -45,6 +45,7 @@ struct BHPriv {
     MyFloat * BH_accreted_StarClusterMass; /* summed cluster mass of the swallowed BHs (Mtrack bookkeeping) */
     struct bh_sc_state * BH_accreted_SCmax; /* heaviest cluster among the swallowed BHs */
     MyFloat (*BH_GWRecoilKick)[3]; /* Accumulated GW recoil kick velocity from BH mergers */
+    MyFloat * BH_MergerTDEburst; /* StarClusterEnhancedTDE4Merger: burst mass (code units) the remnant gains from this step's mergers */
 
     /* This is a temporary computed in the accretion treewalk and used
      * in the feedback treewalk*/
