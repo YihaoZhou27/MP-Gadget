@@ -937,6 +937,7 @@ sc_state_get(struct bh_sc_state * s, const int i)
     s->MlossStellar = BHP(i).SC_MlossStellar;
     s->MlossRelax = BHP(i).SC_MlossRelax;
     s->MlossTDE = BHP(i).SC_MlossTDE;
+    s->MlossTDEMerger = BHP(i).SC_MlossTDEMerger;
     s->dlnReffStellar = BHP(i).SC_dlnReffStellar;
     s->dlnReffRelax = BHP(i).SC_dlnReffRelax;
     memcpy(s->Metals, BHP(i).StarClusterMetals, sizeof(s->Metals));
@@ -957,6 +958,7 @@ sc_state_set(const int i, const struct bh_sc_state * s)
     BHP(i).SC_MlossStellar = s->MlossStellar;
     BHP(i).SC_MlossRelax = s->MlossRelax;
     BHP(i).SC_MlossTDE = s->MlossTDE;
+    BHP(i).SC_MlossTDEMerger = s->MlossTDEMerger;
     BHP(i).SC_dlnReffStellar = s->dlnReffStellar;
     BHP(i).SC_dlnReffRelax = s->dlnReffRelax;
     memcpy(BHP(i).StarClusterMetals, s->Metals, sizeof(s->Metals));
@@ -1397,6 +1399,7 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
                 BHP(n).SC_MlossStellar = 0;
                 BHP(n).SC_MlossRelax = 0;
                 BHP(n).SC_MlossTDE = 0;
+                BHP(n).SC_MlossTDEMerger = 0;
                 BHP(n).SC_dlnReffStellar = 0;
                 BHP(n).SC_dlnReffRelax = 0;
             }
@@ -1564,6 +1567,7 @@ blackhole_make_one(int index, const double atime, const RandTable * const rnd, i
     BHP(child).SC_MlossStellar = 0;
     BHP(child).SC_MlossRelax = 0;
     BHP(child).SC_MlossTDE = 0;
+    BHP(child).SC_MlossTDEMerger = 0;
     BHP(child).SC_dlnReffStellar = 0;
     BHP(child).SC_dlnReffRelax = 0;
     /* StarClusterTDEtoBH rates: set at the BH's first active step */

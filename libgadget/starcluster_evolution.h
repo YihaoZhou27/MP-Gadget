@@ -6,9 +6,10 @@
 #include "cosmology.h"
 
 /* Each of the three routines below records its own contribution to the cluster's evolution in
- * the BH fields SC_MlossStellar / SC_MlossRelax / SC_MlossTDE (cumulative mass lost, code
- * units) and SC_dlnReffStellar / SC_dlnReffRelax (cumulative ln R_eff change), see
- * slotsmanager.h; a dissolved cluster resets them with the rest of its state. */
+ * the BH fields SC_MlossStellar / SC_MlossRelax / SC_MlossTDE / SC_MlossTDEMerger (cumulative
+ * mass lost, code units; the last two are the two channels of starcluster_tde_growth) and
+ * SC_dlnReffStellar / SC_dlnReffRelax (cumulative ln R_eff change), see slotsmanager.h; a
+ * dissolved cluster resets them with the rest of its state. */
 
 /* Stellar-evolution mass loss (SCEvolutionStellar) of the star clusters attached to the
  * active BH particles: StarClusterMass becomes the cluster's birth mass times one minus the
@@ -45,7 +46,9 @@ void starcluster_size_evolution_message(const int size_stellar, const int size_r
  *    removes the disrupted stars from the cluster.  BHs without a cluster get 0.
  *  - merger_on (StarClusterEnhancedTDE4Merger): the burst reservoir MergerTDEMassLeft filled at the
  *    BH's mergers (blackhole_feedback_postprocess) is added at a constant rate over the window
- *    MergerTDETimeLeftMyr; sets MdotTDEMerger.  Independent of whether a cluster is still attached.
+ *    MergerTDETimeLeftMyr; sets MdotTDEMerger.  The stars of each step's share leave the cluster
+ *    the remnant carries (1/f_acc x the BH gain, recorded in SC_MlossTDEMerger); the BH gain
+ *    itself does not depend on a cluster still being attached.
  * Both additions are on top of, and not limited by, the Eddington-capped gas accretion of
  * blackhole(), and are credited to Mtrack as well (stellar debris, not gas). */
 void starcluster_tde_growth(const ActiveParticles * act, const Cosmology * CP, const double atime, const struct UnitSystem units, const int single_on, const int merger_on);

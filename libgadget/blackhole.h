@@ -22,6 +22,7 @@ struct bh_sc_state {
     MyFloat MlossStellar;
     MyFloat MlossRelax;
     MyFloat MlossTDE;
+    MyFloat MlossTDEMerger;
     MyFloat dlnReffStellar;
     MyFloat dlnReffRelax;
     float Metals[NMETALS];        /* StarClusterMetals */

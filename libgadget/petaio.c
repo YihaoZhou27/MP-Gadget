@@ -341,6 +341,7 @@ petaio_read_snapshot(int num, const char * OutputDir, Cosmology * CP, struct hea
             BHP(i).SC_MlossStellar = 0;
             BHP(i).SC_MlossRelax = 0;
             BHP(i).SC_MlossTDE = 0;
+            BHP(i).SC_MlossTDEMerger = 0;
             BHP(i).SC_dlnReffStellar = 0;
             BHP(i).SC_dlnReffRelax = 0;
             /* Debug-only WRONLY fields: not read back, so default to 0 on restart. */
@@ -960,6 +961,7 @@ SIMPLE_PROPERTY_PI(MergerTDETimeLeftMyr, MergerTDETimeLeftMyr, float, 1, struct 
 SIMPLE_PROPERTY_PI(SC_MlossStellar, SC_MlossStellar, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(SC_MlossRelax, SC_MlossRelax, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(SC_MlossTDE, SC_MlossTDE, float, 1, struct bh_particle_data)
+SIMPLE_PROPERTY_PI(SC_MlossTDEMerger, SC_MlossTDEMerger, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(SC_dlnReffStellar, SC_dlnReffStellar, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(SC_dlnReffRelax, SC_dlnReffRelax, float, 1, struct bh_particle_data)
 SIMPLE_PROPERTY_PI(BlackholeStarClusterFormationTime, StarClusterFormationTime, float, 1, struct bh_particle_data)
@@ -1209,11 +1211,12 @@ void register_io_blocks(struct IOTable * IOTable, int WriteGroupID, int MetalRet
     IO_REG_NONFATAL(MergerTDEMassLeft, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(MergerTDETimeLeftMyr, "f4", 1, 5, IOTable);
     /* Per-channel record of the cluster's mass loss (code mass; stellar evolution, two-body
-     * relaxation, TDEs) and ln R_eff change (stellar and relaxation size terms).  Cumulative,
+     * relaxation, TDEs, merger-burst TDEs) and ln R_eff change (stellar and relaxation size terms).  Cumulative,
      * so read back on a restart; missing in older snapshots -> count from the restart on. */
     IO_REG_NONFATAL(SC_MlossStellar, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(SC_MlossRelax, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(SC_MlossTDE, "f4", 1, 5, IOTable);
+    IO_REG_NONFATAL(SC_MlossTDEMerger, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(SC_dlnReffStellar, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(SC_dlnReffRelax, "f4", 1, 5, IOTable);
     IO_REG_NONFATAL(BlackholeStarClusterFormationTime, "f4", 1, 5, IOTable);

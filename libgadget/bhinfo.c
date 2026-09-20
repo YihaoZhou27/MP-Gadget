@@ -83,6 +83,9 @@ struct __attribute__((__packed__)) BHinfo{
      * burst mass (code units) still to be added after this step. */
     double MdotTDEMerger;
     double MergerTDEMassLeft;
+    /* Cumulative cluster mass (code mass) the merger bursts have taken out of the cluster this BH
+     * carries: the fourth per-channel record, next to SC_MlossStellar / Relax / TDE above. */
+    double SC_MlossTDEMerger;
     double a;
     /* See size1 above*/
     int size2;
@@ -188,6 +191,7 @@ collect_BH_info(const int * const ActiveBlackHoles, const int64_t NumActiveBlack
         info->SC_dlnReffRelax = BHManager[PI].SC_dlnReffRelax;
         info->MdotTDEMerger = BHManager[PI].MdotTDEMerger;
         info->MergerTDEMassLeft = BHManager[PI].MergerTDEMassLeft;
+        info->SC_MlossTDEMerger = BHManager[PI].SC_MlossTDEMerger;
         info->a = priv->atime;
     }
 

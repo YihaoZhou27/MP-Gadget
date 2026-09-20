@@ -267,6 +267,8 @@ void find_mass_bin_limits(double * masslow, double * masshigh, const double dtst
     {
         *masslow = MAXMASS;
         *masshigh = MAXMASS;
+        gsl_interp_accel_free(p.metalacc);
+        gsl_interp_accel_free(p.massacc);
         return;
     }
     /* All stars die before the end of this timestep*/

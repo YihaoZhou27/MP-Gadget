@@ -297,6 +297,7 @@ sc_dissolve(int place)
     BHP(place).SC_MlossStellar = 0;
     BHP(place).SC_MlossRelax = 0;
     BHP(place).SC_MlossTDE = 0;
+    BHP(place).SC_MlossTDEMerger = 0;
     BHP(place).SC_dlnReffStellar = 0;
     BHP(place).SC_dlnReffRelax = 0;
 }
@@ -523,6 +524,27 @@ sc_tde_rate_per_myr(double mbh_msun, double msc_msun, double reff_pc)
     return 1.1 * SC_TDE_F * SC_TDE_FB * lnL * (M_eff / 1e3) * (rho / 1e7) * pow(100. / sqrt(sigma2), 3);
 }
 
+/* The TDE term of the cluster mass evolution, for both channels: m_dis (Msun, at most the cluster's
+ * m_sc) of disrupted stars leaves the cluster of BH particle p (the BH keeps SC_TDE_FACC of each
+ * star, the rest is ejected).  Like the relaxation escapers they are a representative sample of its
+ * stars and take their share of the stellar-evolution return with them; the loss is added to the
+ * channel's record (SC_MlossTDE or SC_MlossTDEMerger).  A cluster eaten down to the dissolution
+ * mass is removed.  Returns 1 if the cluster was dissolved. */
+static int
+sc_lose_tde_stars(const int p, const double m_sc, const double m_dis, const double mass_to_msun, MyFloat * record)
+{
+    const double m_new = m_sc - m_dis;
+    if(m_new < SC_RLX_MDISSOLVE) {
+        sc_dissolve(p);
+        return 1;
+    }
+    const double frac = m_new / m_sc;
+    BHP(p).StarClusterMass *= frac;
+    BHP(p).StarClusterTotalMassReturned *= frac;
+    *record += m_dis / mass_to_msun;
+    return 0;
+}
+
 void
 starcluster_tde_growth(const ActiveParticles * act, const Cosmology * CP, const double atime, const struct UnitSystem units, const int single_on, const int merger_on)
 {
@@ -539,10 +561,10 @@ starcluster_tde_growth(const ActiveParticles * act, const Cosmology * CP, const 
     const double hubble = hubble_function(CP, atime);
     const int bhdyn = get_starcluster_bhdyn_on();
 
-    int64_t nbh = 0, neaten = 0, nburst = 0, ndone = 0;
-    double ntde = 0, mgain = 0, mburst = 0;
+    int64_t nbh = 0, neaten = 0, nburst = 0, ndone = 0, neaten_burst = 0;
+    double ntde = 0, mgain = 0, mburst = 0, mburst_sc = 0;
     int i;
-    #pragma omp parallel for reduction(+: nbh, neaten, nburst, ndone, ntde, mgain, mburst)
+    #pragma omp parallel for reduction(+: nbh, neaten, nburst, ndone, neaten_burst, ntde, mgain, mburst, mburst_sc)
     for(i = 0; i < act->NumActiveParticle; i++)
     {
         const int p = act->ActiveParticle ? act->ActiveParticle[i] : i;
@@ -561,8 +583,8 @@ starcluster_tde_growth(const ActiveParticles * act, const Cosmology * CP, const 
 
         /* --- StarClusterEnhancedTDE4Merger: the burst reservoir filled at the BH's mergers drains
          * at a constant rate over the window left (every merger restarts the window for the whole
-         * reservoir, see blackhole_feedback_postprocess).  A property of the remnant, so it runs
-         * whether or not the BH still carries a cluster.  The window closing inside this step
+         * reservoir, see blackhole_feedback_postprocess).  A property of the remnant, so the BH
+         * gains it whether or not it still carries a cluster.  The window closing inside this step
          * finishes the burst. --- */
         if(merger_on && BHP(p).MergerTDEMassLeft > 0 && dt_myr > 0) {
             double dm;
@@ -586,14 +608,29 @@ starcluster_tde_growth(const ActiveParticles * act, const Cosmology * CP, const 
                 nburst++;
                 mburst += dm * mass_to_msun;
                 changed = 1;
+                /* The cluster side of the burst: the stars disrupted in this step leave the cluster of the
+                 * remnant -- the kept (heaviest) one, whichever of the merging BHs brought it -- whole, i.e.
+                 * 1/SC_TDE_FACC times what the BH keeps of them, exactly as in the single-BH channel below
+                 * (which then sees the lighter cluster).  Recorded in SC_MlossTDEMerger.  A remnant without
+                 * a cluster has no stars to give: the BH gain stands (the reservoir was fixed at the merger,
+                 * from the lighter BH's own cluster) and nothing is debited; a cluster smaller than the
+                 * step's stars gives what it has. */
+                if(BHP(p).StarClusterMass > 0) {
+                    const double m_sc = BHP(p).StarClusterMass * mass_to_msun;
+                    double m_dis = dm * mass_to_msun / SC_TDE_FACC;
+                    if(m_dis > m_sc)
+                        m_dis = m_sc;
+                    mburst_sc += m_dis;
+                    neaten_burst += sc_lose_tde_stars(p, m_sc, m_dis, mass_to_msun, &BHP(p).SC_MlossTDEMerger);
+                }
             }
         }
 
         /* --- StarClusterTDEtoBH: the BH disrupting the stars of its own cluster --- */
         if(single_on && BHP(p).StarClusterMass > 0) {
             const double m_sc = BHP(p).StarClusterMass * mass_to_msun;
-            /* on the cluster as evolved by the relaxation and stellar evolution of this step, and
-             * on the BH mass including this step's merger-burst gain */
+            /* on the cluster as evolved by the relaxation and stellar evolution of this step and
+             * lightened by this step's merger-burst stars, and on the BH mass including their gain */
             const double ndot = sc_tde_rate_per_myr(BHP(p).Mass * mass_to_msun, m_sc, sc_reff_now(p));
             if(ndot > 0) {
                 /* stellar mass disrupted over the step, at most the whole cluster */
@@ -624,33 +661,21 @@ starcluster_tde_growth(const ActiveParticles * act, const Cosmology * CP, const 
                 ntde += m_dis / SC_TDE_MSTAR;       /* disruptions actually realised (at most the cluster's stars) */
                 mgain += m_gain;
                 changed = 1;
-                /* The TDE term of the cluster mass evolution: the disrupted stars leave the cluster (the
-                 * BH keeps SC_TDE_FACC of each, the rest is ejected).  Like the relaxation escapers they are
-                 * a representative sample of its stars and take their share of the stellar-evolution return
-                 * with them; a cluster eaten down to the dissolution mass is removed. */
-                const double m_new = m_sc - m_dis;
-                if(m_new < SC_RLX_MDISSOLVE) {
-                    sc_dissolve(p);
-                    neaten++;
-                }
-                else {
-                    const double frac = m_new / m_sc;
-                    BHP(p).StarClusterMass *= frac;
-                    BHP(p).StarClusterTotalMassReturned *= frac;
-                    BHP(p).SC_MlossTDE += m_dis / mass_to_msun;
-                }
+                /* The TDE term of the cluster mass evolution: the disrupted stars leave the cluster */
+                neaten += sc_lose_tde_stars(p, m_sc, m_dis, mass_to_msun, &BHP(p).SC_MlossTDE);
             }
         }
         /* StarClusterBHDyn=1: P.Mass = Mtrack + StarClusterMass, so the dynamical mass loses
-         * only the unbound part of each disrupted star and gains the burst mass. */
+         * only the unbound part of each disrupted star, in both channels (a burst drained by a BH
+         * without a cluster adds its mass instead). */
         if(bhdyn && changed)
             sc_update_dyn_mass(p);
     }
 
-    int64_t counts[4] = {nbh, neaten, nburst, ndone}, totcounts[4];
-    double sums[3] = {ntde, mgain, mburst}, totsums[3];
-    MPI_Reduce(counts, totcounts, 4, MPI_INT64, MPI_SUM, 0, MPI_COMM_WORLD);
-    MPI_Reduce(sums, totsums, 3, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    int64_t counts[5] = {nbh, neaten, nburst, ndone, neaten_burst}, totcounts[5];
+    double sums[4] = {ntde, mgain, mburst, mburst_sc}, totsums[4];
+    MPI_Reduce(counts, totcounts, 5, MPI_INT64, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(sums, totsums, 4, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
     /* The reduced totals exist on rank 0 only: evaluate them there only. */
     int ThisTask;
     MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
@@ -658,8 +683,9 @@ starcluster_tde_growth(const ActiveParticles * act, const Cosmology * CP, const 
         message(0, "SC TDE: %ld BHs disrupting cluster stars, %g TDEs this step, %g Msun added to the BHs, %ld clusters eaten up.\n",
                 (long) totcounts[0], totsums[0], totsums[1], (long) totcounts[1]);
     if(ThisTask == 0 && totcounts[2] > 0)
-        message(0, "SC merger TDE: %ld BHs adding merger-burst mass, %g Msun this step, %ld bursts completed.\n",
-                (long) totcounts[2], totsums[2], (long) totcounts[3]);
+        message(0, "SC merger TDE: %ld BHs adding merger-burst mass, %g Msun this step, %ld bursts completed; "
+                   "%g Msun of stars taken out of their clusters, %ld clusters eaten up.\n",
+                (long) totcounts[2], totsums[2], (long) totcounts[3], totsums[3], (long) totcounts[4]);
 
     walltime_measure("/BH/SCTDE");
 }
@@ -676,10 +702,12 @@ starcluster_merger_tde_message(void)
                "(0 without a cluster). The remnant gains %g m_* per event (m_* = %g Msun), added at a constant rate over the "
                "%g Myr after the merger (MdotTDEMerger; the reservoir MergerTDEMassLeft and its window MergerTDETimeLeftMyr "
                "are in the snapshots), on top of and not limited by the Eddington-capped gas accretion and credited to Mtrack; "
-               "a swallowed BH's unfinished burst passes to its remnant.\n",
+               "a swallowed BH's unfinished burst passes to its remnant. While a burst drains, the disrupted stars leave the "
+               "star cluster the remnant carries (the kept, heaviest one of the merger) whole, %g x the BH gain, recorded in "
+               "the BH field SC_MlossTDEMerger; a remnant without a cluster still gains the mass.\n",
             SC_MTDE_EPS_DIS, SC_MTDE_EPS_HIER, SC_MTDE_ABIN_RH, SC_MTDE_EBIN, SC_TDE_RMAX_REFF, SC_TDE_ALPHA,
             SC_MTDE_EPS_DIS * 2 * pow(x_hier, 3 - SC_TDE_ALPHA), SC_MTDE_EPS_DIS * pow(x_hier, 3 - SC_TDE_ALPHA),
-            SC_TDE_FACC, SC_TDE_MSTAR, SC_MTDE_TBIN_MYR);
+            SC_TDE_FACC, SC_TDE_MSTAR, SC_MTDE_TBIN_MYR, 1. / SC_TDE_FACC);
 }
 
 void

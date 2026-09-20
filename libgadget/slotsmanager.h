@@ -102,7 +102,8 @@ struct bh_particle_data {
     /* StarClusterEnhancedTDE4Merger: burst of tidal disruptions around the lighter BH of every BH-BH
      * merger (Mockler et al. 2023).  Properties of the remnant BH, not of its cluster: they are set
      * at the merger, not reset when the cluster is dissolved or ejected, and a swallowed BH's
-     * unfinished burst is handed to its remnant. */
+     * unfinished burst is handed to its remnant.  (The cluster side of the bursts, the stars they
+     * take out of the remnant's cluster, is SC_MlossTDEMerger below.) */
     MyFloat MdotTDEMerger;   /*!< BH mass growth rate from the merger bursts at the last active step, code mass per
                               internal time unit like Mdot; added to Mass on top of the Eddington-limited gas
                               accretion and never capped by it.  Recomputed every active step (not read back). */
@@ -111,12 +112,13 @@ struct bh_particle_data {
                               MergerTDETimeLeftMyr.  Read back on a restart so an open burst continues. */
     MyFloat MergerTDETimeLeftMyr; /*!< Time (Myr) left of the burst window; every merger resets it to
                               SC_MTDE_TBIN_MYR (10 Myr) for the whole reservoir.  0 when nothing is pending. */
-    /* Per-channel record of the star cluster's mass and size evolution.  All five are properties
+    /* Per-channel record of the star cluster's mass and size evolution.  All six are properties
      * of the cluster: they start at 0 when the cluster is attached at seeding, follow the kept
      * (heaviest) cluster at a BH merger, and are reset to 0 with the rest of the cluster state
      * when the cluster is dissolved or ejected (the BH detail record keeps the history).
      * While the BH carries a cluster,
-     *   StarClusterMass + SC_MlossStellar + SC_MlossRelax + SC_MlossTDE = the cluster's birth mass,
+     *   StarClusterMass + SC_MlossStellar + SC_MlossRelax + SC_MlossTDE + SC_MlossTDEMerger
+     *                                                           = the cluster's birth mass,
      *   ln(SC_Reff / SC_initReff) = SC_dlnReffStellar + SC_dlnReffRelax
      * (to round-off; after a restart from a snapshot without these blocks they count from the
      * restart on).  Code mass units, like StarClusterMass. */
@@ -127,6 +129,10 @@ struct bh_particle_data {
                               escapers plus their share of the mass already returned by stellar evolution. */
     MyFloat SC_MlossTDE;      /*!< Cumulative cluster mass lost to tidal disruptions (StarClusterTDEtoBH): the whole
                               star per event, so 1/f_acc = 2x the mass the BH gained through MdotTDE. */
+    MyFloat SC_MlossTDEMerger; /*!< Cumulative cluster mass lost to the merger bursts (StarClusterEnhancedTDE4Merger):
+                              the stars of every burst leave the cluster the remnant BH carries while the burst
+                              drains, whole, so 1/f_acc = 2x the mass the BH gained through MdotTDEMerger while it
+                              carried this cluster. */
     MyFloat SC_dlnReffStellar; /*!< Cumulative ln(R_eff) change from the stellar-evolution term of
                               StarClusterSizeEvolution (adiabatic expansion, sum of ln(m_old/m_new)); 0 without it. */
     MyFloat SC_dlnReffRelax;  /*!< Cumulative ln(R_eff) change from the GB08 two-body-relaxation term of
