@@ -1364,8 +1364,14 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
              * StarClusterMass and SC_Reff as evolved by the stellar-evolution, relaxation and
              * TDE channels (SC_Reff falls back to the initial radius, or to the
              * StarClusterReffRelation median, when it is not set yet after a restart from an
-             * older snapshot).  rh = (4/3) R_eff (projected -> 3D half-mass radius),
-             * v_esc = 33.4 * sqrt(M_sc / 1e5 Msun) * (rh / pc)^(-0.5)  [km/s].
+             * older snapshot).  The cluster is taken to be the Bahcall & Wolf (1976) cusp of
+             * Williams et al. (2026), rho ~ r^(-7/4) out to the cluster radius r_max: its
+             * central potential is Phi(0) = -5 G M_sc / r_max, and the projected half-mass
+             * radius of that profile is R_eff = 0.41756 r_max, so the central escape velocity
+             * (the BH's own potential does not bind it) is
+             * v_esc^2 = 10 G M_sc / r_max = 4.1756 G M_sc / R_eff,
+             * i.e. v_esc = 42.4 km/s (M_sc / 1e5 Msun)^(1/2) (R_eff / pc)^(-1/2).
+             * (A Plummer sphere of the same M_sc and R_eff gives 1.95 G M_sc / R_eff, 28.9 km/s.)
              * Code masses are 1e10 Msun/h, hence the HubbleParam in the conversion. */
             double M_sc_solar = BHP(n).StarClusterMass * BH_GET_PRIV(tw)->units.UnitMass_in_g
                               / (SOLAR_MASS * BH_GET_PRIV(tw)->CP->HubbleParam);
@@ -1374,8 +1380,10 @@ blackhole_feedback_postprocess(int n, TreeWalk * tw)
                 Reff = BHP(n).SC_initReff;
             if(Reff <= 0)
                 Reff = starcluster_median_reff_pc(BHP(n).StarClusterMass);
-            double rh = (4.0 / 3.0) * Reff;
-            double v_esc = 33.4 * sqrt(M_sc_solar / 1.0e5) * pow(rh, -0.5);
+            /* v_esc^2 = 4.1756 G M_sc / R_eff, evaluated in cgs and converted to km/s */
+            const double cusp_vesc2_coef = 4.1756;
+            double v_esc = sqrt(cusp_vesc2_coef * GRAVITY * M_sc_solar * SOLAR_MASS
+                                / (Reff * 1.0e-3 * CM_PER_KPC)) / 1.0e5;
 
             if(v_kick_kms > v_esc) {
                 message(0, "BH %ld: GW kick %.1f km/s exceeds v_esc %.1f km/s "

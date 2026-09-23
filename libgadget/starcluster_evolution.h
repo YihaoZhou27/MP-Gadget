@@ -26,14 +26,18 @@ void starcluster_stellar_evolution(const ActiveParticles * act, Cosmology * CP, 
  * (BlackholeTidalField=1).  Clusters below 100 Msun are dissolved; the stripped mass leaves
  * StarClusterMass (and P.Mass when StarClusterBHDyn=1) and StarClusterTotalMassReturned is
  * rescaled with it.  size_evolution (mode 2 only): SC_Reff follows Guerra et al. 2026 eq. 22.
+ * heating (SCRelaxCompactHeating, mode 2 only): the rate is multiplied by a (m/m_i)^-2/3 for
+ * the heating by retained compact remnants (Guerra et al. 2026 eq. 13), m/m_i the fraction
+ * of the cluster's stars not yet lost dynamically, from StarClusterTotalMassReturned and the
+ * SC_Mloss records; the size term keeps the unboosted xi.
  * A BH with no tidal field yet (all eigenvalues zero, e.g. a new seed before its first PM
  * step under hierarchical gravity) is not relaxed: its time accumulates in SC_RlxPendingMyr
  * and is relaxed with its first field. */
-void starcluster_relaxation(const ActiveParticles * act, const Cosmology * CP, const double atime, const int mode, const int size_evolution, const struct UnitSystem units);
+void starcluster_relaxation(const ActiveParticles * act, const Cosmology * CP, const double atime, const int mode, const int size_evolution, const int heating, const struct UnitSystem units);
 
-/* Start-up description of the active relaxation model and of the tidal-field cadence
- * (hierarchical = SplitGravityTimestepsOn). */
-void starcluster_relaxation_message(const int mode, const int hierarchical);
+/* Start-up description of the active relaxation model, of the tidal-field cadence
+ * (hierarchical = SplitGravityTimestepsOn) and of the compact-object heating. */
+void starcluster_relaxation_message(const int mode, const int hierarchical, const int heating);
 
 /* Start-up description of the active size-evolution terms (StarClusterSizeEvolution). */
 void starcluster_size_evolution_message(const int size_stellar, const int size_relaxation);
@@ -84,16 +88,22 @@ double sc_tde_rate_per_myr(double mbh_msun, double msc_msun, double reff_pc);
 double sc_size_factor_rlx(double m_old, double m_new, double xi);
 
 /* GB08 mass (returned) and, with size_evolution, R_eff (*reff_out) after dt_myr, sub-cycled so
- * no sub-step removes more than 0.2% of the mass; what starcluster_relaxation applies per step. */
-double sc_relax_gb08_step(double m_msun, double reff_pc, double T_myr2, double dt_myr, int size_evolution, double * reff_out);
+ * no sub-step removes more than 0.2% of the mass; what starcluster_relaxation applies per step.
+ * mi_msun > 0 switches the compact-object heating boost on (m_i of Guerra et al. 2026 eq. 13,
+ * held over the interval); <= 0 leaves it off.  *boost_max (may be NULL) receives the largest
+ * boost applied in any sub-step (1 with heating off, 0 if no sub-step ran). */
+double sc_relax_gb08_step(double m_msun, double reff_pc, double T_myr2, double dt_myr, int size_evolution, double mi_msun, double * reff_out, double * boost_max);
 
 /* The single-cluster relaxation laws, exposed for testing.  Masses in Msun, radii in pc,
  * times in Myr, T the E-MOSAICS tidal strength max(lambda)+Omega^2 (physical).
  * Each returns the cluster mass after dt_myr (0 once fully disrupted). */
 double sc_relax_mass_emosaics(double m_msun, double T_gyr2, double dt_myr);
-double sc_relax_mass_gb08(double m_msun, double rh_pc, double T_myr2, double dt_myr);
+double sc_relax_mass_gb08(double m_msun, double rh_pc, double T_myr2, double dt_myr, double mi_msun);
 /* GB08 ingredients: half-mass relaxation time (Myr) and escape fraction per t_rh. */
 double sc_relax_trh_myr(double m_msun, double rh_pc);
 double sc_relax_xi(double m_msun, double rh_pc, double T_myr2);
+/* Compact-object heating boost of the GB08 rate, a (m/m_i)^-2/3 with a = 1.5 and m/m_i capped
+ * at 1 (Guerra et al. 2026 eq. 13); 1 when mi_msun <= 0 (heating off). */
+double sc_relax_heating_boost(double m_msun, double mi_msun);
 
 #endif

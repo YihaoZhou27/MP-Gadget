@@ -153,7 +153,10 @@ starcluster_stellar_evolution(const ActiveParticles * act, Cosmology * CP, const
 #define SC_RLX_EMOS_TSUN    7.01e2      /* Gyr^-2 */
 /* Mode 2, GB08: Gieles & Baumgardt (2008) / Alexander & Gieles (2012) as adopted in
  * EMP-Pathfinder (Reina-Campos et al. 2022, eqs. 53-56). */
-#define SC_RLX_MSTAR        0.42        /* Msun: mean stellar mass of a Chabrier IMF over 0.08-120 Msun */
+#define SC_RLX_MSTAR        0.62        /* Msun: mean stellar mass, the AuriGLOBES value (Guerra et al. 2026, Chabrier IMF
+                                         * over 0.1-100 Msun); our own metal_return Chabrier IMF gives 0.61 over 0.08-120.
+                                         * Until 2026-09-22 this was 0.42, the value EMP-Pathfinder adopts
+                                         * (Reina-Campos et al. 2022, eq. 54). */
 #define SC_RLX_LNL_GAMMA    0.11        /* Coulomb logarithm ln(gamma N) of equal-mass clusters */
 #define SC_RLX_XI0          0.0142      /* escapers per t_rh in isolation */
 #define SC_RLX_ZETA         0.1         /* relaxation-driven energy change per t_rh */
@@ -168,6 +171,12 @@ starcluster_stellar_evolution(const ActiveParticles * act, Cosmology * CP, const
  * number of sub-steps (0.2% per sub-step reaches 100 Msun from 1e8 in ~7000). */
 #define SC_RLX_SUBLOSS      0.002
 #define SC_RLX_MAXSUB       20000
+/* Compact-object heating (SCRelaxCompactHeating), Guerra et al. (2026) eq. 13 after Gieles &
+ * Gnedin (2023): the GB08 rate is multiplied by a (m/m_i)^-2/3, m_i the cluster's birth mass
+ * less its stellar-evolution loss, i.e. m/m_i the fraction of its stars not yet lost
+ * dynamically.  The retained remnants heat the cluster more the more stars have escaped. */
+#define SC_RLX_HEAT_A       1.5         /* boosting parameter a */
+#define SC_RLX_HEAT_EXP     (-2. / 3.)  /* exponent of m/m_i */
 
 /* Newton's constant in pc^3 Msun^-1 Myr^-2 */
 static double
@@ -220,40 +229,63 @@ sc_relax_xi(double m_msun, double rh_pc, double T_myr2)
 }
 
 double
-sc_relax_mass_gb08(double m_msun, double rh_pc, double T_myr2, double dt_myr)
+sc_relax_heating_boost(double m_msun, double mi_msun)
+{
+    /* a (m/m_i)^-2/3 of eq. 13; 1 without heating (mi_msun <= 0).  m/m_i is capped at 1: a
+     * cluster that has lost nothing dynamically is boosted by a alone, and after a restart from
+     * a snapshot without the SC_Mloss records the birth mass, hence m_i, is underestimated. */
+    if(mi_msun <= 0 || m_msun <= 0)
+        return 1;
+    const double ratio = m_msun < mi_msun ? m_msun / mi_msun : 1;
+    return SC_RLX_HEAT_A * pow(ratio, SC_RLX_HEAT_EXP);
+}
+
+double
+sc_relax_mass_gb08(double m_msun, double rh_pc, double T_myr2, double dt_myr, double mi_msun)
 {
     if(m_msun <= 0 || dt_myr <= 0)
         return m_msun;
     const double trh = sc_relax_trh_myr(m_msun, rh_pc);
     if(trh <= 0)
         return 0;
-    const double xi = sc_relax_xi(m_msun, rh_pc, T_myr2);
+    /* xi of eq. 55, times the compact-object boost when heating is on (mi_msun > 0) */
+    const double xi = sc_relax_xi(m_msun, rh_pc, T_myr2) * sc_relax_heating_boost(m_msun, mi_msun);
     /* Eq. 53, dm/dt = -xi m / t_rh.  At fixed r_h, m^1/2 / t_rh depends on m only through
      * ln(gamma N), so d(m^1/2)/dt = -(xi/2) m^1/2 / t_rh is nearly constant: integrate
-     * m^1/2 linearly over the step, which also reaches zero cleanly. */
+     * m^1/2 linearly over the step, which also reaches zero cleanly.  (The boost changes by
+     * 2/3 of the mass fraction lost, which the sub-cycling of sc_relax_gb08_step keeps small.) */
     const double s = sqrt(m_msun) * (1 - 0.5 * xi * dt_myr / trh);
     return s > 0 ? s * s : 0;
 }
 
 double
-sc_relax_gb08_step(double m_msun, double reff_pc, double T_myr2, double dt_myr, int size_evolution, double * reff_out)
+sc_relax_gb08_step(double m_msun, double reff_pc, double T_myr2, double dt_myr, int size_evolution, double mi_msun, double * reff_out, double * boost_max)
 {
     /* GB08 relaxation (and, with size_evolution, its size change) over dt, sub-cycled so that no
      * sub-step removes more than SC_RLX_SUBLOSS of the mass.  The m^1/2 update of
-     * sc_relax_mass_gb08 holds xi and ln(gamma N) fixed, and the expansion has to feed back on
-     * t_rh within the interval.  An ordinary BH step needs a single sub-step; a deferred interval
-     * (up to a PM step, see starcluster_relaxation) can span many t_rh of a compact cluster.
-     * Stops once the cluster is below SC_RLX_MDISSOLVE (the caller dissolves it). */
-    double m = m_msun, reff = reff_pc, left = dt_myr;
+     * sc_relax_mass_gb08 holds xi, ln(gamma N) and the compact-object boost fixed, and the
+     * expansion has to feed back on t_rh within the interval.  An ordinary BH step needs a single
+     * sub-step; a deferred interval (up to a PM step, see starcluster_relaxation) can span many
+     * t_rh of a compact cluster.  Stops once the cluster is below SC_RLX_MDISSOLVE (the caller
+     * dissolves it).  mi_msun > 0 switches the heating boost on; it is held over the interval
+     * (stellar evolution, which sets it, acts between the relaxation steps).  boost_max (may be
+     * NULL) receives the largest boost applied in any sub-step: the boost grows as m falls, so
+     * over a long interval this exceeds the value at the start. */
+    double m = m_msun, reff = reff_pc, left = dt_myr, bmax = 0;
     int nsub = 0;
     while(left > 0 && m >= SC_RLX_MDISSOLVE) {
         const double rh = 4. / 3. * reff;
         const double trh = sc_relax_trh_myr(m, rh);
         const double xi = sc_relax_xi(m, rh, T_myr2);
+        const double boost = sc_relax_heating_boost(m, mi_msun);
+        if(boost > bmax)
+            bmax = boost;
+        const double xi_eff = xi * boost;
         double h = left;
-        if(trh > 0 && xi > 0 && ++nsub < SC_RLX_MAXSUB)
-            h = fmin(left, SC_RLX_SUBLOSS * trh / xi);
-        const double mn = sc_relax_mass_gb08(m, rh, T_myr2, h);
+        if(trh > 0 && xi_eff > 0 && ++nsub < SC_RLX_MAXSUB)
+            h = fmin(left, SC_RLX_SUBLOSS * trh / xi_eff);
+        const double mn = sc_relax_mass_gb08(m, rh, T_myr2, h, mi_msun);
+        /* the size term keeps the unboosted xi of eq. 55 (eq. 22 as printed) */
         if(size_evolution)
             reff *= sc_size_factor_rlx(m, mn, xi);
         m = mn;
@@ -261,6 +293,8 @@ sc_relax_gb08_step(double m_msun, double reff_pc, double T_myr2, double dt_myr, 
     }
     if(reff_out)
         *reff_out = reff;
+    if(boost_max)
+        *boost_max = bmax;
     return m;
 }
 
@@ -303,7 +337,7 @@ sc_dissolve(int place)
 }
 
 void
-starcluster_relaxation(const ActiveParticles * act, const Cosmology * CP, const double atime, const int mode, const int size_evolution, const struct UnitSystem units)
+starcluster_relaxation(const ActiveParticles * act, const Cosmology * CP, const double atime, const int mode, const int size_evolution, const int heating, const struct UnitSystem units)
 {
     /* Do nothing if no BHs yet */
     int64_t totbh;
@@ -321,9 +355,9 @@ starcluster_relaxation(const ActiveParticles * act, const Cosmology * CP, const 
     const int bhdyn = get_starcluster_bhdyn_on();
 
     int64_t nevolved = 0, ndissolved = 0, ndeferred = 0;
-    double mlost = 0;
+    double mlost = 0, maxboost = 0;
     int i;
-    #pragma omp parallel for reduction(+: nevolved, ndissolved, ndeferred, mlost)
+    #pragma omp parallel for reduction(+: nevolved, ndissolved, ndeferred, mlost) reduction(max: maxboost)
     for(i = 0; i < act->NumActiveParticle; i++)
     {
         const int p = act->ActiveParticle ? act->ActiveParticle[i] : i;
@@ -360,10 +394,26 @@ starcluster_relaxation(const ActiveParticles * act, const Cosmology * CP, const 
         if(mode == 1)
             m_new = sc_relax_mass_emosaics(m_old, T_gyr2, dt_myr);     /* exact at fixed T */
         else {
+            /* SCRelaxCompactHeating: m_i of eq. 13 is the birth mass (StarClusterMass plus the
+             * four SC_Mloss records) less its stellar-evolution loss, so m/m_i = (StarClusterMass
+             * + StarClusterTotalMassReturned) / birth mass, the fraction of the cluster's stars
+             * not yet lost to relaxation or tidal disruptions (both rescale
+             * StarClusterTotalMassReturned with the mass).  mi_msun = 0 leaves the boost off. */
+            double mi_msun = 0;
+            if(heating) {
+                const double mbirth = BHP(p).StarClusterMass + BHP(p).SC_MlossStellar + BHP(p).SC_MlossRelax
+                                    + BHP(p).SC_MlossTDE + BHP(p).SC_MlossTDEMerger;
+                const double mbound = BHP(p).StarClusterMass + BHP(p).StarClusterTotalMassReturned;
+                mi_msun = mbound > 0 ? m_old * mbirth / mbound : m_old;
+            }
             /* r_h = (4/3) R_eff of the cluster's current radius (its initial one unless
-             * StarClusterSizeEvolution=1), sub-cycled with its size change */
+             * StarClusterSizeEvolution=1), sub-cycled with its size change; the largest boost
+             * applied over the sub-steps feeds the log line */
+            double boost = 0;
             reff_old = sc_reff_now(p);
-            m_new = sc_relax_gb08_step(m_old, reff_old, T_gyr2 * 1e-6, dt_myr, size_evolution, &reff_new);
+            m_new = sc_relax_gb08_step(m_old, reff_old, T_gyr2 * 1e-6, dt_myr, size_evolution, mi_msun, &reff_new, heating ? &boost : NULL);
+            if(boost > maxboost)
+                maxboost = boost;
         }
         nevolved++;
         if(m_new < SC_RLX_MDISSOLVE) {
@@ -392,21 +442,28 @@ starcluster_relaxation(const ActiveParticles * act, const Cosmology * CP, const 
     }
 
     int64_t counts[3] = {nevolved, ndissolved, ndeferred}, totcounts[3];
-    double totmlost;
+    double totmlost, totmaxboost;
     MPI_Reduce(counts, totcounts, 3, MPI_INT64, MPI_SUM, 0, MPI_COMM_WORLD);
     MPI_Reduce(&mlost, &totmlost, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&maxboost, &totmaxboost, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     /* The reduced totals exist on rank 0 only: evaluate them there only. */
     int ThisTask;
     MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
-    if(ThisTask == 0 && (totcounts[0] > 0 || totcounts[2] > 0))
-        message(0, "SC relaxation: %ld clusters evolved, %ld dissolved, %ld deferred (no tidal field yet), %g Msun stripped.\n",
-                (long) totcounts[0], (long) totcounts[1], (long) totcounts[2], totmlost);
+    if(ThisTask == 0 && (totcounts[0] > 0 || totcounts[2] > 0)) {
+        if(heating)
+            message(0, "SC relaxation: %ld clusters evolved, %ld dissolved, %ld deferred (no tidal field yet), %g Msun stripped; "
+                       "largest compact-object boost applied %g.\n",
+                    (long) totcounts[0], (long) totcounts[1], (long) totcounts[2], totmlost, totmaxboost);
+        else
+            message(0, "SC relaxation: %ld clusters evolved, %ld dissolved, %ld deferred (no tidal field yet), %g Msun stripped.\n",
+                    (long) totcounts[0], (long) totcounts[1], (long) totcounts[2], totmlost);
+    }
 
     walltime_measure("/BH/SCRelax");
 }
 
 void
-starcluster_relaxation_message(const int mode, const int hierarchical)
+starcluster_relaxation_message(const int mode, const int hierarchical, const int heating)
 {
     const char * cadence = hierarchical
         ? "held from the last PM step (SplitGravityTimestepsOn=1; a new seed defers its relaxation to its first field, at the next PM step)"
@@ -425,6 +482,12 @@ starcluster_relaxation_message(const int mode, const int hierarchical)
                    "clusters below %g Msun are dissolved.\n",
                 SC_RLX_MSTAR, SC_RLX_LNL_GAMMA, SC_RLX_XI0, SC_RLX_ZETA, SC_RLX_RHRT1, SC_RLX_PZ,
                 SC_RLX_N1, SC_RLX_PX, cadence, SC_RLX_MDISSOLVE);
+    if(mode == 2 && heating)
+        message(0, "SCRelaxCompactHeating=1: the GB08 rate is multiplied by a (m/m_i)^(%g), a = %g, for the heating by the "
+                   "compact remnants the clusters retain (Guerra et al. 2026 eq. 13; Gieles & Gnedin 2023); m_i is the "
+                   "cluster's birth mass less its stellar-evolution loss, so m/m_i = (StarClusterMass + StarClusterTotalMassReturned) / "
+                   "(StarClusterMass + the four SC_Mloss records), capped at 1. The size term of StarClusterSizeEvolution keeps "
+                   "the unboosted xi.\n", SC_RLX_HEAT_EXP, SC_RLX_HEAT_A);
 }
 
 /* ==================================================================================

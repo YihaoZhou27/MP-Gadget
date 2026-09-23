@@ -76,6 +76,7 @@ static struct run_params
     int StarClusterOn; /* if star cluster bh seeding formation is enabled */
     int SCEvolutionStellar; /* if the stellar-evolution mass loss of the star clusters on BHs is enabled */
     int SCEvolutionRelaxation; /* two-body relaxation mass loss of the star clusters on BHs: 0 off, 1 E-MOSAICS, 2 GB08 */
+    int SCRelaxCompactHeating; /* GB08 rate boosted by a (m/m_i)^-2/3 for the heating by retained compact remnants (Guerra et al. 2026 eq. 13) */
     int StarClusterSizeEvolution; /* StarClusterSizeEvolution parameter: evolve the effective radius of the star clusters on BHs */
     int SCSizeEvolStellar; /* effective: size evolution from the stellar-evolution mass loss is applied */
     int SCSizeEvolRelax; /* effective: size evolution from the GB08 relaxation mass loss is applied */
@@ -181,6 +182,7 @@ set_all_global_params(ParameterSet * ps)
         All.StarClusterOn = param_get_int(ps, "StarClusterOn");
         All.SCEvolutionStellar = param_get_int(ps, "SCEvolutionStellar");
         All.SCEvolutionRelaxation = param_get_int(ps, "SCEvolutionRelaxation");
+        All.SCRelaxCompactHeating = param_get_int(ps, "SCRelaxCompactHeating");
         All.StarClusterSizeEvolution = param_get_int(ps, "StarClusterSizeEvolution");
         All.StarClusterTDEtoBH = param_get_int(ps, "StarClusterTDEtoBH");
         All.StarClusterEnhancedTDE4Merger = param_get_int(ps, "StarClusterEnhancedTDE4Merger");
@@ -263,6 +265,11 @@ set_all_global_params(ParameterSet * ps)
             endrun(1, "SCEvolutionRelaxation=%d requires StarClusterOn=1.\n", All.SCEvolutionRelaxation);
         if(All.SCEvolutionRelaxation && !param_get_int(ps, "BlackholeTidalField"))
             endrun(1, "SCEvolutionRelaxation=%d requires BlackholeTidalField=1: the relaxation rate is set by the BH tidal field.\n", All.SCEvolutionRelaxation);
+        /* Compact-object heating boosts the GB08 rate, so it needs that law. */
+        if(All.SCRelaxCompactHeating < 0 || All.SCRelaxCompactHeating > 1)
+            endrun(1, "SCRelaxCompactHeating must be 0 or 1, got %d.\n", All.SCRelaxCompactHeating);
+        if(All.SCRelaxCompactHeating && All.SCEvolutionRelaxation != 2)
+            endrun(1, "SCRelaxCompactHeating=1 boosts the GB08 relaxation rate and requires SCEvolutionRelaxation=2, got %d.\n", All.SCEvolutionRelaxation);
         /* Growth of the BHs by tidal disruption of their clusters' stars. */
         if(All.StarClusterTDEtoBH < 0 || All.StarClusterTDEtoBH > 1)
             endrun(1, "StarClusterTDEtoBH must be 0 or 1, got %d.\n", All.StarClusterTDEtoBH);
@@ -282,7 +289,7 @@ set_all_global_params(ParameterSet * ps)
         if(All.StarClusterEnhancedTDE4Merger)
             starcluster_merger_tde_message();
         if(All.SCEvolutionRelaxation)
-            starcluster_relaxation_message(All.SCEvolutionRelaxation, All.HierarchicalGravity);
+            starcluster_relaxation_message(All.SCEvolutionRelaxation, All.HierarchicalGravity, All.SCRelaxCompactHeating);
         /* Size evolution of the star clusters on BHs: each term follows a mass-evolution model
          * that is actually running -- the stellar-evolution mass loss and the GB08 relaxation,
          * whose xi and zeta the size equation needs. */
@@ -732,7 +739,7 @@ run(const int RestartSnapNum, const inttime_t ti_init, const struct header_data 
             /* Two-body relaxation of the star clusters attached to BH particles. Done before
              * their stellar evolution, which then acts on the clusters' surviving stars. */
             if(All.StarClusterOn && All.SCEvolutionRelaxation)
-                starcluster_relaxation(&Act, &All.CP, atime, All.SCEvolutionRelaxation, All.SCSizeEvolRelax, units);
+                starcluster_relaxation(&Act, &All.CP, atime, All.SCEvolutionRelaxation, All.SCSizeEvolRelax, All.SCRelaxCompactHeating, units);
             /* Stellar-evolution mass loss of the star clusters on BH particles: a mass update
              * only, as their ejecta are already returned by the star particles (metal_return). */
             if(All.StarClusterOn && All.SCEvolutionStellar)
