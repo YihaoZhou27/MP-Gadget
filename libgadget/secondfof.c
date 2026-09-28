@@ -10,6 +10,7 @@
 #include "utils/mymalloc.h"
 #include "utils/mpsort.h"
 #include "utils/string.h"
+#include "utils/system.h"
 
 #include "partmanager.h"
 #include "slotsmanager.h"
@@ -284,11 +285,8 @@ secondfof_compute_sizes(FOFGroups * fof, struct SecondGroupExtra * extra, MPI_Co
     MPI_Allgather(&local_ngroups, 1, MPI_INT, grp_counts, 1, MPI_INT, Comm);
 
     int64_t total_groups = 0;
-    int * grp_displs = (int *) mymalloc2("SecFOF_gd", sizeof(int) * NTask);
-    for(i = 0; i < NTask; i++) {
-        grp_displs[i] = total_groups;
+    for(i = 0; i < NTask; i++)
         total_groups += grp_counts[i];
-    }
 
     struct grp_center * all_centers = (struct grp_center *)
         mymalloc2("SecFOF_ac", sizeof(struct grp_center) * (total_groups > 0 ? total_groups : 1));
@@ -301,16 +299,7 @@ secondfof_compute_sizes(FOFGroups * fof, struct SecondGroupExtra * extra, MPI_Co
             local_centers[g].PotMinPos[d] = fof->Group[g].PotMinPos[d];
     }
 
-    int * gc_bytes = (int *) mymalloc2("SecFOF_gcb", sizeof(int) * NTask);
-    int * gd_bytes = (int *) mymalloc2("SecFOF_gdb", sizeof(int) * NTask);
-    for(i = 0; i < NTask; i++) {
-        gc_bytes[i] = grp_counts[i] * sizeof(struct grp_center);
-        gd_bytes[i] = grp_displs[i] * sizeof(struct grp_center);
-    }
-    MPI_Allgatherv(local_centers, local_ngroups * sizeof(struct grp_center), MPI_BYTE,
-                   all_centers, gc_bytes, gd_bytes, MPI_BYTE, Comm);
-    myfree(gd_bytes);
-    myfree(gc_bytes);
+    MPIU_Allgatherv_records(local_centers, all_centers, grp_counts, sizeof(struct grp_center), Comm);
     myfree(local_centers);
 
     /* Sort centers by GrNr for binary search during per-particle distance computation */
@@ -369,35 +358,22 @@ secondfof_compute_sizes(FOFGroups * fof, struct SecondGroupExtra * extra, MPI_Co
 
     /* Step 3: Allgatherv all (dist, mass, GrNr) data to every rank.
      * The total number of particles in second FOF groups is small,
-     * so this is safe memory-wise. */
+     * so this is safe memory-wise; the gather is chunked, so its size
+     * is not capped by the int byte counts of MPI_Allgatherv. */
     int nlocal_int = (int) n;
     int * part_counts = (int *) mymalloc2("SecFOF_pc", sizeof(int) * NTask);
     MPI_Allgather(&nlocal_int, 1, MPI_INT, part_counts, 1, MPI_INT, Comm);
 
     int64_t total_parts = 0;
-    int * part_displs = (int *) mymalloc2("SecFOF_pd", sizeof(int) * NTask);
-    for(i = 0; i < NTask; i++) {
-        part_displs[i] = total_parts;
+    for(i = 0; i < NTask; i++)
         total_parts += part_counts[i];
-    }
 
     struct dist_mass_grp * dm_global = (struct dist_mass_grp *)
         mymalloc2("SecFOF_dmg", sizeof(struct dist_mass_grp) * (total_parts > 0 ? total_parts : 1));
 
-    int * pc_bytes = (int *) mymalloc2("SecFOF_pcb", sizeof(int) * NTask);
-    int * pd_bytes = (int *) mymalloc2("SecFOF_pdb", sizeof(int) * NTask);
-    for(i = 0; i < NTask; i++) {
-        pc_bytes[i] = part_counts[i] * sizeof(struct dist_mass_grp);
-        pd_bytes[i] = part_displs[i] * sizeof(struct dist_mass_grp);
-    }
-    MPI_Allgatherv(dm_local, nlocal_int * sizeof(struct dist_mass_grp), MPI_BYTE,
-                   dm_global, pc_bytes, pd_bytes, MPI_BYTE, Comm);
-    /* Only free pd_bytes and pc_bytes now (topmost on stack).
-     * Everything below dm_global (part_displs, part_counts, dm_local,
-     * all_centers, grp_displs, grp_counts) must wait until dm_global
-     * is freed after step 4 — LIFO order. */
-    myfree(pd_bytes);
-    myfree(pc_bytes);
+    MPIU_Allgatherv_records(dm_local, dm_global, part_counts, sizeof(struct dist_mass_grp), Comm);
+    /* Everything below dm_global (part_counts, dm_local, all_centers,
+     * grp_counts) must wait until dm_global is freed after step 4 — LIFO order. */
 
     /* Step 4: Sort dm_global by (GrNr, dist) so each group's particles
      * form a contiguous, distance-sorted block. Then binary search per group. */
@@ -481,14 +457,12 @@ secondfof_compute_sizes(FOFGroups * fof, struct SecondGroupExtra * extra, MPI_Co
     }
 
     /* Free everything in strict LIFO order (reverse allocation order):
-     * Stack (top→bottom): dm_global, part_displs, part_counts,
-     * dm_local, all_centers, grp_displs, grp_counts */
+     * Stack (top→bottom): dm_global, part_counts,
+     * dm_local, all_centers, grp_counts */
     myfree(dm_global);
-    myfree(part_displs);
     myfree(part_counts);
     myfree(dm_local);
     myfree(all_centers);
-    myfree(grp_displs);
     myfree(grp_counts);
 }
 
@@ -550,25 +524,13 @@ secondfof_compute_primary_fof_info(FOFGroups * fof, struct SecondGroupExtra * ex
     MPI_Allgather(&nlocal_int, 1, MPI_INT, pair_counts, 1, MPI_INT, Comm);
 
     int64_t total_pairs = 0;
-    int * pair_displs = (int *) mymalloc2("SecFOF_prd", sizeof(int) * NTask);
-    for(i = 0; i < NTask; i++) {
-        pair_displs[i] = total_pairs;
+    for(i = 0; i < NTask; i++)
         total_pairs += pair_counts[i];
-    }
 
     struct sec_prim_pair * all_pairs = (struct sec_prim_pair *)
         mymalloc2("SecFOF_ap", sizeof(struct sec_prim_pair) * (total_pairs > 0 ? total_pairs : 1));
 
-    int * pc_bytes = (int *) mymalloc2("SecFOF_pcb2", sizeof(int) * NTask);
-    int * pd_bytes = (int *) mymalloc2("SecFOF_pdb2", sizeof(int) * NTask);
-    for(i = 0; i < NTask; i++) {
-        pc_bytes[i] = pair_counts[i] * sizeof(struct sec_prim_pair);
-        pd_bytes[i] = pair_displs[i] * sizeof(struct sec_prim_pair);
-    }
-    MPI_Allgatherv(local_pairs, nlocal_int * sizeof(struct sec_prim_pair), MPI_BYTE,
-                   all_pairs, pc_bytes, pd_bytes, MPI_BYTE, Comm);
-    myfree(pd_bytes);
-    myfree(pc_bytes);
+    MPIU_Allgatherv_records(local_pairs, all_pairs, pair_counts, sizeof(struct sec_prim_pair), Comm);
 
     /* Step 3: Sort all_pairs by SecGrNr (primary key) then GrNr (secondary key)
      * so each group's particles form a contiguous, GrNr-sorted block.
@@ -638,9 +600,8 @@ secondfof_compute_primary_fof_info(FOFGroups * fof, struct SecondGroupExtra * ex
         extra[g].PrimaryFOFID = best_id;
     }
 
-    /* Free in LIFO order: all_pairs, pair_displs, pair_counts, local_pairs */
+    /* Free in LIFO order: all_pairs, pair_counts, local_pairs */
     myfree(all_pairs);
-    myfree(pair_displs);
     myfree(pair_counts);
     myfree(local_pairs);
 }
@@ -1018,15 +979,8 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
     MPI_Allgather(&n_local_seeded, 1, MPI_INT, recv_counts, 1, MPI_INT, Comm);
 
     int n_total_seeded = 0;
-    int * byte_counts = (int *) mymalloc2("ByteCounts", NTask * sizeof(int));
-    int * byte_displs = (int *) mymalloc2("ByteDispls", NTask * sizeof(int));
-    int boff = 0;
-    for(i = 0; i < NTask; i++) {
-        byte_counts[i] = recv_counts[i] * (int) sizeof(struct seeded_group);
-        byte_displs[i] = boff;
-        boff += byte_counts[i];
+    for(i = 0; i < NTask; i++)
         n_total_seeded += recv_counts[i];
-    }
 
     if(n_total_seeded > 0) {
         /* Pack local seeded groups, gather, and sort by GrNr for binary search. */
@@ -1039,8 +993,7 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
         }
         struct seeded_group * all_sg = (struct seeded_group *) mymalloc2("AllSeededGroups",
                 n_total_seeded * sizeof(struct seeded_group));
-        MPI_Allgatherv(local_sg, n_local_seeded * (int) sizeof(struct seeded_group), MPI_BYTE,
-                       all_sg, byte_counts, byte_displs, MPI_BYTE, Comm);
+        MPIU_Allgatherv_records(local_sg, all_sg, recv_counts, sizeof(struct seeded_group), Comm);
         qsort(all_sg, n_total_seeded, sizeof(struct seeded_group), cmp_seeded_group);
 
         const int particle_mode = sfof_params.SeedSecFOFcomSampleParticle;
@@ -1098,8 +1051,6 @@ void secondfof_seed(DomainDecomp * ddecomp, ActiveParticles * act, ForceTree * t
         myfree(local_sg);
     }
 
-    myfree(byte_displs);
-    myfree(byte_counts);
     myfree(recv_counts);
     if(local_seeded_mcut)
         myfree(local_seeded_mcut);

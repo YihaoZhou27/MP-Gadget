@@ -42,6 +42,23 @@ int64_t count_sum(int64_t countLocal);
 /* Returns true if condition is true on ANY processor*/
 int MPIU_Any(int condition, MPI_Comm comm);
 
+/* Bytes of the global array moved per MPI_Allgatherv in MPIU_Allgatherv_records.  Half
+ * the int range, so nothing handed to MPI comes near INT_MAX (some MPI builds overflow
+ * internally on a >2 GB collective even when every count fits).  Overridable at build
+ * time, e.g. -DMPIU_GATHER_CHUNK_BYTES=4096 to force many windows when testing. */
+#ifndef MPIU_GATHER_CHUNK_BYTES
+#define MPIU_GATHER_CHUNK_BYTES ((int64_t) 1 << 30)
+#endif
+
+/* Allgatherv of fixed-size records: rank t contributes nrec[t] records of recsize
+ * bytes (sendbuf holds nrec[ThisTask] of them), and recvbuf receives all of them back
+ * to back in rank order -- the layout of a plain MPI_Allgatherv with byte counts, so
+ * the result is identical.  Unlike that call it has no int limit on the TOTAL size:
+ * the gather is split into windows of at most MPIU_GATHER_CHUNK_BYTES of the global
+ * array.  nrec is the MPI_Allgather of the local record counts. */
+void MPIU_Allgatherv_records(const void * sendbuf, void * recvbuf, const int * nrec,
+                             size_t recsize, MPI_Comm comm);
+
 void MPIU_write_pids(char * filename);
 
 typedef struct _gadget_thread_arrays {

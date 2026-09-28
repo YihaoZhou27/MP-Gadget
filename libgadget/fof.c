@@ -28,6 +28,7 @@
 #include "utils/openmpsort.h"
 #include "utils/spinlocks.h"
 #include "utils/string.h"
+#include "utils/system.h"
 #include "physconst.h"
 #include "sfr_eff.h"
 #include "gravity.h"
@@ -3223,11 +3224,6 @@ static int64_t secfof_count_extra_seed_ub(FOFGroups * fof, MPI_Comm Comm)
     for(t = 0; t < NTask; t++) n_tot += rc[t];
     if(n_tot == 0) { myfree(rc); return 0; }
 
-    int * bc = (int *) mymalloc("MSubBC", NTask * sizeof(int));
-    int * bd = (int *) mymalloc("MSubBD", NTask * sizeof(int));
-    int boff = 0;
-    for(t = 0; t < NTask; t++) { bc[t] = rc[t] * (int) sizeof(struct ms_seed_cap); bd[t] = boff; boff += bc[t]; }
-
     struct ms_seed_cap * local_g = (struct ms_seed_cap *) mymalloc("MSubLocal",
             (n_local > 0 ? n_local : 1) * sizeof(struct ms_seed_cap));
     int k = 0;
@@ -3239,8 +3235,7 @@ static int64_t secfof_count_extra_seed_ub(FOFGroups * fof, MPI_Comm Comm)
             k++;
         }
     struct ms_seed_cap * all_g = (struct ms_seed_cap *) mymalloc("MSubAll", n_tot * sizeof(struct ms_seed_cap));
-    MPI_Allgatherv(local_g, n_local * (int) sizeof(struct ms_seed_cap), MPI_BYTE,
-                   all_g, bc, bd, MPI_BYTE, Comm);
+    MPIU_Allgatherv_records(local_g, all_g, rc, sizeof(struct ms_seed_cap), Comm);
     qsort(all_g, n_tot, sizeof(struct ms_seed_cap), cmp_ms_seed_cap_grnr);
 
     int64_t cnt = 0;
@@ -3261,8 +3256,6 @@ static int64_t secfof_count_extra_seed_ub(FOFGroups * fof, MPI_Comm Comm)
     }
     myfree(all_g);
     myfree(local_g);
-    myfree(bd);
-    myfree(bc);
     myfree(rc);
     return cnt;
 }
@@ -3294,11 +3287,6 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
     int n_msg = 0;
     for(t = 0; t < NTask; t++) n_msg += rc[t];
     if(n_msg == 0) { myfree(rc); return; }
-
-    int * bc = (int *) mymalloc("MSbc", NTask * sizeof(int));
-    int * bd = (int *) mymalloc("MSbd", NTask * sizeof(int));
-    int boff = 0;
-    for(t = 0; t < NTask; t++) { bc[t] = rc[t] * (int) sizeof(struct ms_group); bd[t] = boff; boff += bc[t]; }
 
     struct ms_group * local_msg = (struct ms_group *) mymalloc("MSlocal",
             (n_local > 0 ? n_local : 1) * sizeof(struct ms_group));
@@ -3360,8 +3348,7 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
         sc_group_mass(g, &m->gmass);
     }
     struct ms_group * msg = (struct ms_group *) mymalloc("MSG", n_msg * sizeof(struct ms_group));
-    MPI_Allgatherv(local_msg, n_local * (int) sizeof(struct ms_group), MPI_BYTE,
-                   msg, bc, bd, MPI_BYTE, Comm);
+    MPIU_Allgatherv_records(local_msg, msg, rc, sizeof(struct ms_group), Comm);
     qsort(msg, n_msg, sizeof(struct ms_group), cmp_ms_group_grnr);
 
     /* ---- Phase 2: fill seed-1 positions (owner of seed_index_star contributes). ---- */
@@ -3446,14 +3433,9 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
     MPI_Allgather(&n_keep, 1, MPI_INT, crc, 1, MPI_INT, Comm);
     int n_call = 0;
     for(t = 0; t < NTask; t++) n_call += crc[t];
-    int * cbc = (int *) mymalloc("MScbc", NTask * sizeof(int));
-    int * cbd = (int *) mymalloc("MScbd", NTask * sizeof(int));
-    int coff = 0;
-    for(t = 0; t < NTask; t++) { cbc[t] = crc[t] * (int) sizeof(struct ms_cand); cbd[t] = coff; coff += cbc[t]; }
     struct ms_cand * allc = (struct ms_cand *) mymalloc("MSallc",
             (n_call > 0 ? n_call : 1) * sizeof(struct ms_cand));
-    MPI_Allgatherv(elig, n_keep * (int) sizeof(struct ms_cand), MPI_BYTE,
-                   allc, cbc, cbd, MPI_BYTE, Comm);
+    MPIU_Allgatherv_records(elig, allc, crc, sizeof(struct ms_cand), Comm);
     qsort(allc, n_call, sizeof(struct ms_cand), cmp_ms_cand);
 
     /* The selection is identical on every rank (msg and allc are global+sorted), so
@@ -3512,17 +3494,13 @@ static void fof_secfof_extra_seeds(FOFGroups * fof, double atime, const RandTabl
             n_msg, n_placed, n_short);
     (void) n_conv_local;
 
-    /* Free all scratch in reverse allocation order (msg/local_msg/bd/bc/rc are the
+    /* Free all scratch in reverse allocation order (msg/local_msg/rc are the
      * deepest, freed last). */
     myfree(allc);
-    myfree(cbd);
-    myfree(cbc);
     myfree(crc);
     myfree(elig);
     myfree(msg);
     myfree(local_msg);
-    myfree(bd);
-    myfree(bc);
     myfree(rc);
 }
 
@@ -3785,11 +3763,6 @@ static int64_t secfof_count_random_seed_ub(FOFGroups * fof, const RandTable * co
     for(t = 0; t < NTask; t++) n_tot += rc[t];
     if(n_tot == 0) { myfree(rc); return 0; }
 
-    int * bc = (int *) mymalloc("RSubBC", NTask * sizeof(int));
-    int * bd = (int *) mymalloc("RSubBD", NTask * sizeof(int));
-    int boff = 0;
-    for(t = 0; t < NTask; t++) { bc[t] = rc[t] * (int) sizeof(struct ms_seed_cap); bd[t] = boff; boff += bc[t]; }
-
     struct ms_seed_cap * local_g = (struct ms_seed_cap *) mymalloc("RSubLocal",
             (n_local > 0 ? n_local : 1) * sizeof(struct ms_seed_cap));
     /* MinBHSeedInSC also converts stars, so its seeds need slots reserved here too.
@@ -3831,8 +3804,7 @@ static int64_t secfof_count_random_seed_ub(FOFGroups * fof, const RandTable * co
             k++;
         }
     struct ms_seed_cap * all_g = (struct ms_seed_cap *) mymalloc("RSubAll", n_tot * sizeof(struct ms_seed_cap));
-    MPI_Allgatherv(local_g, n_local * (int) sizeof(struct ms_seed_cap), MPI_BYTE,
-                   all_g, bc, bd, MPI_BYTE, Comm);
+    MPIU_Allgatherv_records(local_g, all_g, rc, sizeof(struct ms_seed_cap), Comm);
     qsort(all_g, n_tot, sizeof(struct ms_seed_cap), cmp_ms_seed_cap_grnr);
 
     int64_t cnt = 0;
@@ -3853,8 +3825,6 @@ static int64_t secfof_count_random_seed_ub(FOFGroups * fof, const RandTable * co
     }
     myfree(all_g);
     myfree(local_g);
-    myfree(bd);
-    myfree(bc);
     myfree(rc);
     return cnt;
 }
@@ -4035,11 +4005,6 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
     for(t = 0; t < NTask; t++) n_msg += rc[t];
     if(n_msg == 0) { myfree(rc); return; }
 
-    int * gbc = (int *) mymalloc("RSgbc", NTask * sizeof(int));
-    int * gbd = (int *) mymalloc("RSgbd", NTask * sizeof(int));
-    int boff = 0;
-    for(t = 0; t < NTask; t++) { gbc[t] = rc[t] * (int) sizeof(struct rs_group); gbd[t] = boff; boff += gbc[t]; }
-
     struct rs_group * local_rsg = (struct rs_group *) mymalloc("RSlocal",
             (n_local > 0 ? n_local : 1) * sizeof(struct rs_group));
     double * masses_local = (double *) mymalloc("RSmassloc",
@@ -4106,8 +4071,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
     walltime_measure("/FOF/Seeding/SCdraw");
 
     struct rs_group * all_rsg = (struct rs_group *) mymalloc("RSG", n_msg * sizeof(struct rs_group));
-    MPI_Allgatherv(local_rsg, n_local * (int) sizeof(struct rs_group), MPI_BYTE,
-                   all_rsg, gbc, gbd, MPI_BYTE, Comm);
+    MPIU_Allgatherv_records(local_rsg, all_rsg, rc, sizeof(struct rs_group), Comm);
 
     /* Gather the per-group mass blocks (same rank/group order as all_rsg). */
     int * mrc = (int *) mymalloc("RSmrc", NTask * sizeof(int));
@@ -4115,14 +4079,9 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
     MPI_Allgather(&nmass_local_i, 1, MPI_INT, mrc, 1, MPI_INT, Comm);
     int n_mass_tot = 0;
     for(t = 0; t < NTask; t++) n_mass_tot += mrc[t];
-    int * mbc = (int *) mymalloc("RSmbc", NTask * sizeof(int));
-    int * mbd = (int *) mymalloc("RSmbd", NTask * sizeof(int));
-    int moff = 0;
-    for(t = 0; t < NTask; t++) { mbc[t] = mrc[t] * (int) sizeof(double); mbd[t] = moff; moff += mbc[t]; }
     double * all_masses = (double *) mymalloc("RSmass",
             (n_mass_tot > 0 ? n_mass_tot : 1) * sizeof(double));
-    MPI_Allgatherv(masses_local, nmass_local_i * (int) sizeof(double), MPI_BYTE,
-                   all_masses, mbc, mbd, MPI_BYTE, Comm);
+    MPIU_Allgatherv_records(masses_local, all_masses, mrc, sizeof(double), Comm);
 
     /* Mass offsets: prefix-sum n_request over the gathered (pre-sort) order, which is
      * aligned with all_masses.  The offset then travels with each group through the sort. */
@@ -4218,14 +4177,9 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
     MPI_Allgather(&n_keep, 1, MPI_INT, crc, 1, MPI_INT, Comm);
     int n_call = 0;
     for(t = 0; t < NTask; t++) n_call += crc[t];
-    int * cbc = (int *) mymalloc("RScbc", NTask * sizeof(int));
-    int * cbd = (int *) mymalloc("RScbd", NTask * sizeof(int));
-    int coff = 0;
-    for(t = 0; t < NTask; t++) { cbc[t] = crc[t] * (int) sizeof(struct rs_cand); cbd[t] = coff; coff += cbc[t]; }
     struct rs_cand * allc = (struct rs_cand *) mymalloc("RSallc",
             (n_call > 0 ? n_call : 1) * sizeof(struct rs_cand));
-    MPI_Allgatherv(elig, n_keep * (int) sizeof(struct rs_cand), MPI_BYTE,
-                   allc, cbc, cbd, MPI_BYTE, Comm);
+    MPIU_Allgatherv_records(elig, allc, crc, sizeof(struct rs_cand), Comm);
     qsort(allc, n_call, sizeof(struct rs_cand), cmp_rs_cand);
 
     /* ---- Phase 3: identical selection on every rank; each converts its own stars. ---- */
@@ -4486,7 +4440,7 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
      * compensated: their M_VMS is never evaluated, and a group short of host stars has
      * none to spare for compensating seeds either. */
     struct rs_cand * allc_c = NULL;
-    int * crc_c = NULL, * cbc_c = NULL, * cbd_c = NULL;
+    int * crc_c = NULL;
     struct rs_cand * elig_c = NULL;
     int n_call_c = 0;
     int64_t n_comp_placed = 0;
@@ -4563,14 +4517,9 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         crc_c = (int *) mymalloc("RSCcrc", NTask * sizeof(int));
         MPI_Allgather(&n_keep_c, 1, MPI_INT, crc_c, 1, MPI_INT, Comm);
         for(t = 0; t < NTask; t++) n_call_c += crc_c[t];
-        cbc_c = (int *) mymalloc("RSCcbc", NTask * sizeof(int));
-        cbd_c = (int *) mymalloc("RSCcbd", NTask * sizeof(int));
-        int coff_c = 0;
-        for(t = 0; t < NTask; t++) { cbc_c[t] = crc_c[t] * (int) sizeof(struct rs_cand); cbd_c[t] = coff_c; coff_c += cbc_c[t]; }
         allc_c = (struct rs_cand *) mymalloc("RSCallc",
                 (n_call_c > 0 ? n_call_c : 1) * sizeof(struct rs_cand));
-        MPI_Allgatherv(elig_c, n_keep_c * (int) sizeof(struct rs_cand), MPI_BYTE,
-                       allc_c, cbc_c, cbd_c, MPI_BYTE, Comm);
+        MPIU_Allgatherv_records(elig_c, allc_c, crc_c, sizeof(struct rs_cand), Comm);
         qsort(allc_c, n_call_c, sizeof(struct rs_cand), cmp_rs_cand);
 
         /* Identical selection on every rank; each converts its own stars. */
@@ -4672,8 +4621,6 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
      * miss, which sits on top of the phase-2 ones, so they go first. */
     if(comp_on) {
         myfree(allc_c);
-        myfree(cbd_c);
-        myfree(cbc_c);
         myfree(crc_c);
         myfree(elig_c);
     }
@@ -4681,19 +4628,13 @@ static void fof_secfof_random_seeds(FOFGroups * fof, double atime, const RandTab
         myfree(host_used);
     myfree(miss);
     myfree(allc);
-    myfree(cbd);
-    myfree(cbc);
     myfree(crc);
     myfree(elig);
     myfree(all_masses);
-    myfree(mbd);
-    myfree(mbc);
     myfree(mrc);
     myfree(all_rsg);
     myfree(masses_local);
     myfree(local_rsg);
-    myfree(gbd);
-    myfree(gbc);
     myfree(rc);
     walltime_measure("/FOF/Seeding/SCplace");
 }
@@ -4760,16 +4701,6 @@ static void fof_secfof_particle_sample(FOFGroups * fof, const RandTable * const 
         return;
     }
 
-    /* Byte counts/displacements for the struct Allgatherv. */
-    int * byte_counts = (int *) mymalloc("CandByteCounts", NTask * sizeof(int));
-    int * byte_displs = (int *) mymalloc("CandByteDispls", NTask * sizeof(int));
-    int boff = 0;
-    for(t = 0; t < NTask; t++) {
-        byte_counts[t] = recv_counts[t] * (int) sizeof(struct sc_particle_cand);
-        byte_displs[t] = boff;
-        boff += byte_counts[t];
-    }
-
     /* Pack and gather the candidate list. */
     struct sc_particle_cand * local_cand = (struct sc_particle_cand *)
         mymalloc("LocalCand", (n_local_cand > 0 ? n_local_cand : 1) * sizeof(struct sc_particle_cand));
@@ -4784,8 +4715,7 @@ static void fof_secfof_particle_sample(FOFGroups * fof, const RandTable * const 
     }
     struct sc_particle_cand * cand = (struct sc_particle_cand *)
         mymalloc("Cand", n_cand * sizeof(struct sc_particle_cand));
-    MPI_Allgatherv(local_cand, n_local_cand * (int) sizeof(struct sc_particle_cand), MPI_BYTE,
-                   cand, byte_counts, byte_displs, MPI_BYTE, Comm);
+    MPIU_Allgatherv_records(local_cand, cand, recv_counts, sizeof(struct sc_particle_cand), Comm);
     qsort(cand, n_cand, sizeof(struct sc_particle_cand), cmp_sc_particle_cand);
 
     /* Sample local unseeded stars into per-candidate partial sums. */
@@ -4854,8 +4784,6 @@ static void fof_secfof_particle_sample(FOFGroups * fof, const RandTable * const 
     myfree(part_tot);
     myfree(cand);
     myfree(local_cand);
-    myfree(byte_displs);
-    myfree(byte_counts);
     myfree(recv_counts);
 }
 
@@ -4952,13 +4880,9 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
     int * q_counts = (int *) mymalloc2("BMqc", sizeof(int) * NTask);
     MPI_Allgather(&n_local_qual, 1, MPI_INT, q_counts, 1, MPI_INT, Comm);
     int64_t total_qual = 0;
-    int * q_displs = (int *) mymalloc2("BMqd", sizeof(int) * NTask);
-    for(i = 0; i < NTask; i++) {
-        q_displs[i] = total_qual;
+    for(i = 0; i < NTask; i++)
         total_qual += q_counts[i];
-    }
     if(total_qual == 0) {   /* no massive group anywhere: nothing to do (LIFO frees) */
-        myfree(q_displs);
         myfree(q_counts);
         return;
     }
@@ -4972,16 +4896,7 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
                 local_qual[k++] = fof->Group[g].base.GrNr;
     }
     int64_t * qual_grnr = (int64_t *) mymalloc2("BMqg", sizeof(int64_t) * total_qual);
-    int * qc_bytes = (int *) mymalloc2("BMqcb", sizeof(int) * NTask);
-    int * qd_bytes = (int *) mymalloc2("BMqdb", sizeof(int) * NTask);
-    for(i = 0; i < NTask; i++) {
-        qc_bytes[i] = q_counts[i] * (int) sizeof(int64_t);
-        qd_bytes[i] = q_displs[i] * (int) sizeof(int64_t);
-    }
-    MPI_Allgatherv(local_qual, n_local_qual * (int) sizeof(int64_t), MPI_BYTE,
-                   qual_grnr, qc_bytes, qd_bytes, MPI_BYTE, Comm);
-    myfree(qd_bytes);
-    myfree(qc_bytes);
+    MPIU_Allgatherv_records(local_qual, qual_grnr, q_counts, sizeof(int64_t), Comm);
     /* GrNr are globally unique per group -> qual_grnr is duplicate-free; sort for search. */
     qsort(qual_grnr, total_qual, sizeof(int64_t), cmp_int64_asc);
 
@@ -5031,23 +4946,11 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
     int * p_counts = (int *) mymalloc2("BMpc", sizeof(int) * NTask);
     MPI_Allgather(&n_pack_int, 1, MPI_INT, p_counts, 1, MPI_INT, Comm);
     int64_t total_members = 0;
-    int * p_displs = (int *) mymalloc2("BMpd", sizeof(int) * NTask);
-    for(i = 0; i < NTask; i++) {
-        p_displs[i] = total_members;
+    for(i = 0; i < NTask; i++)
         total_members += p_counts[i];
-    }
     struct bound_member * bm_global = (struct bound_member *) mymalloc2("BMglobal",
             sizeof(struct bound_member) * (total_members > 0 ? total_members : 1));
-    int * pc_bytes = (int *) mymalloc2("BMpcb", sizeof(int) * NTask);
-    int * pd_bytes = (int *) mymalloc2("BMpdb", sizeof(int) * NTask);
-    for(i = 0; i < NTask; i++) {
-        pc_bytes[i] = p_counts[i] * (int) sizeof(struct bound_member);
-        pd_bytes[i] = p_displs[i] * (int) sizeof(struct bound_member);
-    }
-    MPI_Allgatherv(bm_local, n_pack_int * (int) sizeof(struct bound_member), MPI_BYTE,
-                   bm_global, pc_bytes, pd_bytes, MPI_BYTE, Comm);
-    myfree(pd_bytes);
-    myfree(pc_bytes);
+    MPIU_Allgatherv_records(bm_local, bm_global, p_counts, sizeof(struct bound_member), Comm);
 
     /* ---- Step 3: sort by GrNr; process each owned qualifying group. ---- */
     qsort(bm_global, total_members, sizeof(struct bound_member), cmp_bound_member_grnr);
@@ -5153,12 +5056,10 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
 
     /* ---- Step 4: strict LIFO frees (reverse allocation order). ---- */
     myfree(bm_global);
-    myfree(p_displs);
     myfree(p_counts);
     myfree(bm_local);
     myfree(qual_grnr);
     myfree(local_qual);
-    myfree(q_displs);
     myfree(q_counts);
 }
 
@@ -5215,24 +5116,25 @@ fof_secfof_bound_massive_restrict(FOFGroups * fof, double atime, Cosmology * CP,
  *
  *     265k stars (z=9, Ng=512)  ->   0.03 GB/rank
  *       5M stars                ->   0.60 GB/rank
- *      16.8M stars              ->   2.00 GB/rank   <- hard limit, see below
+ *      16.9M stars (z=8, large) ->   2.01 GB/rank
  *
- * The hard limit is not memory but MPI: MPI_Allgatherv takes int counts and
- * displacements, and the ones here are BYTE counts, so the ceiling is
- * INT_MAX / sizeof(struct sb_star) ~ 16.8M member stars.  Beyond that a displacement
- * wraps negative and MPI reads or writes outside the buffer, so both the local and the
- * global count are checked below and the run aborts with a clear message instead.
+ * MPI_Allgatherv takes int counts and displacements, and the ones here are BYTE
+ * counts, so a single call is capped at INT_MAX / sizeof(struct sb_star) ~ 16.8M
+ * member stars.  The star gather is therefore split into <= 1 GB windows by
+ * MPIU_Allgatherv_records, which leaves the per-rank memory as the only ceiling
+ * (mymalloc2 aborts with the allocation size when it is reached).
  * The DM histograms add TotNgroups * SB_NBIN * 8 bytes per rank on top.
  *
- * Raising the ceiling, cheapest first:
+ * Lowering the per-rank cost, cheapest first:
  *   - shrink the record: store the position as a float offset from the group centre
  *     (better conditioned than absolute coordinates) and demote Vel/Mass/mGamma/
  *     scmass/msample/scm/initscm to float, which are only ever accumulated into
- *     doubles afterwards.  128 B -> ~80 B, i.e. ~26M stars.  A 1.6x reprieve, not a fix.
+ *     doubles afterwards.  128 B -> ~80 B.  A 1.6x reprieve, not a fix.
  *   - replace the replication with a distributed gather: each group is processed by
- *     its owning rank, which pulls only its own members.  That removes the ceiling
- *     entirely but needs real point-to-point communication, and the load imbalance is
- *     severe -- 93-96% of the member stars sit in ONE group.
+ *     its owning rank, which pulls only its own members.  That makes the cost scale
+ *     with the local share, but needs real point-to-point communication, and the load
+ *     imbalance can be severe -- 93-96% of the member stars sat in ONE group in the
+ *     z=9 / Ng=512 test catalogues.
  */
 
 /* Radial bins of the per-group DM profile.  The profile is only ever consumed
@@ -5359,13 +5261,9 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
     int * gc_counts = (int *) mymalloc2("SBgc", sizeof(int) * NTask);
     MPI_Allgather(&local_ngroups, 1, MPI_INT, gc_counts, 1, MPI_INT, Comm);
     int64_t total_groups = 0;
-    int * gc_displs = (int *) mymalloc2("SBgd", sizeof(int) * NTask);
-    for(i = 0; i < NTask; i++) {
-        gc_displs[i] = (int) total_groups;
+    for(i = 0; i < NTask; i++)
         total_groups += gc_counts[i];
-    }
     if(total_groups == 0) {
-        myfree(gc_displs);
         myfree(gc_counts);
         return;
     }
@@ -5374,14 +5272,6 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
         endrun(1, "BHseedSecFOFbound: %ld secFOF groups x %d radial bins overflows the "
                   "MPI_Allreduce count. Raise SecondFOFMinPrimaryLength or lower SB_NBIN.\n",
                   total_groups, SB_NBIN);
-    /* MPI_Allgatherv counts and displacements are `int`, and the ones below are BYTE
-     * counts, so the ceiling is INT_MAX / sizeof(record) -- not INT_MAX records.  An
-     * overflow here is silent (the displacement wraps negative and MPI reads or writes
-     * outside the buffer), so check rather than trust. */
-    if(total_groups > (int64_t) INT_MAX / (int64_t) sizeof(struct sb_group))
-        endrun(1, "BHseedSecFOFbound: %ld secFOF groups x %zu B exceeds the int byte range "
-                  "of MPI_Allgatherv (max %ld groups).\n", total_groups,
-                  sizeof(struct sb_group), (int64_t) INT_MAX / (int64_t) sizeof(struct sb_group));
 
     struct sb_group * sbg = (struct sb_group *)
         mymalloc2("SBgrp", sizeof(struct sb_group) * total_groups);
@@ -5396,16 +5286,7 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
             loc[g].Rmax = 0;
             loc[g].Rdm = 0;
         }
-        int * cb = (int *) mymalloc2("SBgcb", sizeof(int) * NTask);
-        int * db = (int *) mymalloc2("SBgdb", sizeof(int) * NTask);
-        for(i = 0; i < NTask; i++) {
-            cb[i] = gc_counts[i] * (int) sizeof(struct sb_group);
-            db[i] = gc_displs[i] * (int) sizeof(struct sb_group);
-        }
-        MPI_Allgatherv(loc, local_ngroups * (int) sizeof(struct sb_group), MPI_BYTE,
-                       sbg, cb, db, MPI_BYTE, Comm);
-        myfree(db);
-        myfree(cb);
+        MPIU_Allgatherv_records(loc, sbg, gc_counts, sizeof(struct sb_group), Comm);
         myfree(loc);
     }
     qsort(sbg, total_groups, sizeof(struct sb_group), cmp_sb_group);
@@ -5416,33 +5297,23 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
         if(P[i].Type == 4 && P[i].GrNr >= 0)
             n_local_star++;
 
-    /* The gathered records are replicated on EVERY rank, so both the int byte range of
-     * MPI_Allgatherv and the per-rank memory scale with the GLOBAL star count and do
-     * not improve by adding ranks.  At sizeof(struct sb_star) = 120 B the int ceiling
-     * is ~17.9M member stars (~2.0 GB/rank, so the two limits bite at about the same
-     * point).  Guard the local count before it is narrowed to int, and the global one
-     * before any byte displacement is formed from it. */
-    const int64_t sb_star_max = (int64_t) INT_MAX / (int64_t) sizeof(struct sb_star);
-    if(n_local_star > sb_star_max)
-        endrun(1, "BHseedSecFOFbound: %ld member stars on this rank alone exceeds the int "
-                  "byte range of MPI_Allgatherv (max %ld).\n", n_local_star, sb_star_max);
-
-    int * sc_counts = (int *) mymalloc2("SBsc", sizeof(int) * NTask);
+    /* The gathered records are replicated on EVERY rank, so the per-rank memory scales
+     * with the GLOBAL star count and does not improve by adding ranks.  The gather
+     * itself is chunked by MPIU_Allgatherv_records, so the int byte range of
+     * MPI_Allgatherv no longer caps the star count; the replicated array is
+     * sizeof(struct sb_star) * total_stars per rank, and mymalloc2 aborts with a clear
+     * message if that no longer fits. */
+    if(n_local_star > INT_MAX)
+        endrun(1, "BHseedSecFOFbound: %ld member stars on this rank overflow the int "
+                  "record count.\n", n_local_star);
     int n_local_star_int = (int) n_local_star;
+    int * sc_counts = (int *) mymalloc2("SBsc", sizeof(int) * NTask);
     MPI_Allgather(&n_local_star_int, 1, MPI_INT, sc_counts, 1, MPI_INT, Comm);
     int64_t total_stars = 0;
-    int * sc_displs = (int *) mymalloc2("SBsd", sizeof(int) * NTask);
-    for(i = 0; i < NTask; i++) {
-        sc_displs[i] = (int) total_stars;
+    for(i = 0; i < NTask; i++)
         total_stars += sc_counts[i];
-    }
-    if(total_stars > sb_star_max)
-        endrun(1, "BHseedSecFOFbound: %ld member stars x %zu B exceeds the int byte range "
-                  "of MPI_Allgatherv (max %ld stars, ~%.1f GB/rank replicated). The all-rank "
-                  "star replication has to be replaced by a distributed gather to go "
-                  "further; see the header comment on fof_secfof_bound_restrict.\n",
-                  total_stars, sizeof(struct sb_star), sb_star_max,
-                  sb_star_max * (double) sizeof(struct sb_star) / 1073741824.0);
+    message(0, "BHseedSecFOFbound: replicating %ld member stars on every rank (%.2f GB/rank).\n",
+            total_stars, total_stars * (double) sizeof(struct sb_star) / 1073741824.0);
 
     struct sb_star * sbs = (struct sb_star *)
         mymalloc2("SBstar", sizeof(struct sb_star) * (total_stars > 0 ? total_stars : 1));
@@ -5484,16 +5355,7 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
              * host argmax orders exactly like the unrestricted one. */
             m->scm *= sc_seed_host_zweight(m->zbirth);
         }
-        int * cb = (int *) mymalloc2("SBscb", sizeof(int) * NTask);
-        int * db = (int *) mymalloc2("SBsdb", sizeof(int) * NTask);
-        for(i = 0; i < NTask; i++) {
-            cb[i] = sc_counts[i] * (int) sizeof(struct sb_star);
-            db[i] = sc_displs[i] * (int) sizeof(struct sb_star);
-        }
-        MPI_Allgatherv(loc, n_local_star_int * (int) sizeof(struct sb_star), MPI_BYTE,
-                       sbs, cb, db, MPI_BYTE, Comm);
-        myfree(db);
-        myfree(cb);
+        MPIU_Allgatherv_records(loc, sbs, sc_counts, sizeof(struct sb_star), Comm);
         myfree(loc);
     }
     qsort(sbs, total_stars, sizeof(struct sb_star), cmp_sb_star);
@@ -5992,10 +5854,8 @@ fof_secfof_bound_restrict(FOFGroups * fof, int mode, int apply,
     myfree(gend);
     myfree(gstart);
     myfree(sbs);
-    myfree(sc_displs);
     myfree(sc_counts);
     myfree(sbg);
-    myfree(gc_displs);
     myfree(gc_counts);
 }
 

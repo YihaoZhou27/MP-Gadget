@@ -493,6 +493,51 @@ MPIU_Any(int condition, MPI_Comm comm)
 }
 
 void
+MPIU_Allgatherv_records(const void * sendbuf, void * recvbuf, const int * nrec,
+                        size_t recsize, MPI_Comm comm)
+{
+    int NTask, ThisTask, t;
+    MPI_Comm_size(comm, &NTask);
+    MPI_Comm_rank(comm, &ThisTask);
+
+    /* Record offsets of each rank's block in the global array, in 64 bits. */
+    int64_t * start = (int64_t *) mymalloc2("AGstart", sizeof(int64_t) * (NTask + 1));
+    start[0] = 0;
+    for(t = 0; t < NTask; t++)
+        start[t + 1] = start[t] + nrec[t];
+    const int64_t total = start[NTask];
+    int64_t win = MPIU_GATHER_CHUNK_BYTES / (int64_t) recsize;
+    if(win < 1) win = 1;
+
+    /* Walk the GLOBAL array in windows of at most MPIU_GATHER_CHUNK_BYTES.  Each rank
+     * sends the part of its block inside the window (usually nothing), so every byte
+     * count, displacement and per-call total handed to MPI stays inside int.  All ranks
+     * derive the windows from the same nrec, so they make the same number of calls. */
+    int * cb = (int *) mymalloc2("AGcount", sizeof(int) * NTask);
+    int * db = (int *) mymalloc2("AGdispl", sizeof(int) * NTask);
+    int64_t w0;
+    for(w0 = 0; w0 < total; w0 += win) {
+        const int64_t w1 = (w0 + win < total) ? w0 + win : total;
+        for(t = 0; t < NTask; t++) {
+            const int64_t lo = (start[t] > w0) ? start[t] : w0;
+            const int64_t hi = (start[t + 1] < w1) ? start[t + 1] : w1;
+            const int64_t n = (hi > lo) ? hi - lo : 0;
+            cb[t] = (int) (n * (int64_t) recsize);
+            db[t] = (int) ((n > 0 ? lo - w0 : 0) * (int64_t) recsize);
+        }
+        const int64_t my_lo = (start[ThisTask] > w0) ? start[ThisTask] : w0;
+        const char * sp = (const char *) sendbuf;
+        if(cb[ThisTask] > 0)
+            sp += (my_lo - start[ThisTask]) * (int64_t) recsize;
+        MPI_Allgatherv(sp, cb[ThisTask], MPI_BYTE,
+                       (char *) recvbuf + w0 * (int64_t) recsize, cb, db, MPI_BYTE, comm);
+    }
+    myfree(db);
+    myfree(cb);
+    myfree(start);
+}
+
+void
 MPIU_write_pids(char * filename)
 {
     MPI_Comm comm = MPI_COMM_WORLD;
