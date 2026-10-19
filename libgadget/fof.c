@@ -1017,6 +1017,8 @@ static int64_t fof_grid_count_local(int64_t * n_exceptional)
     return n;
 }
 
+static int cmp_int64_asc(const void * a, const void * b);
+
 /* Collective: decide whether every rank may take the grid path.  Returns the
  * same answer on all ranks (all reductions are over Comm), because fof_fof()
  * must not diverge. */
@@ -1060,16 +1062,22 @@ static int fof_grid_preflight(MPI_Comm Comm)
                    "to the treewalk to preserve its asymmetric handling.\n", n_exceptional);
         return 0;
     }
-    /* (2) MPI_Allgatherv counts and displacements are int, and the ones used
-     * below are BYTE counts, so the ceiling is INT_MAX/sizeof(record).  An
-     * overflow is silent, so check rather than trust. */
-    const int64_t maxrec = (int64_t) INT_MAX / (int64_t) sizeof(struct fof_grid_part);
+    /* (2) Record counts.  The replication goes through MPIU_Allgatherv_records,
+     * which walks the global array in windows so every byte count and
+     * displacement handed to MPI stays inside int whatever the total.  The
+     * old ceiling of a single MPI_Allgatherv, INT_MAX/sizeof(record) = 53.7M
+     * stars at 40 B, was reached by SC-largerun at z = 7.0 and sent every
+     * seeding pass to the treewalk (hours per iteration); it no longer
+     * applies.  What is still int is the per-rank RECORD count the helper
+     * takes and the record index kept in fof_grid_key, so the local and the
+     * global counts must each fit an int.  An overflow there would be silent,
+     * so check rather than trust. */
     int64_t maxlocal = 0;
     MPI_Allreduce(&n_local, &maxlocal, 1, MPI_INT64, MPI_MAX, Comm);
-    if(maxlocal > maxrec || n_total > maxrec) {
+    if(maxlocal > (int64_t) INT_MAX || n_total > (int64_t) INT_MAX) {
         message(0, "FOF grid: %ld primary particles (max %ld on a rank) exceeds the int "
-                   "byte range of MPI_Allgatherv (max %ld); using the treewalk.\n",
-                   n_total, maxlocal, maxrec);
+                   "record range of the grid arrays (max %d); using the treewalk.\n",
+                   n_total, maxlocal, INT_MAX);
         return 0;
     }
     /* (3) Memory budget.  The replicated arrays scale with the GLOBAL count and
@@ -1083,23 +1091,61 @@ static int fof_grid_preflight(MPI_Comm Comm)
      * pass and the allocator would abort moments later, which is exactly the
      * failure the fallback exists to prevent.
      *
-     * Worst case is one occupied cell per particle, which is what ncell_est
-     * assumes; in practice ncells is ~10x smaller.
+     * The occupied-cell count is bounded from above by the sum over ranks of
+     * each rank's DISTINCT local cell keys: every occupied cell holds a
+     * particle on some rank, so the sum can only overcount, by the cells that
+     * straddle a domain boundary and are seen from both sides.  The
+     * one-cell-per-particle worst case it replaces was ~3x the real count
+     * (SC-largerun at z = 6.1: 40M cells for 134M stars) and made this gate
+     * refuse a pass whose measured peak, 10.3 GB, had 4 GB of room against the
+     * 18.2 GB free on the tightest rank.  The keys are computed exactly as the
+     * linker computes them (same geometry, same wrap, same floor).
      *
      * Each rank tests its OWN peak against its OWN free space and the verdicts
      * are ANDed.  n_local, NumPart and the free space all differ across ranks,
      * so comparing one rank's need against another's headroom would be
      * meaningless. */
-    const int64_t ncell_est = n_total;          /* <= one occupied cell per particle */
+    int64_t ncell_local = 0;
+    if(n_local > 0) {
+        int64_t * lkeys = (int64_t *) mymalloc("GridPreKey", sizeof(int64_t) * n_local);
+        int64_t k = 0;
+        int i;
+        for(i = 0; i < PartManager->NumPart; i++) {
+            if(!fof_is_primary_link(i))
+                continue;
+            int64_t c[3];
+            int d;
+            for(d = 0; d < 3; d++) {
+                c[d] = (int64_t) floor(fof_periodic_wrap(P[i].Pos[d], PartManager->BoxSize) / a_chk);
+                c[d] %= ncell_chk;
+                if(c[d] < 0) c[d] += ncell_chk;
+            }
+            lkeys[k++] = (c[0] * ncell_chk + c[1]) * ncell_chk + c[2];
+        }
+        if(k != n_local)
+            endrun(1, "FOF grid: counted %ld primary particles but keyed %ld. This is a bug.\n",
+                   n_local, k);
+        qsort(lkeys, n_local, sizeof(int64_t), cmp_int64_asc);
+        for(k = 0; k < n_local; k++)
+            if(k == 0 || lkeys[k] != lkeys[k - 1])
+                ncell_local++;
+        myfree(lkeys);
+    }
+    int64_t ncell_est = 0;
+    MPI_Allreduce(&ncell_local, &ncell_est, 1, MPI_INT64, MPI_SUM, Comm);
+    if(ncell_est > n_total)
+        ncell_est = n_total;                    /* never more cells than particles */
     const int64_t alloc_block = 2 * 4096;       /* ALIGNMENT round-up + header, memory.c */
-    /* counts, displs, loc, all, gk, cstart, ccount, ckey, par, sten, cminid,
-     * cmintask are the 12 blocks live at peak.  cb/db during the Allgatherv are
-     * freed before the cell arrays, so they are not part of that peak -- counted
-     * anyway (14 blocks, 4*NTask ints) because being conservative here costs
+    /* counts, loc, all, gk, cstart, ccount, ckey, par, sten, cminid, cmintask
+     * are the 11 blocks live at peak.  MPIU_Allgatherv_records takes three more
+     * NTask-sized blocks (offsets, counts, displacements) on the OTHER end of
+     * the allocator for the duration of the gather, freed before the cell
+     * arrays exist, so they are not part of that peak -- counted anyway
+     * (14 blocks, 4*NTask words) because being conservative here costs
      * ~16 KB and being wrong costs an aborted run.  The stencil itself is a few
      * hundred offsets; bounded generously below. */
     int64_t nblocks = 14;
-    int64_t need = (int64_t) NTask * 4 * (int64_t) sizeof(int)          /* counts,displs,cb,db */
+    int64_t need = (int64_t) NTask * 4 * (int64_t) sizeof(int64_t)      /* counts + gather scratch */
                  + n_local   * (int64_t) sizeof(struct fof_grid_part)   /* GridLoc  */
                  + n_total   * (int64_t) sizeof(struct fof_grid_part)   /* GridAll  */
                  + n_total   * (int64_t) sizeof(struct fof_grid_key)    /* GridKey  */
@@ -1126,10 +1172,24 @@ static int fof_grid_preflight(MPI_Comm Comm)
         int64_t need_max = 0, freeb_min = 0;
         MPI_Allreduce(&need, &need_max, 1, MPI_INT64, MPI_MAX, Comm);
         MPI_Allreduce((void *) &freeb, &freeb_min, 1, MPI_INT64, MPI_MIN, Comm);
-        message(0, "FOF grid: peak need up to %.2f GB/rank against %.2f GB free on the "
-                   "tightest rank (25%% margin); using the treewalk.\n",
-                   need_max / 1073741824.0, freeb_min / 1073741824.0);
+        message(0, "FOF grid: %ld primary particles in <= %ld cells; peak need up to %.2f "
+                   "GB/rank against %.2f GB free on the tightest rank (25%% margin); using "
+                   "the treewalk.\n",
+                   n_total, ncell_est, need_max / 1073741824.0, freeb_min / 1073741824.0);
         return 0;
+    }
+    /* Report the headroom on every pass that takes the grid path.  The
+     * replicated arrays grow with the GLOBAL star count and do not shrink by
+     * adding ranks, so this is the number to watch as a run advances: the
+     * memory gate above is the next ceiling after the record-count one. */
+    {
+        int64_t need_max = 0, freeb_min = 0;
+        MPI_Allreduce(&need, &need_max, 1, MPI_INT64, MPI_MAX, Comm);
+        MPI_Allreduce((void *) &freeb, &freeb_min, 1, MPI_INT64, MPI_MIN, Comm);
+        message(0, "FOF grid: %ld primary particles (max %ld on a rank) in <= %ld cells; "
+                   "peak need up to %.2f GB/rank against %.2f GB free on the tightest rank.\n",
+                   n_total, maxlocal, ncell_est, need_max / 1073741824.0,
+                   freeb_min / 1073741824.0);
     }
     return 1;
 }
@@ -1168,14 +1228,11 @@ static void fof_label_primary_grid(struct fof_particle_list * HaloLabel, MPI_Com
     const int64_t n_local = fof_grid_count_local(&nx_dummy);
 
     int * counts = (int *) mymalloc("GridCnt", sizeof(int) * NTask);
-    int * displs = (int *) mymalloc("GridDsp", sizeof(int) * NTask);
     int n_local_int = (int) n_local;
     MPI_Allgather(&n_local_int, 1, MPI_INT, counts, 1, MPI_INT, Comm);
     int64_t n_total = 0;
-    for(i = 0; i < NTask; i++) {
-        displs[i] = (int) n_total;
+    for(i = 0; i < NTask; i++)
         n_total += counts[i];
-    }
 
     struct fof_grid_part * loc = (struct fof_grid_part *)
         mymalloc("GridLoc", sizeof(struct fof_grid_part) * (n_local > 0 ? n_local : 1));
@@ -1194,21 +1251,16 @@ static void fof_label_primary_grid(struct fof_particle_list * HaloLabel, MPI_Com
         }
     }
 
-    /* ---- 2. replicate it ---- */
+    /* ---- 2. replicate it ----
+     * Chunked gather.  A single MPI_Allgatherv takes int BYTE counts and
+     * displacements, which capped the replication at INT_MAX/sizeof(record)
+     * = 53.7M stars and silently sent SC-largerun to the treewalk at z = 7.0.
+     * MPIU_Allgatherv_records walks the global array in windows and lays the
+     * records out exactly as the single call did -- rank-ordered, each block
+     * at its record offset -- so the linker below sees the same array. */
     struct fof_grid_part * all = (struct fof_grid_part *)
         mymalloc("GridAll", sizeof(struct fof_grid_part) * (n_total > 0 ? n_total : 1));
-    {
-        int * cb = (int *) mymalloc("GridCb", sizeof(int) * NTask);
-        int * db = (int *) mymalloc("GridDb", sizeof(int) * NTask);
-        for(i = 0; i < NTask; i++) {
-            cb[i] = counts[i] * (int) sizeof(struct fof_grid_part);
-            db[i] = displs[i] * (int) sizeof(struct fof_grid_part);
-        }
-        MPI_Allgatherv(loc, n_local_int * (int) sizeof(struct fof_grid_part), MPI_BYTE,
-                       all, cb, db, MPI_BYTE, Comm);
-        myfree(db);
-        myfree(cb);
-    }
+    MPIU_Allgatherv_records(loc, all, counts, sizeof(struct fof_grid_part), Comm);
 
     /* ---- 3. cell geometry ----
      * Computed by the same helper the preflight used, so the two cannot
@@ -1496,9 +1548,10 @@ static void fof_label_primary_grid(struct fof_particle_list * HaloLabel, MPI_Com
                used_peak / 1048576.0);
 
     /* LIFO: free in exact reverse order of allocation.  Allocation order is
-     * counts, displs, loc, all, gk, cstart, ccount, ckey, par, sten, cminid,
-     * cmintask -- note sten sits between par and cminid, so it must be freed
-     * before par, not after. */
+     * counts, loc, all, gk, cstart, ccount, ckey, par, sten, cminid, cmintask
+     * -- note sten sits between par and cminid, so it must be freed before
+     * par, not after.  (The gather helper's scratch lives on the other end of
+     * the allocator and is gone before gk is allocated.) */
     myfree(cmintask);
     myfree(cminid);
     myfree(sten);
@@ -1509,7 +1562,6 @@ static void fof_label_primary_grid(struct fof_particle_list * HaloLabel, MPI_Com
     myfree(gk);
     myfree(all);
     myfree(loc);
-    myfree(displs);
     myfree(counts);
 
     message(0, "Local groups found.\n");
